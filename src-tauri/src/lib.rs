@@ -1,10 +1,12 @@
 // `mod config;` lands in Phase 1 §1.2 (laptop config loader).
 // `mod keyring;` lands in Phase 1 §1.3 (macOS Keychain keypair generator).
 // `mod transport;` lands in Phase 1 §1.4 (SSH transport + IPC bindings).
+// `mod commands;` lands in Phase 1 §1.5 (Tauri IPC bindings for the transport).
 // They are added incrementally to the workspace below.
 
 mod config;
 mod keyring;
+mod transport;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
