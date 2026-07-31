@@ -1,10 +1,13 @@
 // `mod config;` lands in Phase 1 §1.2 (laptop config loader).
 // `mod keyring;` lands in Phase 1 §1.3 (macOS Keychain keypair generator).
 // `mod transport;` lands in Phase 1 §1.4 (SSH transport + IPC bindings).
+// `mod commands;` lands in Phase 1 §1.5 (Tauri IPC bindings for the transport).
 // They are added incrementally to the workspace below.
 
+mod commands;
 mod config;
 mod keyring;
+mod transport;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -33,7 +36,9 @@ pub fn run() {
             greet,
             get_config,
             generate_ssh_key,
-            get_ssh_public_key
+            get_ssh_public_key,
+            commands::health_check_transport,
+            commands::push_to_vps,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
