@@ -36,6 +36,7 @@ zeroize = { version = "1", features = ["derive"] }
 walkdir = "2"
 tempfile = "3"
 icalendar = "0.7"
+tokio-cron-scheduler = "0.13"
 
 [profile.release]
 opt-level = 3
