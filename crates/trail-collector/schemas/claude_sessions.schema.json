@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrailRawClaudeSessions",
+  "type": "object",
+  "required": ["source", "captured_at", "date", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "source":      { "type": "string", "enum": ["claude_sessions"] },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "date":        { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "payload": {
+      "type": "object",
+      "required": ["sessions"],
+      "additionalProperties": false,
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["session_id", "project", "message_count", "last_message"],
+            "additionalProperties": false,
+            "properties": {
+              "session_id":    { "type": "string" },
+              "project":       { "type": "string" },
+              "jsonl_path":    { "type": "string" },
+              "message_count": { "type": "integer", "minimum": 0 },
+              "last_message": {
+                "type": "object",
+                "required": ["role", "content_headline"],
+                "additionalProperties": false,
+                "properties": {
+                  "role":             { "type": "string", "enum": ["user", "assistant", "tool_result"] },
+                  "content_headline": { "type": "string", "maxLength": 280 },
+                  "at":               { "type": ["string", "null"], "format": "date-time" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
