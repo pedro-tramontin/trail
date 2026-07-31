@@ -87,6 +87,9 @@ if [[ -z "$TRAIL_E2E_HOST" || "$SKIP_SSH" -eq 1 ]]; then
     else
         echo "SKIPPED: --skip-ssh flag set — re-run without the flag on the macOS laptop."
     fi
+    echo "  host:      ${TRAIL_E2E_HOST:-<unset>}"
+    echo "  binary:    ${TRAIL_E2E_BINARY:-target/release/trail-collector}"
+    echo "  ssh key:   ${TRAIL_E2E_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
     echo "  (this is a feature: the script is PR-able even from a host that can't reach Tailscale)"
     exit 0
 fi
