@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "number": 142,
+      "title": "Add onboarding wizard",
+      "state": "OPEN",
+      "url": "https://github.com/pedro-tramontin/trail/pull/142",
+      "createdAt": "2026-07-30T15:00:00Z",
+      "updatedAt": "2026-07-31T10:00:00Z",
+      "mergedAt": null,
+      "reviews": { "totalCount": 2 }
+    },
+    {
+      "number": 140,
+      "title": "Fix CI matrix",
+      "state": "MERGED",
+      "url": "https://github.com/pedro-tramontin/trail/pull/140",
+      "createdAt": "2026-07-29T08:00:00Z",
+      "updatedAt": "2026-07-30T12:30:00Z",
+      "mergedAt": "2026-07-30T12:30:00Z",
+      "reviews": { "totalCount": 1 }
+    }
+  ]
+}

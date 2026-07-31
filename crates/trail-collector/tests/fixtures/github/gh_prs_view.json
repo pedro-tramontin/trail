@@ -1,0 +1,6 @@
+{
+  "reviews": [
+    { "author": { "login": "alice" }, "state": "APPROVED",  "submittedAt": "2026-07-31T09:30:00Z" },
+    { "author": { "login": "bob"   }, "state": "COMMENTED", "submittedAt": "2026-07-31T10:00:00Z" }
+  ]
+}
