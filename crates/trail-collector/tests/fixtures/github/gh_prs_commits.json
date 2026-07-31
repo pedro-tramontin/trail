@@ -1,0 +1,6 @@
+{
+  "commits": [
+    { "oid": "abc123", "messageHeadline": "Add welcome screen" },
+    { "oid": "def456", "messageHeadline": "Lint fixes" }
+  ]
+}
