@@ -1,0 +1,2 @@
+{"sessionId":"sess-2","cwd":"/Users/pedro/personal","type":"user","message":{"role":"user","content":"Fix flaky integration test"},"timestamp":"2026-07-31T11:00:00Z"}
+{"sessionId":"sess-2","cwd":"/Users/pedro/personal","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Confirmed flaky due to clock skew."}]},"timestamp":"2026-07-31T11:03:00Z"}
