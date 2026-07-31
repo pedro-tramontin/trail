@@ -1,0 +1,34 @@
+[package]
+name = "trail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Passive workday capture and VPS push. Tauri 2 menu-bar app."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "trail_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+# Use workspace-pinned versions.
+tauri = { workspace = true }
+tauri-plugin-os = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+ssh2 = { workspace = true }
+async-trait = { workspace = true }
+ssh-key = { workspace = true }
+keyring = { workspace = true }
+zeroize = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
