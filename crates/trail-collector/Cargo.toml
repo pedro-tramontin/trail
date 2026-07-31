@@ -1,0 +1,25 @@
+[package]
+name = "trail-collector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Generic VPS-side collector for Trail. nginx/envoy-style: --config <path>"
+
+[[bin]]
+name = "trail-collector"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+jsonschema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

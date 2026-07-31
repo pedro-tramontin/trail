@@ -1,0 +1,28 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# OS
+.DS_Store
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Local config (never commit)
+.trail/
+
+# Build artifacts populated by build.rs (NOT source — see §1.10)
+src-tauri/resources/trail-collector
+src-tauri/resources/day-summary.schema.json
