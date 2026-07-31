@@ -114,6 +114,8 @@ pub mod github;
 // (`super::super::synth_X::synthesize`) without exposing them on the
 // library's public surface.
 #[allow(unused_imports, dead_code)]
+pub(crate) mod synth_calendar;
+#[allow(unused_imports, dead_code)]
 pub(crate) mod synth_claude;
 #[allow(unused_imports, dead_code)]
 pub(crate) mod synth_github;
