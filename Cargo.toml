@@ -30,7 +30,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ssh2 = "0.9"
 async-trait = "0.1"
-ssh-key = { version = "0.6", features = ["ed25519", "rand_core"] }
+ssh-key = { version = "0.6", features = ["ed25519", "rand_core", "getrandom"] }
 keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 zeroize = { version = "1", features = ["derive"] }
 walkdir = "2"
