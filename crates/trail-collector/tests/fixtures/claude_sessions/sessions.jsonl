@@ -1,0 +1,4 @@
+{"sessionId":"sess-1","cwd":"/Users/pedro/work/trail","type":"user","message":{"role":"user","content":"Onboarding wizard design"},"timestamp":"2026-07-31T10:00:00Z"}
+{"sessionId":"sess-1","cwd":"/Users/pedro/work/trail","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will read the design doc first and propose three onboarding variants."}]},"timestamp":"2026-07-31T10:01:30Z"}
+{"sessionId":"sess-1","cwd":"/Users/pedro/work/trail","type":"user","message":{"role":"user","content":"Try variant 2."},"timestamp":"2026-07-31T10:05:00Z"}
+{"sessionId":"sess-1","cwd":"/Users/pedro/work/trail","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Variant 2 is fine. I will write the plan as variant 2 — three phases."}]},"timestamp":"2026-07-31T10:10:00Z"}
