@@ -26,3 +26,8 @@ src-tauri/gen/
 # Build artifacts populated by build.rs (NOT source — see §1.10)
 src-tauri/resources/trail-collector
 src-tauri/resources/day-summary.schema.json
+# Phase 2 §2.2 — github.schema.json + the future §2.3 / §2.4 schemas
+# are rebuilt from crates/trail-collector/schemas/ on every cargo build.
+src-tauri/resources/github.schema.json
+src-tauri/resources/claude_sessions.schema.json
+src-tauri/resources/calendar.schema.json
