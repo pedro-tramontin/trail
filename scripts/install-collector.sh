@@ -187,72 +187,96 @@ run "scp $SCHEMA_PATH $VPS_HOST:~/.trail/schema/day-summary.schema.json" \
 # Paths are derived from the user's home dir so the install is
 # portable across VPS flavors (no /home/<user> hardcoding — we use
 # ~/ for everything except the binary's --remote-dir).
+#
+# IMPORTANT (§5b D1 fix): the JSON + cron paths are rendered on the
+# SERVER using the server's $HOME, NOT the developer's laptop $HOME.
+# The heredoc body is single-quoted (<<'REMOTE_EOF') so neither
+# client-side nor server-side variable expansion happens inside the
+# body; REMOTE_HOME and REMOTE_DIR are explicit server-side locals
+# so their values resolve inside the heredoc body via normal bash
+# expansion. REMOTE_DIR is forwarded from the laptop via "$1" so
+# the server (which doesn't know the arg) has access.
 
-REMOTE_SCHEMA="$HOME/.trail/schema/day-summary.schema.json"
-REMOTE_INBOX="$HOME/.trail/inbox"
-REMOTE_PROCESSED="$HOME/.trail/processed"
-REMOTE_FAILED="$HOME/.trail/failed"
-REMOTE_PLANS="$HOME/.hermes/plans/career-coaching-pedro/daily"
-REMOTE_LOG="$HOME/.trail/collector.log"
-REMOTE_CONFIG="$HOME/.trail/collector.json"
-REMOTE_TEMPLATE="{date}.md"
+# Step 5 + 6 + 7 are folded into a single SSH roundtrip so the
+# server does all the path rendering in one shot. The same heredoc
+# body is printed verbatim in --dry-run mode, so the dry-run is an
+# honest preview of what the server receives (with $HOME / $1 left
+# intact for the operator to verify by eye).
+#
+# `bash -s -- "$REMOTE_DIR"` runs the heredoc body with $REMOTE_DIR
+# bound to $1. NOTE: the outer REMOTE_EOF heredoc delimiter is
+# SINGLE-QUOTED so neither client- nor server-side expansion happens
+# inside the body; variables inside the body expand via normal bash
+# rules at execution time on the SERVER.
+REMOTE_BODY="$(cat <<'REMOTE_EOF'
+set -euo pipefail
+REMOTE_HOME="$HOME"
+REMOTE_DIR="$1"
+REMOTE_CONFIG="$REMOTE_HOME/.trail/collector.json"
+REMOTE_LOG="$REMOTE_HOME/.trail/collector.log"
+CRON_MARKER="trail-collector --config"
 
-# Use a heredoc on the remote side so the json is rendered server-side
-# from server-known $HOME. We send the JSON as a single-quoted heredoc
-# to avoid client-side expansion.
-ssh_cmd "write ~/.trail/collector.json" "$(cat <<REMOTE_EOF
-cat > $REMOTE_CONFIG <<'JSON_EOF'
+# Render collector.json on the server side.
+cat > "$REMOTE_CONFIG" <<JSON_EOF
 {
-  "inbox_dir":         "$REMOTE_INBOX",
-  "processed_dir":     "$REMOTE_PROCESSED",
-  "failed_dir":        "$REMOTE_FAILED",
-  "plan_root":         "$REMOTE_PLANS",
-  "plan_template":     "$REMOTE_TEMPLATE",
-  "schema_path":       "$REMOTE_SCHEMA",
-  "log_path":          "$REMOTE_LOG",
-  "user":              "$VPS_USER",
+  "inbox_dir":         "$REMOTE_HOME/.trail/inbox",
+  "processed_dir":     "$REMOTE_HOME/.trail/processed",
+  "failed_dir":        "$REMOTE_HOME/.trail/failed",
+  "plan_root":         "$REMOTE_HOME/.hermes/plans/career-coaching-pedro/daily",
+  "plan_template":     "{date}.md",
+  "schema_path":       "$REMOTE_HOME/.trail/schema/day-summary.schema.json",
+  "log_path":          "$REMOTE_HOME/.trail/collector.log",
+  "user":              "${SUDO_USER:-${USER:-}}",
   "schema_validation": "strict"
 }
 JSON_EOF
-echo wrote $REMOTE_CONFIG
+echo "wrote $REMOTE_CONFIG"
+
+# Install the cron entry idempotently (strip prior marker line, then
+# append). NOTE: cron does not honour shell-style quoting in its
+# command field; paths with spaces must be avoided. Our paths
+# contain no spaces, so a bare substitution is safe.
+CRON_LINE="*/5 * * * * $REMOTE_DIR/trail-collector --config $REMOTE_CONFIG once >> $REMOTE_LOG 2>&1"
+( crontab -l 2>/dev/null | grep -v -F "$CRON_MARKER" || true ) \
+    | { cat; echo "$CRON_LINE"; } | crontab -
+echo "installed cron: $CRON_LINE"
+
+# Create the working dirs the collector --health check requires.
+mkdir -p \
+    "$REMOTE_HOME/.trail/inbox" \
+    "$REMOTE_HOME/.trail/processed" \
+    "$REMOTE_HOME/.trail/failed" \
+    "$REMOTE_HOME/.hermes/plans/career-coaching-pedro/daily" \
+    && echo "mkdirs ok"
 REMOTE_EOF
 )"
 
-# ---- step 6: install the cron entry (idempotent) ----------------------
-# The marker is the full cron line (unique per VPS user). Strip any
-# prior line that contains "trail-collector --config" then append the
-# new line. Using `crontab -` (read from stdin) is portable across
-# Linux/macOS crontabs.
+# For dry-run: show the full command the server will receive, including
+# the `bash -s -- "$REMOTE_DIR"` invocation — this lets the operator
+# sanity-check the path-forwarding by eye. For a real run: hand the
+# body to `bash -s -- "$REMOTE_DIR"` over SSH.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '  [dry-run] ssh %s bash -s -- %s\n' "$VPS_HOST" "$REMOTE_DIR"
+    printf '%s\n' "$REMOTE_BODY" | sed 's/^/    /'
+else
+    printf '  >> ssh %s bash -s -- %s\n' "$VPS_HOST" "$REMOTE_DIR"
+    # The body is passed to the remote shell via stdin (here-string);
+    # $REMOTE_DIR is intentionally expanded client-side so it travels
+    # as $1 to the remote bash (which then sets it as REMOTE_DIR=$1
+    # at the top of the body). Inside the body, $HOME and all the
+    # REMOTE_* locals resolve server-side via bash's normal rules.
+    # shellcheck disable=SC2029
+    ssh "$VPS_HOST" "bash -s -- '$REMOTE_DIR'" <<<"$REMOTE_BODY"
+fi
 
-CRON_LINE="*/5 * * * * $REMOTE_BIN --config $REMOTE_CONFIG once >> $REMOTE_LOG 2>&1"
-CRON_MARKER="trail-collector --config"
-
-# Escape any single quotes in the rendered cron line (defensive — the
-# line as built has none, but if someone customizes the marker this
-# guard keeps the heredoc sane).
-CRON_LINE_ESCAPED="${CRON_LINE//\'/\'\\\'\'}"
-
-ssh_cmd "install cron entry (idempotent)" "$(cat <<REMOTE_EOF
-( crontab -l 2>/dev/null | grep -v -F '$CRON_MARKER' || true ) | { cat; echo '$CRON_LINE_ESCAPED'; } | crontab -
-echo "installed cron: $CRON_LINE_ESCAPED"
-crontab -l | grep -F '$CRON_MARKER' || true
-REMOTE_EOF
-)"
-
-# ---- step 7: mkdir the working dirs -----------------------------------
-# The collector's --health check requires inbox_dir, processed_dir,
-# failed_dir, and plan_root to exist. Create them now so the
-# post-install health probe is honest.
-
-ssh_cmd "mkdir -p $REMOTE_INBOX $REMOTE_PROCESSED $REMOTE_FAILED $REMOTE_PLANS" \
-    "mkdir -p '$REMOTE_INBOX' '$REMOTE_PROCESSED' '$REMOTE_FAILED' '$REMOTE_PLANS' && echo ok"
-
-# ---- step 8: post-install health probe --------------------------------
+# ---- step 6: post-install health probe --------------------------------
 # Runs the collector's --health mode with the freshly-written config.
 # A successful run prints {"ok": true, ...} and exits 0.
+# Use ~ on the server side (the remote shell expands it); the binary
+# path is built from the client-side $REMOTE_DIR flag for display only.
 
-ssh_cmd "post-install: $REMOTE_BIN --config $REMOTE_CONFIG health" \
-    "$REMOTE_BIN --config $REMOTE_CONFIG health"
+ssh_cmd "post-install: $REMOTE_BIN --config ~/.trail/collector.json health" \
+    "$REMOTE_BIN --config ~/.trail/collector.json health"
 
 # ---- done -------------------------------------------------------------
 
@@ -262,6 +286,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 else
     echo
     echo "install complete. cron will run $REMOTE_BIN --once every 5 minutes."
-    echo "manual run: ssh $VPS_HOST $REMOTE_BIN --config $REMOTE_CONFIG once"
-    echo "tail the log: ssh $VPS_HOST tail -f $REMOTE_LOG"
+    echo "manual run: ssh $VPS_HOST $REMOTE_BIN --config ~/.trail/collector.json once"
+    echo "tail the log: ssh $VPS_HOST tail -f ~/.trail/collector.log"
 fi
