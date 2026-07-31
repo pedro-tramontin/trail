@@ -10,13 +10,9 @@ fn main() -> Result<()> {
     let exit_code = match cli.mode {
         Mode::Health => health::run(&cfg),
         Mode::Validate { file } => {
-            // Fleshed in §1.7.
             trail_collector::validate::run(&cfg, &file).context("--validate")?
         }
-        Mode::Once => {
-            // Fleshed in §1.8.
-            trail_collector::once::run(&cfg).context("--once")?
-        }
+        Mode::Once => trail_collector::once::run(&cfg).context("--once")?,
     };
     std::process::exit(exit_code);
 }
