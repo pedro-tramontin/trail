@@ -1,0 +1,6 @@
+[build]
+target-dir = "target"
+
+# The collector's `dist` target (musl) is used by the Tauri build.rs to copy
+# the release binary into src-tauri/resources/. Tauri doesn't need to know
+# about this target — the build.rs does.

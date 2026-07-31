@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Trail",
+  "version": "0.1.0",
+  "identifier": "com.pedrotramontin.trail",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "main-tray",
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": true,
+      "tooltip": "Trail"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "resources": ["../resources/day-summary.schema.json"],
+    "category": "Productivity",
+    "shortDescription": "Passive workday capture and VPS push",
+    "longDescription": "Captures GitHub PRs, Claude sessions, calendar events, and voice notes. Summarizes locally with ollama. SSH-pushes approved summaries to your VPS."
+  }
+}
