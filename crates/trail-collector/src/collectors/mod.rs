@@ -107,3 +107,8 @@ pub fn dispatch(cfg: &CollectorLaptopConfig) -> Result<RawOutput> {
 pub mod calendar;
 pub mod claude_sessions;
 pub mod github;
+// `synth_github` is the pure-JSON helper next door to `github`; not part of
+// the dispatch surface, so it's not in the `pub mod X` trio at the bottom of
+// this file by convention.
+#[allow(unused_imports, dead_code)]
+pub(crate) mod synth_github;
