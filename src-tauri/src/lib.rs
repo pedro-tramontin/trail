@@ -2,12 +2,14 @@
 // `mod keyring;` lands in Phase 1 §1.3 (macOS Keychain keypair generator).
 // `mod transport;` lands in Phase 1 §1.4 (SSH transport + IPC bindings).
 // `mod commands;` lands in Phase 1 §1.5 (Tauri IPC bindings for the transport).
+// `mod validate;` lands in Phase 1 §1.6 (client-side pre-push schema validation).
 // They are added incrementally to the workspace below.
 
 mod commands;
 mod config;
 mod keyring;
 mod transport;
+mod validate;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -39,6 +41,7 @@ pub fn run() {
             get_ssh_public_key,
             commands::health_check_transport,
             commands::push_to_vps,
+            commands::validate_day_summary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");

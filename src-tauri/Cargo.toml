@@ -29,6 +29,10 @@ keyring = { workspace = true }
 zeroize = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+# Client-side pre-push validation. Same crate + same Draft flag as
+# the collector (crates/trail-collector/src/validate.rs); both sides
+# validate against the same bundled schema bytes.
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
