@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::config;
 use crate::transport::{self, Transport};
+use crate::validate;
 
 /// Build a `Box<dyn Transport>` from the laptop config on disk. Both
 /// error sources are flattened to `String` so the frontend sees a
@@ -42,6 +43,26 @@ pub async fn push_to_vps(
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Tauri command: validate a day-summary payload against the bundled
+/// `day-summary.schema.json` schema BEFORE pushing to the VPS. Catches
+/// schema violations client-side so the user sees a clean error list
+/// in the wizard, not a confused "collector rejected the file" later.
+///
+/// On success returns `Ok(())`. On failure returns
+/// `Err("<newline-separated list of validation errors>")`. The list is
+/// sorted + deduped by the underlying validator (see
+/// `validate::validate`); we flatten to a `String` for the existing
+/// `Result<_, String>` Tauri command shape. Newlines separate the
+/// errors so the frontend can split + display them as a list.
+///
+/// The schema is loaded at compile time via `include_str!` — see the
+/// doc comment on `validate::compiled_schema` for the trade-off vs.
+/// `app.path().resource_dir()`.
+#[tauri::command]
+pub fn validate_day_summary(payload: serde_json::Value) -> Result<(), String> {
+    validate::validate(&payload).map_err(|e| e.errors.join("\n"))
 }
 
 #[cfg(test)]
