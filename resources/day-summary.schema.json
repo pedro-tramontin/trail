@@ -1,12 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trail.pedrotramontin.com/schemas/day-summary.json",
-  "title": "Trail Day Summary",
-  "description": "Stub — frozen schema lands in Phase 1 §1.9 (item 1-5-collector-validate-once-schema).",
+  "title": "DaySummary",
+  "description": "The contract for files pushed to the VPS collector. Same schema is used by the Tauri app's pre-push validator and the collector's --validate / --once modes.",
   "type": "object",
+  "required": ["date", "summary", "wins", "blockers", "people", "open_threads", "voice_notes"],
   "additionalProperties": false,
   "properties": {
-    "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-  },
-  "required": ["date"]
+    "date":         { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "ISO 8601 date (YYYY-MM-DD)" },
+    "summary":      { "type": "string", "description": "One-paragraph summary of the day" },
+    "wins":         { "type": "array", "items": { "type": "string" }, "description": "List of completed work or positive outcomes" },
+    "blockers":     { "type": "array", "items": { "type": "string" }, "description": "List of impediments" },
+    "people":       { "type": "array", "items": { "type": "string" }, "description": "List of people worked with (already anonymized to category placeholders if use_generic_categories is on)" },
+    "open_threads": { "type": "array", "items": { "type": "string" }, "description": "List of in-progress items to track" },
+    "voice_notes":  { "type": "array", "items": { "type": "string" }, "description": "Verbatim voice transcripts captured that day" }
+  }
 }
