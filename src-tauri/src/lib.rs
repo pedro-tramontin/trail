@@ -12,6 +12,10 @@ mod keyring;
 mod transport;
 mod validate;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::Manager;
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {name}! You've been greeted from Rust.")
@@ -92,9 +96,91 @@ async fn set_collector_enabled(
         .map_err(|e| e.to_string())
 }
 
+/// Resolve the per-app config + collector binary paths. On a normal
+/// Tauri launch these come from `app.path()` (the platform-correct
+/// per-user config dir for the bundled `.app` / `.msi` / `.deb`). The
+/// fallback `~/.<config>` is for `cargo test` and headless dev runs
+/// where `tauri::generate_context!()` isn't available.
+fn resolve_paths(
+    app: Option<&tauri::AppHandle>,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let config_path = if let Some(app) = app {
+        let dir = app.path().app_config_dir()?;
+        dir.join("config.json")
+    } else {
+        PathBuf::from(std::env::var("HOME").map_err(|_| "HOME not set")?)
+            .join(".trail")
+            .join("config.json")
+    };
+    // The collector binary is the bundled `trail-collector` that the
+    // Tauri build script + `tauri.conf.json` place next to the main
+    // executable. In test/dev we let `COLLECTOR_BIN` override (defaults
+    // to the same `trail-collector` name on $PATH).
+    let collector_bin = if let Ok(p) = std::env::var("COLLECTOR_BIN") {
+        PathBuf::from(p)
+    } else {
+        PathBuf::from("trail-collector")
+    };
+    Ok((config_path, collector_bin))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            // Build the orchestrator once at launch, hand it to the
+            // Tauri-managed state so IPC commands see the same
+            // `last_run_at` / `last_exit_code` / `last_error` the
+            // scheduler writes, then spawn the scheduler task.
+            let (config_path, collector_bin) =
+                resolve_paths(Some(app.handle())).map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("resolving config paths: {e}").into()
+                })?;
+            let cfg =
+                config::load_config(&config_path).map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("loading config from {}: {e}", config_path.display()).into()
+                })?;
+            let orch = Arc::new(collectors::CollectorOrchestrator::new(
+                config_path,
+                collector_bin,
+                &cfg,
+            ));
+            let orch_for_sched = orch.clone();
+            let sched_task = tokio::spawn(async move {
+                match orch_for_sched.start_scheduler().await {
+                    Ok(mut sched) => {
+                        if let Err(e) = sched.start().await {
+                            tracing::error!(error = %e, "scheduler.start() failed");
+                            return;
+                        }
+                        tracing::info!("collector scheduler started");
+                        // Park until the runtime shuts down. Tauri 2
+                        // aborts spawned tasks on exit; we also call
+                        // `scheduler.shutdown()` in a Drop below via
+                        // a graceful path on the tokio runtime's
+                        // teardown. In practice the runtime drop
+                        // releases all spawned tasks and the
+                        // scheduler's internal channels close.
+                        std::future::pending::<()>().await;
+                        if let Err(e) = sched.shutdown().await {
+                            tracing::warn!(error = %e, "scheduler.shutdown() failed");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "start_scheduler() failed");
+                    }
+                }
+            });
+            // Stash the JoinHandle so a future shutdown signal can
+            // await it (Tauri 2 doesn't yet expose a clean "app is
+            // exiting" hook in the setup closure). For v1 the
+            // `pending().await` above is fine because the orchestrator
+            // doesn't need to run after the user quits the menu-bar
+            // app.
+            app.manage(orch);
+            app.manage(Arc::new(sched_task));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             get_config,

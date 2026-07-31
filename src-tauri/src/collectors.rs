@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{info, warn};
 
 /// Canonical ordering of the three collectors. Used by `info()` to return
@@ -72,6 +73,10 @@ struct Inner {
     config_path: PathBuf,
     collector_bin: PathBuf,
     toggles: std::collections::HashMap<String, CollectorToggle>,
+    /// Bumped by `start_scheduler` to the number of cron jobs added
+    /// (one per enabled source at scheduler-construction time).
+    /// `0` before the first call to `start_scheduler`.
+    scheduled_count: usize,
 }
 
 #[derive(Clone)]
@@ -108,6 +113,7 @@ impl CollectorOrchestrator {
                 config_path,
                 collector_bin,
                 toggles,
+                scheduled_count: 0,
             })),
         }
     }
@@ -193,15 +199,33 @@ impl CollectorOrchestrator {
         std::fs::write(&tmp, serde_json::to_string_pretty(&laptop_cfg)?)
             .with_context(|| format!("writing temp laptop config {}", tmp.display()))?;
 
-        let output = Command::new(&collector_bin)
-            .args([
-                "--config",
-                "/dev/null",
-                "--collect",
-                source,
-                "--laptop-config",
-                tmp.to_str().unwrap(),
-            ])
+        // Minimal-env: the collector shouldn't inherit arbitrary vars
+        // from the Tauri host (e.g. SSH_AUTH_SOCK, secrets in env). We
+        // explicitly forward only PATH (for `gh` / other subprocs the
+        // collectors might spawn), HOME (so `~/` expansions in
+        // collector configs resolve), and XDG_CONFIG_HOME so the
+        // collector's own config lookups work. This satisfies the
+        // Phase 2 brief's "inherits only what's needed" rule.
+        let mut cmd = Command::new(&collector_bin);
+        cmd.args([
+            "--config",
+            "/dev/null",
+            "--collect",
+            source,
+            "--laptop-config",
+            tmp.to_str().unwrap(),
+        ]);
+        cmd.env_clear();
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            cmd.env("XDG_CONFIG_HOME", xdg);
+        }
+        let output = cmd
             .output()
             .await
             .with_context(|| format!("spawning {collector_bin:?}"));
@@ -238,6 +262,80 @@ impl CollectorOrchestrator {
             info!(source, code, "collector exited 0");
         }
         Ok(code)
+    }
+
+    /// Build (but do not start) a `JobScheduler` with one cron job per
+    /// enabled source. Each job calls `self.run_one(source).await` on its
+    /// configured schedule (default `@hourly`).
+    ///
+    /// Caller is responsible for `scheduler.start().await` and for
+    /// `scheduler.shutdown().await` on app exit. The orchestrator's
+    /// `Arc<Mutex<Inner>>` is cloned into each job's closure so the
+    /// scheduler task, the IPC commands, and the Settings UI all see the
+    /// same `last_run_at` / `last_exit_code` / `last_error` state.
+    ///
+    /// Jobs are created with `Job::new_async` so the runtime can
+    /// `.await` inside the cron tick — the previous `@hourly` strings
+    /// were already present in the per-source toggle state from
+    /// §5b pass 1, but no scheduler was ever constructed (Pitfall #71).
+    pub async fn start_scheduler(self: Arc<Self>) -> Result<JobScheduler> {
+        let sched = JobScheduler::new().await.context("creating JobScheduler")?;
+        // Snapshot the enabled+schedule tuples so we don't hold the lock
+        // across the `.await` in `Job::new_async`'s closure construction.
+        let jobs_to_schedule: Vec<(String, String)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .toggles
+                .iter()
+                .filter(|(_, t)| t.enabled)
+                .map(|(name, t)| (name.clone(), t.schedule.clone()))
+                .collect()
+        };
+        let mut added = 0usize;
+        for (source, schedule) in jobs_to_schedule {
+            let orch = self.clone();
+            // Clone here (outside the `move` closure) so we can still
+            // use `source` and `schedule` for the `with_context` log
+            // message below. `schedule` is moved into the
+            // `Job::new_async` closure (which must be `'static`).
+            let source_for_log = source.clone();
+            let schedule_for_log = schedule.clone();
+            let job = Job::new_async(schedule, move |_uuid, _lock| {
+                let orch = orch.clone();
+                let source = source.clone();
+                Box::pin(async move {
+                    // Log + ignore errors here so a single collector
+                    // failure (e.g. missing schema) doesn't poison the
+                    // cron tick — the orchestrator already records
+                    // `last_error` for the Settings UI to surface.
+                    if let Err(e) = orch.run_one(&source).await {
+                        warn!(source, error = %e, "scheduled run_one failed");
+                    }
+                })
+            })
+            .with_context(|| {
+                format!("creating cron job for {source_for_log} @ {schedule_for_log}")
+            })?;
+            sched
+                .add(job)
+                .await
+                .with_context(|| format!("adding cron job for {source_for_log}"))?;
+            added += 1;
+            info!(source = %source_for_log, schedule = %schedule_for_log, "scheduled collector");
+        }
+        // Bump a per-instance counter so tests / IPC consumers can
+        // assert how many cron jobs are now registered without
+        // reaching into the private `JobScheduler` internals.
+        self.inner.lock().await.scheduled_count = added;
+        Ok(sched)
+    }
+
+    /// Number of cron jobs that were added by the most recent call to
+    /// `start_scheduler`. `0` before the first call. Mirrors the count
+    /// of enabled sources at scheduler-construction time.
+    #[allow(dead_code)] // exposed for IPC + tests; not used yet by a UI
+    pub async fn scheduled_count(&self) -> usize {
+        self.inner.lock().await.scheduled_count
     }
 }
 
@@ -481,5 +579,53 @@ mod tests {
             ],
             "info() must return collectors in canonical order"
         );
+    }
+
+    /// Test 5 (§5b D1 fix-up, Pitfall #71): `start_scheduler` produces a
+    /// working `JobScheduler` that
+    ///   1. registers exactly 3 cron jobs (one per enabled source — all
+    ///      three are enabled in `make_cfg`),
+    ///   2. `start()`s without error,
+    ///   3. `shutdown()`s cleanly, and
+    ///   4. before construction the orchestrator's `scheduled_count()` is
+    ///      `0`; after construction it's `3`.
+    ///
+    /// The "3 jobs" claim is verified two ways: via the orchestrator's
+    /// public `scheduled_count()` (deterministic) and via the
+    /// `JobScheduler`'s own `time_till_next_job()` (which returns
+    /// `Some(_)` only when at least one job is registered).
+    #[tokio::test]
+    async fn start_scheduler_registers_three_jobs_and_shuts_down() {
+        let (_tmp, _bin, orch) = make_orch("#!/bin/sh\nexit 0\n");
+        let arc = Arc::new(orch);
+        // Pre-condition: no jobs registered yet.
+        assert_eq!(arc.scheduled_count().await, 0, "no jobs before scheduler");
+
+        let mut sched = Arc::clone(&arc)
+            .start_scheduler()
+            .await
+            .expect("start_scheduler should succeed for an all-enabled orchestrator");
+        // After construction, the orchestrator's counter is bumped.
+        assert_eq!(
+            arc.scheduled_count().await,
+            3,
+            "all 3 enabled sources should produce 3 cron jobs"
+        );
+        // And the JobScheduler itself reports a pending next tick.
+        assert!(
+            sched
+                .time_till_next_job()
+                .await
+                .expect("time_till_next_job")
+                .is_some(),
+            "JobScheduler should have at least one registered job"
+        );
+
+        sched.start().await.expect("scheduler.start()");
+        // Give the runtime one scheduler tick to settle. We don't assert
+        // any cron ran yet (the schedule is `@hourly`); the test
+        // verifies the scheduler is *live* and responsive to start
+        // followed by shutdown.
+        sched.shutdown().await.expect("scheduler.shutdown()");
     }
 }
