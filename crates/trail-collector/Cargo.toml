@@ -23,3 +23,44 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# Cross-compile contract for the VPS ship. The `trail-collector` binary
+# lands on the VPS as a single, statically-linked `x86_64-unknown-linux-musl`
+# artifact with zero runtime deps (no glibc, no musl loader, no shared libs).
+#
+# The build pipeline that produces that artifact lives in two places:
+#
+#   1. The `build.rs` at the crate root — it pins the link-arg to
+#      `-static` when the active target is `x86_64-unknown-linux-musl`
+#      and emits a `cargo:warning=` when a developer builds for any
+#      other target (the build still succeeds; the warning is a hint).
+#
+#   2. The laptop-side invocation:
+#        cargo build --release -p trail-collector --target x86_64-unknown-linux-musl
+#      The macOS developer laptop runs this with the musl target +
+#      `brew install FiloSottile/musl-cross/musl-cross` for the C linker.
+#      The Linux CI/build host (this one) does NOT install the musl
+#      target — the on-host build is for dev/test, not for shipping.
+#
+# The produced binary at `target/x86_64-unknown-linux-musl/release/
+# trail-collector` is then picked up by `scripts/install-collector.sh`,
+# which `scp`s it to the VPS, `chmod +x`s it, and installs a `*/5 * * * *`
+# cron entry that runs `trail-collector --config ~/.trail/collector.json once`.
+[package.metadata.musl]
+# The exact target triple the install script + the macOS cross-compile
+# invocation both reference. Keep all three in sync.
+target = "x86_64-unknown-linux-musl"
+# The C linker (on macOS, the brew-installed musl-cross toolchain;
+# on Linux, the host's `musl-gcc` if present). The build.rs / the
+# laptop-side invocation pass this via the standard `CC_x86_64-unknown-linux-musl`
+# env var convention; the metadata block just documents the expected
+# toolchain shape.
+linker_hint = "musl-gcc (Linux) or FiloSottile/musl-cross/musl-cross (macOS)"
+# Where the artifact lands after the cross-compile. The install script
+# reads from this path; the build.rs and `tauri build` pipeline also
+# know about it.
+artifact = "target/x86_64-unknown-linux-musl/release/trail-collector"
+# Where `tauri build`'s `bundle.resources` expects to find the binary
+# when packaging the Tauri app. (Item 1-1's tauri.conf.json already
+# points at this path; the build pipeline populates it before bundling.)
+bundled = "src-tauri/resources/trail-collector"
