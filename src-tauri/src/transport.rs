@@ -35,7 +35,7 @@ pub enum TransportError {
 /// realistic transport touches the network / filesystem off the
 /// hot path; even the local-only path uses `tokio::task::spawn_blocking`.
 #[async_trait]
-pub trait Transport: Send + Sync {
+pub trait Transport: Send + Sync + std::fmt::Debug {
     /// Stable identifier for diagnostics + the frontend. `"ssh"` for v1.
     fn name(&self) -> &'static str;
 
@@ -73,7 +73,7 @@ pub fn from_config(cfg: &TransportConfig) -> Result<Box<dyn Transport>, Transpor
 /// private key from the macOS Keychain on each `push()` call — the
 /// private key never lands on disk (per the master's security
 /// tradeoffs).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SshTransport {
     host: String,
     port: u16,
@@ -154,15 +154,15 @@ impl Transport for SshTransport {
                     // private key bytes. Available on Unix and on Windows
                     // when the `vendored-openssl`/`openssl-on-win32`
                     // features are enabled.
-                    #[cfg(any(unix, feature = "vendored-openssl", feature = "openssl-on-win32"))]
+                    #[cfg(unix)]
                     {
                         sess.userauth_pubkey_memory(&user, None, &pem, None)
                             .map_err(|e| TransportError::Ssh(format!("pubkey auth: {e}")))?;
                     }
-                    #[cfg(not(any(unix, feature = "vendored-openssl", feature = "openssl-on-win32")))]
+                    #[cfg(not(unix))]
                     {
                         return Err(TransportError::Ssh(
-                            "pubkey-in-memory auth requires ssh2's openssl-on-win32 or vendored-openssl feature on Windows".into(),
+                            "pubkey-in-memory auth requires unix in v1; Windows builds are not supported yet".into(),
                         ));
                     }
                 }
@@ -209,15 +209,15 @@ impl Transport for SshTransport {
             // `health_check` is public-key only by design; the password
             // auth path is exercised in `push` (it's the one with the
             // user-facing call site).
-            #[cfg(any(unix, feature = "vendored-openssl", feature = "openssl-on-win32"))]
+            #[cfg(unix)]
             {
                 sess.userauth_pubkey_memory(&user, None, &pem, None)
                     .map_err(|e| TransportError::Ssh(format!("pubkey auth: {e}")))?;
             }
-            #[cfg(not(any(unix, feature = "vendored-openssl", feature = "openssl-on-win32")))]
+            #[cfg(not(unix))]
             {
                 return Err(TransportError::Ssh(
-                    "pubkey-in-memory auth requires ssh2's openssl-on-win32 or vendored-openssl feature on Windows".into(),
+                    "pubkey-in-memory auth requires unix in v1; Windows builds are not supported yet".into(),
                 ));
             }
             // If we got here, the connection + auth work. health_check is a
