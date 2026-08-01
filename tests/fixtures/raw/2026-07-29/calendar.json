@@ -1,1 +1,1 @@
-{"source": "calendar", "captured_at": "2026-07-29T18:00:00Z", "date": "2026-07-29", "payload": {"since": "2026-07-28T18:00:00Z", "until": "2026-07-29T18:00:00Z", "events": [{"title": "Standup", "start": "2026-07-29T15:00:00Z", "duration_minutes": 15, "organizer": "[PM]", "attendees": ["[PM]", "[ENG-1]"]}]}}
+{"source":"calendar","captured_at":"2026-07-29T17:30:00Z","date":"2026-07-29","payload":{"events":[{"start":"2026-07-29T15:00:00Z","title":"Standup","duration_minutes":15}]}}
