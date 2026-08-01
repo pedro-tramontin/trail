@@ -13,7 +13,7 @@
 - **Host:** Linux build host (Ubuntu 24.04, x86_64-unknown-linux-gnu)
 - **Repo:** `pedro-tramontin/trail`
 - **Branch:** `feat/3-7-summarizer-verification`
-- **Base commit (pre-3-7):** `aa204db` (item 3-6 merged; main HEAD as expected per STATE.md)
+- **Base commit (pre-3-7):** `aa204db` (item 3-6 merged; main HEAD as expected per the worklog entry for this verification pass)
 - **Toolchain:** `stable-x86_64-unknown-linux-gnu` (rustc 1.97.1)
 
 ## Gates
@@ -28,7 +28,9 @@
   hint: "trail-collector is being built for `x86_64-unknown-linux-gnu`
   …not `x86_64-unknown-linux-musl`. The artifact will NOT be deployable
   to the VPS as-is."). This is a build.rs advisory on the headless
-  Linux host; the musl cross-compile happens on macOS per Phase 1 §5b D1.
+  Linux host; the musl cross-compile happens on macOS per the §5b
+  worklog (musl-build deviation, distinct from the §3.0 D1 crate-rename
+  deviation documented below).
 - Result: **PASS**
 
 ### Gate 2 — Lint
@@ -53,7 +55,7 @@
   | `trail-collector` lib  | 38     | 0      | 0       |
   | `trail-collector` bin  | 0      | 0      | 0       |
   | Doc-tests `trail`      | 0      | 0      | 0       |
-  | Doc-tests `collector`  | 0      | 0      | 0       |
+  | Doc-tests `trail-collector` | 0  | 0      | 0       |
   | **Total Rust cases**   | **85** | **0**  | **1**   |
 
   - **Phase 3 test-count delta:** +24 Rust cases.
