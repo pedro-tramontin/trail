@@ -16,6 +16,7 @@ pub mod capture;
 pub mod hotkey;
 pub mod meter;
 pub mod model_manager;
+pub mod permission;
 pub mod store;
 pub mod transcriber;
 pub mod tray_blink;
@@ -25,6 +26,9 @@ pub use capture::{resample_to_16k, spawn_capture_loop, CaptureError, CaptureStat
 pub use hotkey::{parse_hotkey, register as register_hotkey, HotKey, HotkeyError};
 pub use meter::Meter;
 pub use model_manager::{ensure_model, ensure_model_with, ModelError, EXPECTED_SHA256, MODEL_URL};
+pub use permission::{
+    check_mic_permission, mic_permission_deep_link_url, request_mic_permission, MicPermissionState,
+};
 pub use store::{
     delete as delete_voice_entry, new_entry_id, voice_paths, write_atomic, VoiceEntry,
 };

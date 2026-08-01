@@ -74,6 +74,16 @@ cpal = { workspace = true }
 # crate. On Linux the `register` function is a no-op stub so the parser
 # + tests can run there.
 global-hotkey = { workspace = true }
+# Phase 5 §5.7 — macOS mic permission detection. `objc2` is the
+# modern safe wrapper around the Objective-C runtime (replacing
+# `objc`/`cocoa`); `block2` provides the `__block` closures that
+# Apple's AVFoundation completion-handler APIs require. All three are
+# gated to `cfg(target_os = "macos")` because they transitively link
+# CoreFoundation — the non-macOS branch in `voice/permission.rs`
+# returns `MicPermissionState::Undetermined` directly.
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+block2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
