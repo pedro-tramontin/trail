@@ -446,6 +446,7 @@ mod tests {
                 model_provider: "local".into(),
                 anonymization_strictness: "aggressive".into(),
                 use_generic_categories: true,
+                anonymization_rules: vec![],
             },
             transport: TransportConfig::Ssh {
                 host: "x".into(),
