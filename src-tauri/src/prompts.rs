@@ -40,7 +40,7 @@ like end-to-end.
 ## Wins
 
 Bulleted list. Each bullet is a single concrete accomplishment. \
-Skip empty categories.
+If there were no wins, write the literal word `None` under this header.
 
 ## Blockers
 
