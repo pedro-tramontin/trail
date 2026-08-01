@@ -11,17 +11,34 @@ use thiserror::Error;
 /// Regex that matches a placeholder-style token like `[COMPANY]`,
 /// `[REDACTED:foo]`, etc. We use this to disambiguate the
 /// anonymization-correction heuristic from incidental `'['` usage
-/// in Markdown links (`[text](url)`) or checklist bullets
-/// (`[x] / [ ]`).
+/// in Markdown links (`[text](url)`) or single-letter checklist
+/// bullets (`[x]` / `[X]` / `[ ]`).
 ///
-/// Tighter than `matches('[')` (which fires on any bracket); the
-/// rule is: an opening bracket followed by 1+ uppercase letters or
-/// digits, optional inner alphanumeric/underscore/colon, then `]`.
+/// Tighter than `matches('[')` (which fires on any bracket). The
+/// rules (PR #36 Copilot thread T1):
+///   * opening bracket, an uppercase letter, 2+ uppercase letters
+///     / digits / `_` after it (so `[COMPANY]`, `[REDACTED_TYPE]`
+///     match; single uppercase `[X]` checklist items do NOT),
+///   * an optional `:` followed by 1+ alphanumerics / `-` / `_` /
+///     lowercase (so `[REDACTED:foo]`, `[REDACTED:my-rule]` match),
+///   * then `]`.
+///
+/// The single-uppercase-letter exclusion matters because Markdown
+/// task-list items are often written `[X]` / `[ ]` and would
+/// otherwise be misclassified as a placeholder addition /
+/// removal.
 fn placeholder_token_re() -> &'static Regex {
     use std::sync::OnceLock;
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[[A-Z][A-Z0-9_]*(?::[A-Z0-9_]+)?\]")
+        // Outer: 2+ UPPERCASE letters / digits / underscores
+        //   after the opening uppercase letter.
+        // Inner (after `:`): allow lowercase / dashes so real
+        //   placeholder inner names like "foo" or "my-rule" match.
+        // The minimum length of 3 outer uppercase chars prevents
+        //   single-letter task-list items like `[X]` / `[Y]`
+        //   from being misclassified.
+        Regex::new(r"\[[A-Z][A-Z0-9_]{2,}(?::[A-Za-z0-9_-]+)?\]")
             .expect("placeholder_token_re: hardcoded regex must compile")
     })
 }
@@ -161,14 +178,23 @@ pub fn load(path: &Path) -> Result<SummaryBootstrap, LearnerError> {
     Ok(bootstrap)
 }
 
-/// Atomically write the bootstrap file (temp file + rename).
+/// Write the bootstrap file to `path`.
 ///
-/// On Windows, [`std::fs::rename`] fails when the destination already
-/// exists, so we remove the destination first (ignoring `NotFound`)
-/// and then rename. On Unix, `rename` is atomic and overwrites by
-/// default; the extra `remove_file` is a no-op race against the
-/// just-written temp file (which has a unique name), so it's safe
-/// across platforms.
+/// Atomicity contract:
+/// * **Unix**: `std::fs::rename` is atomic and overwrites; we still
+///   write the new content to a sibling `<path>.tmp` first so a
+///   writer crash mid-write leaves the prior file intact.
+/// * **Windows**: `rename` refuses to overwrite, so we first
+///   `remove_file(path)` (ignoring `NotFound`) and then `rename`.
+///   This means there is a window between the `remove_file` and
+///   `rename` where the destination does not exist; a crash in
+///   that window will lose the prior bootstrap file. The
+///   non-atomicity on Windows is documented behavior (PR #36
+///   Copilot thread T2) and will be revisited in a follow-up
+///   via a transactional write path (e.g. ReplaceFileW or
+///   rename-on-retry); for now the worst-case-loss is bounded
+///   to a single bootstrap file, which is rebuildable from the
+///   raw data + recent learner events.
 pub fn save(path: &Path, bootstrap: &SummaryBootstrap) -> Result<(), LearnerError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -310,10 +336,43 @@ mod tests {
     #[test]
     fn classify_ignores_checklist_brackets() {
         // Checklist bullets [x] / [ ] also have bare `[` that should
-        // not trip the anonymization heuristic.
+        // not trip the anonymization heuristic. (PR #36 Copilot
+        // thread T1: the previous regex also matched single
+        // uppercase `[X]` checklist "checked" markers; the current
+        // 3+-char-minimum regex excludes them too.)
         let before = "- [ ] write tests\n- [ ] review";
         let after = "- [x] write tests\n- [ ] review";
         assert_eq!(classify(before, after), LearningKind::StylePreference);
+        // And the uppercase [X] variant -- pre-fix this WAS
+        // misclassified as AnonymizationCorrection. Now excluded.
+        let before = "- [ ] TODO: ship feature\n- [X] DONE: write spec";
+        let after = "- [X] TODO: ship feature\n- [ ] DONE: write spec";
+        assert_eq!(
+            classify(before, after),
+            LearningKind::StylePreference,
+            "single-uppercase [X] checklist markers must NOT trip the placeholder heuristic",
+        );
+    }
+
+    /// Lowercase inner names after `:` should still match. The
+    /// PR #36 fix widened the inner character class from
+    /// `[A-Z0-9_]+` to `[A-Za-z0-9_-]+`. (PR #36 Copilot thread T1.)
+    #[test]
+    fn classify_matches_lowercase_inner_after_colon() {
+        // Adding `[REDACTED:foo]` should fire the heuristic.
+        let before = "Some text here.";
+        let after = "Now [REDACTED:foo] covers this.";
+        assert_eq!(
+            classify(before, after),
+            LearningKind::AnonymizationCorrection,
+        );
+        // And `[REDACTED:my-rule]` too.
+        let before2 = "Some text here.";
+        let after2 = "Now [REDACTED:my-rule] covers this.";
+        assert_eq!(
+            classify(before2, after2),
+            LearningKind::AnonymizationCorrection,
+        );
     }
 
     #[test]
