@@ -1,1 +1,1 @@
-{"source": "github", "captured_at": "2026-07-29T18:00:00Z", "date": "2026-07-29", "payload": {"author": "pedro", "since": "2026-07-28T18:00:00Z", "until": "2026-07-29T18:00:00Z", "prs": [{"type": "merged", "title": "Fix summarizer bug", "sha": "abc123def"}]}}
+{"source":"github","captured_at":"2026-07-29T18:00:00Z","date":"2026-07-29","payload":{"prs":[{"number":42,"title":"Add dark mode","state":"merged","created_at":"2026-07-29T15:00:00Z"}],"issues":[]}}
