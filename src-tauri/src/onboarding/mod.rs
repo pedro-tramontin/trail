@@ -13,11 +13,17 @@
 //!   the response against the JSON Schema, and flattens the envelope
 //!   into the typed `OnboardingAnswers`. Falls back to [`baseline`]
 //!   on any ollama failure.
+//! - [`config_writer`]: Phase C — converts [`OnboardingAnswers`] into
+//!   the frozen `Config`, atomically writes it to `~/.trail/config.json`,
+//!   appends a JSONL audit log, and one-shots the legacy
+//!   `~/.workday-logger/config.json` migration.
 
 pub mod answers;
 pub mod baseline;
+pub mod config_writer;
 pub mod llm;
 pub mod scan;
 
 pub use answers::OnboardingAnswers;
+pub use config_writer::write_config;
 pub use scan::{CollectorCandidate, CollectorStatus, EvidenceKind, Platform, ScanReport};
