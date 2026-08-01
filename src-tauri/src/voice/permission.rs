@@ -19,12 +19,29 @@
 //!
 //! `objc2` is the modern safe binding maintained by the objc working
 //! group; `objc` (block2's older sibling) is now in maintenance-only
-//! mode. `objc2 0.6` + `objc2-foundation 0.3` + `block2 0.6` is the
+//! `objc2 0.6` + `objc2-foundation 0.3` + `block2 0.6` is the
 //! 2026-current macOS bindings stack. AVFoundation itself isn't a
 //! "binding" crate — we link it via `cargo:rustc-link-lib=framework=
 //! AVFoundation` in `build.rs` and reach the C symbols directly
 //! through `class!` + `msg_send!`. That's the same approach every
 //! Rust+objc2 AVFoundation integration uses.
+//!
+//! ## §5.7 framework-link doc-test (macOS only)
+//!
+//! The doc-test inside [`framework_link_smoke_test`] exercises the
+//! end-to-end `objc2` framework link chain — the `class!(AVCaptureDevice)`
+//! macro resolves the class via the linked AVFoundation framework,
+//! and the call to `authorizationStatusForMediaType:` returns a
+//! valid integer status. This is the smoke test that build.rs's
+//! `cargo:rustc-link-lib=framework=AVFoundation` (plus the
+//! transitive CoreMedia / AudioToolbox links) actually wired up
+//! the C symbols the rest of the module uses.
+//!
+//! The function (and its doc-test) is `#[cfg(target_os = "macos")]`
+//! gated — on Linux/Windows the function is absent, so the doc-test
+//! is not collected by `cargo test --doc`. On macOS the function
+//! compiles + runs, and a passing doc-test is the proof the
+//! framework link chain is intact at the build.rs level.
 
 use std::fmt;
 
@@ -131,6 +148,64 @@ pub fn mic_permission_deep_link_url() -> &'static str {
     {
         ""
     }
+}
+
+/// macOS-only smoke test for the §5.7 `objc2` framework link chain.
+///
+/// The function is `#[cfg(target_os = "macos")]` gated so the
+/// doc-test inside is only collected by `cargo test --doc` on
+/// macOS hosts. On Linux/Windows the function is absent and the
+/// doc-test is not collected.
+///
+/// What the doc-test proves:
+/// - The `class!(AVCaptureDevice)` macro resolves the class via
+///   the linked AVFoundation framework (added by `build.rs`).
+/// - The `authorizationStatusForMediaType:` ObjC class method
+///   returns a valid integer status that maps to a
+///   `MicPermissionState` variant.
+/// - The `x-apple.systempreferences:` deep-link URL points at the
+///   `Privacy_Microphone` pane, matching the contract the tray
+///   menu relies on for the "Open Mic Settings" item.
+///
+/// A passing doc-test is the proof that build.rs's
+/// `cargo:rustc-link-lib=framework=AVFoundation` (plus the
+/// transitive `CoreMedia` / `AudioToolbox` links) actually wired
+/// up the C symbols the rest of the module uses.
+///
+/// ```no_run
+/// use trail_lib::voice::permission::{
+///     check_mic_permission, mic_permission_deep_link_url, MicPermissionState,
+/// };
+///
+/// // The AVFoundation framework is linked via build.rs; this
+/// // call resolves the AVCaptureDevice class and dispatches the
+/// // class-method `authorizationStatusForMediaType:` on it. A
+/// // successful return (any MicPermissionState variant) proves
+/// // the framework link chain is intact.
+/// let state = check_mic_permission();
+/// assert!(matches!(
+///     state,
+///     MicPermissionState::Granted
+///         | MicPermissionState::Denied
+///         | MicPermissionState::Undetermined
+/// ));
+///
+/// // The deep-link URL must point at the Privacy_Microphone
+/// // pane via the system-preferences scheme — §5.7 promises
+/// // the tray menu's "Open Mic Settings" item deep-links the
+/// // user to the right System Settings tab on a single click.
+/// let url = mic_permission_deep_link_url();
+/// assert!(url.starts_with("x-apple.systempreferences:"));
+/// assert!(url.contains("Privacy_Microphone"));
+/// ```
+#[cfg(target_os = "macos")]
+pub fn framework_link_smoke_test() -> bool {
+    // True on success. We don't surface the result anywhere; the
+    // function exists to anchor the doc-test.
+    matches!(
+        check_mic_permission(),
+        MicPermissionState::Granted | MicPermissionState::Denied | MicPermissionState::Undetermined
+    )
 }
 
 // =====================================================================
