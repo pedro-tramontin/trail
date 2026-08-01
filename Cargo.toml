@@ -49,7 +49,11 @@ sha2 = "0.10"
 # Phase 5 §5.1 — whisper model download + audio capture.
 whisper-rs = "0.13"
 hound = "3"
-dirs = "5"
+# dirs 5 → 6: dirs 5 used `dirs-sys 0.4` which still pulls in
+# `redox_users 0.4` (via the implicit `dirs-sys` chain); mainline has
+# moved to `dirs 6` (single version) and we adopt that here to avoid
+# keeping two copies of `dirs` and `redox_users` in the lockfile.
+dirs = "6"
 # Phase 5 §5.2 — cpal microphone capture (macOS) + cross-platform rubato
 # resampler to 16 kHz mono for whisper.
 cpal = "0.15"
