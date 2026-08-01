@@ -47,6 +47,18 @@ sha2 = { workspace = true }
 whisper-rs = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
+# Phase 5 §5.2 — rubato is the cross-platform sinc resampler that takes the
+# mic's native-rate f32 frames and produces 16 kHz mono for whisper. It is
+# always built so the resampler tests can run on Linux CI.
+rubato = { workspace = true }
+
+# cpal pulls in the platform audio backend (CoreAudio on macOS, ALSA on
+# Linux, etc.). §W4 forbids headless Linux agents from trying to capture
+# real audio, so we only build the cpal path on macOS — on Linux the
+# capture loop returns `CaptureError::Cpal` and only the resampler is
+# exercised in tests.
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

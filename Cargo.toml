@@ -50,6 +50,10 @@ sha2 = "0.10"
 whisper-rs = "0.13"
 hound = "3"
 dirs = "5"
+# Phase 5 §5.2 — cpal microphone capture (macOS) + cross-platform rubato
+# resampler to 16 kHz mono for whisper.
+cpal = "0.15"
+rubato = "0.15"
 
 [profile.release]
 opt-level = 3
