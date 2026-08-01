@@ -62,6 +62,12 @@ tokio-util = { workspace = true }
 # uuid::v4 generates entry_ids for voice store writes.
 parking_lot = { workspace = true }
 uuid = { workspace = true }
+# Phase 6 §6.1 — the onboarding scan uses `walkdir` to check whether
+# a VS Code extensions folder contains any `package.json` (real
+# extensions nest it at `<ext>/<version>/package.json`, so a flat
+# read_dir wouldn't suffice). The collector crate already pulls it
+# in transitively, but a workspace dep keeps the bound explicit.
+walkdir = { workspace = true }
 
 # cpal pulls in the platform audio backend (CoreAudio on macOS, ALSA on
 # Linux, etc.). §W4 forbids headless Linux agents from trying to capture
