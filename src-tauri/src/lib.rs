@@ -14,6 +14,9 @@ mod validate;
 // Frozen Phase 3 prompt template constants — see `src/prompts.rs` for the
 // contract rationale.
 pub mod prompts;
+// Typed HTTP client for the local ollama server — see `src/ollama.rs`
+// for the request shape + error type.
+pub mod ollama;
 
 use std::path::PathBuf;
 use std::sync::Arc;

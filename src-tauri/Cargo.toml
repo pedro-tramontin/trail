@@ -44,3 +44,5 @@ humantime = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# HTTP mock server for the ollama client unit tests — see src/ollama.rs.
+wiremock = { workspace = true }
