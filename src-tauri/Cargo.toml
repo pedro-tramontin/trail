@@ -42,6 +42,11 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 notify-rust = "4"
 humantime = "2"
+# Phase 5 §5.1 — whisper model download verification.
+sha2 = { workspace = true }
+whisper-rs = { workspace = true }
+hound = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
