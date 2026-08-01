@@ -17,12 +17,30 @@ vi.mock("$lib/api/logs", () => ({
 
 const mockApi = vi.mocked(api);
 
+/**
+ * Return the ISO `YYYY-MM-DD` string for `n` days ago. Used to
+ * build expected dates for deterministic tests without hard-coding
+ * a value that would go stale when the wall clock moves past it.
+ * (PR #25 Copilot thread T1 / T2, follow-up from PR #44 squash.)
+ */
+function isoDaysAgo(n: number): string {
+  const today = new Date();
+  const d = new Date(today);
+  d.setDate(d.getDate() - n);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockApi.listLogs.mockResolvedValue([]);
-  // Reset to a fixed, deterministic state — overrides what `todayIso()`
-  // produced on import so each test is reproducible.
-  logsState.selectedDate = "2026-08-01";
+  // Reset to a deterministic state — overrides what `todayIso()`
+  // produced on import so each test is reproducible. Derived from
+  // the current time so the test stays correct as the wall clock
+  // moves forward. (PR #25 Copilot thread T1.)
+  logsState.selectedDate = isoDaysAgo(0);
   logsState.loading = false;
   logsState.entries = [];
   logsState.error = null;
