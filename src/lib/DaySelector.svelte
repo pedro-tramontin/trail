@@ -3,11 +3,12 @@
 
   /**
    * Builds a list of the last 30 dates as ISO `YYYY-MM-DD` strings, with
-   * today's date at index 0. Returns a fresh array each call so the
-   * `$derived(...)` rune observes a stable reference per render.
+   * today's date at index 0. Computed once at component mount — does
+   * not need to be reactive (the date set never changes within a
+   * component's lifetime; the user picks from a precomputed list).
    */
-  function last30Days(): string[] {
-    const days: string[] = [];
+  const days: string[] = (() => {
+    const out: string[] = [];
     const today = new Date();
     for (let i = 0; i < 30; i++) {
       const d = new Date(today);
@@ -15,12 +16,10 @@
       const y = d.getFullYear();
       const m = String(d.getMonth() + 1).padStart(2, "0");
       const day = String(d.getDate()).padStart(2, "0");
-      days.push(`${y}-${m}-${day}`);
+      out.push(`${y}-${m}-${day}`);
     }
-    return days;
-  }
-
-  const days: string[] = $derived(last30Days());
+    return out;
+  })();
   const selected: string = $derived(logsState.selectedDate);
 
   function onChange(event: Event): void {
@@ -39,7 +38,7 @@
     aria-label="Select a day"
   >
     {#each days as day (day)}
-      <option value={day} selected={day === selected}>{day}</option>
+      <option value={day}>{day}</option>
     {/each}
   </select>
 </label>

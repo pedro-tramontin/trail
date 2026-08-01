@@ -33,11 +33,12 @@ describe("DaySelector", () => {
     // The store's `todayIso()` seeds `selectedDate` on import; we then
     // set it to a fixed value so the test stays deterministic. The
     // component must echo that value as its `value` attribute.
+    const expectedToday = isoDaysAgo(0);
     render(DaySelector);
     const select = screen.getByTestId(
       "day-selector",
     ) as unknown as HTMLSelectElement;
-    expect(select.value).toBe("2026-08-01");
+    expect(select.value).toBe(expectedToday);
     expect(select.disabled).toBe(false);
   });
 
@@ -46,13 +47,16 @@ describe("DaySelector", () => {
     const select = screen.getByTestId(
       "day-selector",
     ) as unknown as HTMLSelectElement;
+    // Pick a date that is guaranteed to be in the dropdown (3 days
+    // ago, well within the 30-day window).
+    const targetDate = isoDaysAgo(3);
     // fireEvent.change sets `.value` and dispatches a real `change`
     // event; native <select> elements expose the selected option's
     // value back via `event.target.value` inside the handler.
-    await fireEvent.change(select, { target: { value: "2026-07-29" } });
+    await fireEvent.change(select, { target: { value: targetDate } });
     // selectDate() calls refresh() which awaits listLogs(selectedDate).
     await vi.waitFor(() =>
-      expect(mockApi.listLogs).toHaveBeenCalledWith("2026-07-29"),
+      expect(mockApi.listLogs).toHaveBeenCalledWith(targetDate),
     );
   });
 
