@@ -12,8 +12,10 @@
 //!   hint instead of a raw `reqwest` error.
 //!
 //! The error type implements `std::error::Error` manually (rather than
-//! pulling in `thiserror` for one enum) so it can be used from any
-//! module without dragging a new dep into the binary's release profile.
+//! pulling in `thiserror` for one enum) to keep this module's
+//! dependency surface minimal. The summarizer / scheduler modules
+//! already use `thiserror`, so the choice here is stylistic (this
+//! module was written first).
 //!
 //! ## Design contract
 //!
@@ -28,6 +30,33 @@ use std::fmt;
 /// The default `ollama` HTTP endpoint. Exposed as a `const` so tests
 /// and the Tauri-side wiring can reference the same value.
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
+
+/// Maximum bytes to read from an error response body. Anything
+/// larger is truncated (via `read_capped_body` below) so a
+/// misbehaving server can't blow up the log / IPC error with a
+/// multi-MB body. `reqwest 0.12` does not ship a
+/// `text_with_limit` API, so we read `bytes()` and bound the
+/// lossy decode ourselves.
+pub const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+
+/// Read the response body with a hard byte cap. Returns a UTF-8
+/// lossy-decoded string no longer than `cap` bytes; if the body
+/// was larger, the string is suffixed with a marker so the
+/// operator knows the response was truncated. Decode errors
+/// surface as the placeholder so the caller still gets an error
+/// message rather than panicking.
+async fn read_capped_body(resp: reqwest::Response, cap: usize) -> String {
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => return "<unreadable>".to_string(),
+    };
+    if bytes.len() <= cap {
+        return String::from_utf8_lossy(&bytes).into_owned();
+    }
+    // Truncated: decode up to `cap` and append a marker.
+    let truncated = String::from_utf8_lossy(&bytes[..cap]).into_owned();
+    format!("{truncated}... <truncated, body was {} bytes>", bytes.len())
+}
 
 /// Typed errors from the ollama client. The three variants cover the
 /// three failure modes the caller actually needs to distinguish:
@@ -55,7 +84,11 @@ impl fmt::Display for OllamaError {
             ),
             OllamaError::Http(detail) => write!(f, "ollama HTTP error: {detail}"),
             OllamaError::EmptyResponse => {
-                write!(f, "ollama returned a 200 response with an empty body")
+                write!(
+                    f,
+                    "ollama returned a 200 response with no usable model output \
+                     (empty body, non-JSON body, or empty `response` field)"
+                )
             }
         }
     }
@@ -131,13 +164,12 @@ impl OllamaClient {
         };
         let status = resp.status();
         if !status.is_success() {
-            // Read the body (best-effort) so the error message includes
-            // what ollama told us. Cap the read to keep error formatting
-            // bounded if the server is misbehaving.
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_string());
+            // Read the body (best-effort) so the error message
+            // includes what ollama told us. Cap the read at
+            // MAX_ERROR_BODY_BYTES so a misbehaving server can't
+            // blow up the log / IPC error with a multi-MB error
+            // body (see `read_capped_body`).
+            let body = read_capped_body(resp, MAX_ERROR_BODY_BYTES).await;
             return Err(OllamaError::Http(format!("status {status}: {body}")));
         }
         let parsed: GenerateResponse = match resp.json().await {
@@ -198,15 +230,27 @@ mod tests {
     }
 
     /// Test 2: a closed port surfaces as `NotRunning`, not a raw
-    /// `reqwest::Error`. Port 1 is reserved and almost never has a
-    /// listener on a normal machine, so the connect should refuse.
+    /// `reqwest::Error`. We bind a TCP listener on an ephemeral
+    /// port and immediately drop it, leaving the port free but
+    /// with no listener — the connect attempt then refuses. This
+    /// is more robust than hard-coding port 1, which can be flaky
+    /// in some environments (firewall rules, etc.).
     #[tokio::test]
     async fn health_check_returns_not_running_when_unreachable() {
-        let client = OllamaClient::new("http://127.0.0.1:1");
+        // Pick a free port, then drop the listener so the port is
+        // unbound for the next `connect()`. There is a small race
+        // where another process could grab the port, but it's
+        // microseconds wide and the test's only assertion is
+        // "connect fails".
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let client = OllamaClient::new(endpoint);
         let err = client
             .health_check()
             .await
-            .expect_err("connection to closed port should fail");
+            .expect_err("connection to unbound port should fail");
         assert!(
             matches!(err, OllamaError::NotRunning),
             "expected NotRunning, got {err:?}"
@@ -264,5 +308,52 @@ mod tests {
             matches!(err, OllamaError::EmptyResponse),
             "expected EmptyResponse, got {err:?}"
         );
+    }
+
+    /// Test 5: a 4xx with a body larger than MAX_ERROR_BODY_BYTES
+    /// must not blow up the IPC error string. Pre-fix the body
+    /// was read with `text()` (unbounded); the fix wraps the body
+    /// read in `read_capped_body(..., MAX_ERROR_BODY_BYTES)`
+    /// which truncates beyond the cap (and appends a marker so
+    /// operators can see it happened).
+    #[tokio::test]
+    async fn generate_caps_error_body_at_max_bytes() {
+        let server = MockServer::start().await;
+        let huge_body = "x".repeat(MAX_ERROR_BODY_BYTES * 4);
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(huge_body))
+            .mount(&server)
+            .await;
+
+        let client = OllamaClient::new(server.uri());
+        let err = client
+            .generate("system", "prompt", "llama3")
+            .await
+            .expect_err("500 should yield Err");
+        match err {
+            OllamaError::Http(msg) => {
+                // The formatted error must include the status and
+                // the truncated-body marker so the operator can
+                // tell what happened.
+                assert!(msg.contains("500"));
+                assert!(
+                    msg.contains("<truncated,"),
+                    "expected truncation marker in error, got: {msg}"
+                );
+                // The body is truncated at MAX_ERROR_BODY_BYTES
+                // plus a fixed marker string ("... <truncated,
+                // body was N bytes>"), so the total msg length
+                // is bounded by ~MAX_ERROR_BODY_BYTES + a small
+                // constant for the status prefix + marker.
+                assert!(
+                    msg.len() < MAX_ERROR_BODY_BYTES + 200,
+                    "HTTP error msg is {} bytes (cap = {} + 200)",
+                    msg.len(),
+                    MAX_ERROR_BODY_BYTES
+                );
+            }
+            other => panic!("expected Http(_), got {other:?}"),
+        }
     }
 }
