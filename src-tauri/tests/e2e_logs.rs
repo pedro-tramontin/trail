@@ -38,8 +38,8 @@ fn seed_fixtures(src_raw_root: &Path, dst_trail_root: &Path, day: &str) -> PathB
         copied += 1;
     }
     assert!(
-        copied >= 3,
-        "expected >=3 fixture JSONs for {day}, copied {copied}"
+        copied >= 4,
+        "expected >=4 fixture JSONs for {day}, copied {copied}"
     );
     dst_day
 }
