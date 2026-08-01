@@ -51,6 +51,9 @@ dirs = { workspace = true }
 # mic's native-rate f32 frames and produces 16 kHz mono for whisper. It is
 # always built so the resampler tests can run on Linux CI.
 rubato = { workspace = true }
+# Phase 5 §5.4 — `tokio_util::sync::CancellationToken` for clean shutdown
+# of the tray-icon blink loop spawned by `BlinkLoop::spawn`.
+tokio-util = { workspace = true }
 
 # cpal pulls in the platform audio backend (CoreAudio on macOS, ALSA on
 # Linux, etc.). §W4 forbids headless Linux agents from trying to capture
