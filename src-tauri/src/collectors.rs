@@ -459,6 +459,13 @@ mod tests {
             },
             raw_retention_days: 7,
             pending_installs: vec![],
+            github_repos: vec![],
+            calendar_paths: vec![],
+            voice_model: "base.en".into(),
+            voice_language: "en".into(),
+            summarizer_backend: "ollama".into(),
+            transport_method: "ssh".into(),
+            ssh_key_path: None,
         }
     }
 
