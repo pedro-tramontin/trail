@@ -35,8 +35,12 @@ chrono = { workspace = true }
 # validate against the same bundled schema bytes.
 jsonschema = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
-# Phase 3 deps — explicit pinned versions (not workspace-inheriting) so
-# release-please v4 can rewrite them later without touching every consumer.
+# Phase 3 deps — `regex` / `once_cell` are workspace-inheriting
+# (pinned once in the root `Cargo.toml`); `reqwest` is pinned
+# locally because it needs the `default-features = false` +
+# `rustls-tls` feature set that the workspace definition doesn't
+# carry. `notify-rust` / `humantime` are tiny, infrequently-updated
+# crates and are pinned locally for the same reason.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = { workspace = true }
 once_cell = { workspace = true }
