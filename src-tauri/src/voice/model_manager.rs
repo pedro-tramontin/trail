@@ -51,15 +51,71 @@ fn trail_models_dir() -> Result<PathBuf, ModelError> {
     Ok(home.join(".trail").join("models"))
 }
 
+/// Download `url` to `dest`, streaming the response body to a temp
+/// file in the same directory as `dest` and renaming atomically on
+/// success. The HTTP status is checked up front; a non-2xx response
+/// is reported as `ModelError::Network` (the response body, if any,
+/// is consumed and dropped so the connection can be reused).
+///
+/// The 150 MB whisper model is too large to buffer in memory; the
+/// pre-fix implementation used `response.bytes()` (which materialises
+/// the full body into a `Bytes` buffer) and wrote the result to the
+/// final path. That code was also vulnerable to writing a 404 HTML
+/// page to the model file when the server returned a non-2xx — the
+/// SHA mismatch would only surface after a full wasted download.
+///
+/// Streaming via [`tokio::fs::File`] to a `.partial` sibling of
+/// `dest`, then `rename` on success, follows the same atomic-write
+/// pattern used elsewhere in the project (see `learner::save`).
 async fn download_model(url: &str, dest: &Path) -> Result<(), ModelError> {
-    let response = reqwest::get(url)
+    let mut response = reqwest::get(url)
         .await
         .map_err(|e| ModelError::Network(e.to_string()))?;
-    let bytes = response
-        .bytes()
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ModelError::Network(format!(
+            "download failed: HTTP {} for {url}",
+            status.as_u16()
+        )));
+    }
+    let partial = dest.with_extension("bin.partial");
+    // Best-effort remove of any stale partial from a prior failed
+    // download (ignore NotFound).
+    if let Err(e) = std::fs::remove_file(&partial) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(ModelError::Io(e));
+        }
+    }
+    let mut file = tokio::fs::File::create(&partial)
         .await
-        .map_err(|e| ModelError::Network(e.to_string()))?;
-    std::fs::write(dest, &bytes)?;
+        .map_err(ModelError::Io)?;
+    // `Response::chunk()` returns the next chunk of the body as
+    // `Bytes`, or `None` at EOF. We pull chunks until the stream is
+    // drained and write each one to the partial file. This keeps
+    // memory bounded to one chunk at a time (typically 16 KB
+    // per chunk by default for reqwest 0.12's default
+    // `Decoder`).
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ModelError::Network(e.to_string()))?
+    {
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .map_err(ModelError::Io)?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(ModelError::Io)?;
+    drop(file);
+    // Best-effort remove of the final destination so the rename
+    // works on Windows (where rename refuses to overwrite).
+    if let Err(e) = std::fs::remove_file(dest) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(ModelError::Io(e));
+        }
+    }
+    std::fs::rename(&partial, dest).map_err(ModelError::Io)?;
     Ok(())
 }
 
@@ -108,14 +164,18 @@ pub async fn ensure_model_with(
     let dest = models_dir.join("ggml-base.en.bin");
 
     if dest.exists() {
-        // Verify cached file. If the bytes don't match the
-        // fingerprint we treat the cache as corrupt and force a
-        // re-download below.
+        // Verify cached file. Only `Sha256Mismatch` is treated as
+        // "corrupt cache → force re-download" — I/O errors
+        // (permission denied, disk error, etc.) are propagated
+        // unchanged so the caller sees the real failure mode
+        // instead of a misleading "I deleted the cache and tried
+        // again" loop.
         match verify_sha256(&dest, expected_sha256) {
             Ok(()) => return Ok(dest),
-            Err(_) => {
+            Err(ModelError::Sha256Mismatch { .. }) => {
                 let _ = std::fs::remove_file(&dest);
             }
+            Err(other) => return Err(other),
         }
     }
 
@@ -193,18 +253,113 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_model_with_sha256_mismatch_errors() {
+        // Pre-fix this test depended on the real `MODEL_URL` being
+        // reachable from CI (and on its bytes not matching the bogus
+        // SHA) — both of which are flaky in offline / hermetic CI.
+        // The rewrite uses a local `wiremock` server (already a
+        // dev-dep via the ollama tests) to serve a known payload,
+        // then primes the cache with a different payload, then asks
+        // `ensure_model_with` to verify-and-recover.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let payload: Vec<u8> = b"wiremock-served model payload".to_vec();
+        let payload_sha = {
+            let mut hasher = Sha256::new();
+            hasher.update(&payload);
+            format!("{:x}", hasher.finalize())
+        };
+        Mock::given(method("GET"))
+            .and(path("/ggml-base.en.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+            .mount(&server)
+            .await;
+
         let tmp = tempfile::tempdir().unwrap();
         let models_dir = tmp.path().join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
-        let bytes = fake_model_bytes();
-        std::fs::write(models_dir.join("ggml-base.en.bin"), &bytes).unwrap();
+        // Pre-write a "corrupt" cache: bytes whose SHA does NOT
+        // match the mock's payload SHA.
+        let bogus_bytes: Vec<u8> = b"corrupt local cache".to_vec();
+        std::fs::write(models_dir.join("ggml-base.en.bin"), &bogus_bytes).unwrap();
 
-        // SHA that does NOT match the bytes.
+        // First call: cache SHA mismatch → delete + re-download →
+        // verify against mock's payload → Ok.
+        let url = format!("{}/ggml-base.en.bin", server.uri());
+        let result = ensure_model_with(&url, &payload_sha, Some(tmp.path())).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after cache mismatch + mock download, got {result:?}"
+        );
+        // The cached file should now be the mock's payload, not the
+        // original bogus bytes.
+        let on_disk = std::fs::read(models_dir.join("ggml-base.en.bin")).unwrap();
+        assert_eq!(on_disk, payload);
+    }
+
+    #[tokio::test]
+    async fn ensure_model_with_rejects_non_2xx_response() {
+        // Verifies the new HTTP-status check in `download_model`:
+        // a 404 from the server must surface as `Network(...)`
+        // without writing a partial / HTML body to the model file.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ggml-base.en.bin"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("{}/ggml-base.en.bin", server.uri());
+        let bogus_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+        let result = ensure_model_with(&url, bogus_sha, Some(tmp.path())).await;
+        match &result {
+            Err(ModelError::Network(msg)) => {
+                assert!(
+                    msg.contains("404"),
+                    "expected '404' in network error, got {msg:?}"
+                );
+            }
+            other => panic!("expected Network(404), got {other:?}"),
+        }
+        // The model file must not have been created (no partial / 404
+        // body written to disk).
+        assert!(!tmp.path().join("models/ggml-base.en.bin").exists());
+        // The .partial file must also be absent.
+        assert!(!tmp.path().join("models/ggml-base.en.bin.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_model_propagates_io_error_from_corrupt_cache() {
+        // Verifies the cache-verify error-handling fix: I/O errors
+        // from `verify_sha256` (e.g. permission denied) must NOT be
+        // swallowed with `Err(_) => delete + retry`. Pre-fix code
+        // would delete the cache and re-attempt the download.
+        //
+        // We can't easily make `std::fs::read` fail on a writable
+        // tempdir, so we make the cache a *directory*: `read` on a
+        // directory returns `EISDIR`, which is an I/O error (not
+        // `Sha256Mismatch`).
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        // Replace the expected model file with a directory of the
+        // same name so the cache-verify hits an I/O error.
+        let dest = models_dir.join("ggml-base.en.bin");
+        std::fs::remove_file(&dest).ok();
+        std::fs::create_dir(&dest).unwrap();
+
         let bogus_sha = "0000000000000000000000000000000000000000000000000000000000000000";
         let result = ensure_model_with(MODEL_URL, bogus_sha, Some(tmp.path())).await;
-        assert!(
-            matches!(result, Err(ModelError::Sha256Mismatch { .. })),
-            "expected Sha256Mismatch, got {result:?}"
-        );
+        // Must be a real I/O error, NOT `Sha256Mismatch`.
+        match &result {
+            Err(ModelError::Io(_)) => {} // expected
+            Err(other) => panic!("expected Io error (not swallowed), got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }
