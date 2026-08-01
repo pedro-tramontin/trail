@@ -118,12 +118,22 @@ pub const REQUIRED_SECTIONS: &[&str] = &[
 /// no-op in v1; the value is preserved in the call so item 3-3
 /// (anonymizer real impl) doesn't need a signature change.
 ///
+/// `bootstrap_path` is the absolute path to the `summary_bootstrap.json`
+/// file the learner maintains (see [`crate::learner`]). When the file
+/// exists, its rules are rendered as a Markdown block and injected into
+/// the user prompt just below the "Context for the day's schedule:"
+/// header — so the model sees the user's prior preferences as few-shot
+/// context. When the file is missing or empty, the `{bootstrap}`
+/// placeholder is replaced with the empty string (no behavioural
+/// change vs. v1).
+///
 /// `client` is a pre-built [`OllamaClient`]; tests pass a `wiremock`
 /// server's URI while production code constructs one with
 /// [`OllamaClient::new`] against the default endpoint.
 pub async fn run(
     raw_root: &Path,
     drafts_dir: &Path,
+    bootstrap_path: &Path,
     date: &str,
     model: &str,
     strictness: &str,
@@ -164,9 +174,16 @@ pub async fn run(
     //    prompt-iteration debugging tractable.
     let by_source: BTreeMap<String, serde_json::Value> = raw_payloads.into_iter().collect();
     let raw_data_json = serde_json::to_string_pretty(&by_source)?;
+    // Render the learner bootstrap as a Markdown block. Returns `None`
+    // when the file is missing or the rules list is empty; in both
+    // cases the placeholder collapses to the empty string, preserving
+    // the v1 prompt shape.
+    let bootstrap_block_text = crate::learner::bootstrap_block(bootstrap_path)
+        .unwrap_or(None)
+        .unwrap_or_default();
     let user_prompt = USER_PROMPT_TEMPLATE
         .replace("{date}", date)
-        .replace("{bootstrap}", "") // v1: no learning (item 3-4 adds it).
+        .replace("{bootstrap}", &bootstrap_block_text)
         .replace("{raw_data_json}", &raw_data_json);
 
     // 3. Call ollama. Any ollama-layer failure (network down, model
@@ -218,6 +235,14 @@ mod tests {
     /// A canned 5-section Markdown response. Every required header is
     /// present so the happy-path tests pass validation.
     const CANNED_FIVE_SECTIONS: &str = "## Summary\n\nTested summarizer end-to-end with two collectors.\n\n## Wins\n\n- Wrote fixtures\n- Wired ollama mock\n\n## Blockers\n\nNone\n\n## People\n\n- [PM] for review feedback\n\n## Open threads\n\n- Land item 3-3 (anonymizer) next.\n";
+
+    /// Bootstrap path used by tests — a path under `/tmp` that is
+    /// guaranteed not to exist. `learner::bootstrap_block` returns
+    /// `None` for missing files, so the `{bootstrap}` placeholder
+    /// collapses to `""` exactly like the v1 behaviour.
+    fn test_bootstrap_path(tmp: &TempDir) -> std::path::PathBuf {
+        tmp.path().join("nonexistent-summary-bootstrap.json")
+    }
 
     /// Same shape as CANNED_FIVE_SECTIONS but with `## People` removed,
     /// for the missing-section test.
@@ -272,6 +297,7 @@ mod tests {
         let receipt = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
@@ -312,6 +338,7 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2099-01-01",
             "llama3",
             "moderate",
@@ -341,6 +368,7 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
@@ -379,6 +407,7 @@ mod tests {
         let receipt = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
@@ -412,6 +441,7 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
