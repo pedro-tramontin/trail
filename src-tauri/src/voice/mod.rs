@@ -11,6 +11,7 @@
 //! context and write JSON+WAV atomically. Tauri IPC for
 //! `voice_start`/`voice_stop` lands in §5.7 (Part B).
 
+pub mod abort;
 pub mod capture;
 pub mod hotkey;
 pub mod meter;
@@ -19,7 +20,8 @@ pub mod store;
 pub mod transcriber;
 pub mod tray_blink;
 
-pub use capture::{resample_to_16k, spawn_capture_loop, CaptureError, Frame};
+pub use abort::{no_op_abort, voice_abort, AbortError};
+pub use capture::{resample_to_16k, spawn_capture_loop, CaptureError, CaptureState, Frame};
 pub use hotkey::{parse_hotkey, register as register_hotkey, HotKey, HotkeyError};
 pub use meter::Meter;
 pub use model_manager::{ensure_model, ensure_model_with, ModelError, EXPECTED_SHA256, MODEL_URL};
