@@ -1,13 +1,23 @@
-//! Phase 6 onboarding scaffolding. The two submodules are:
+//! Phase 6 onboarding scaffolding. Submodules:
 //!
 //! - [`scan`]: non-invasive laptop filesystem + env probe. Detects which
 //!   collectors the user *could* install based on artifacts already on
 //!   the disk. Never reads, never installs.
-//!
-//! Later phases (6-2 LLM Q&A, 6-3 config writer) live alongside this
-//! module once the spec lands. Keeping this module root small so the
-//! diff for 6-1 stays focused on the scan surface.
+//! - [`answers`]: the typed `OnboardingAnswers` struct that Phase C
+//!   (config-writer) consumes, plus the LLM-envelope shape that mirrors
+//!   `schemas/onboarding-answer.schema.json`.
+//! - [`baseline`]: the hardcoded fallback answers when ollama is
+//!   unreachable. Pure data transform over a `ScanReport`.
+//! - [`llm`]: the LLM-driven entry point (`ask_onboarding`) that feeds
+//!   the scan to a local ollama server with structured output, validates
+//!   the response against the JSON Schema, and flattens the envelope
+//!   into the typed `OnboardingAnswers`. Falls back to [`baseline`]
+//!   on any ollama failure.
 
+pub mod answers;
+pub mod baseline;
+pub mod llm;
 pub mod scan;
 
+pub use answers::OnboardingAnswers;
 pub use scan::{CollectorCandidate, CollectorStatus, EvidenceKind, Platform, ScanReport};
