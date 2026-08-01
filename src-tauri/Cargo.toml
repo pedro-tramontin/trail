@@ -59,6 +59,10 @@ rubato = { workspace = true }
 # exercised in tests.
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = { workspace = true }
+# Phase 5 §5.3 — global-hotkey is the macOS-only push-to-talk shortcut
+# crate. On Linux the `register` function is a no-op stub so the parser
+# + tests can run there.
+global-hotkey = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
