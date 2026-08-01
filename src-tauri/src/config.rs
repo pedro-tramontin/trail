@@ -7,6 +7,13 @@ use crate::anonymizer::AnonymizationRule;
 /// Mirrors the schema frozen in the master plan. Every field is required
 /// in v1 — there are no serde defaults because a missing required field
 /// is a config error, not a silently-filled one.
+///
+/// Phase 6 §6.3 added the trailing seven fields (all `#[serde(default)]`)
+/// so v1 config blobs written before the Phase C config-writer still
+/// deserialize cleanly. They carry the LLM-driven onboarding answers
+/// (github repos, calendar paths, voice language, summarizer backend
+/// string, transport method string, ssh key path) that don't have a
+/// natural home in the frozen v1 schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub claude_sessions_paths: Vec<PathBuf>,
@@ -18,6 +25,52 @@ pub struct Config {
     pub transport: TransportConfig,
     pub raw_retention_days: u32,
     pub pending_installs: Vec<String>,
+
+    // --- Phase 6 §6.3 onboarding extras (all serde default so older
+    //     configs load cleanly) ---
+    /// `github` collector repos (`owner/repo` slugs). Populated by the
+    /// Phase C config-writer from the LLM's answers; older v1 configs
+    /// have this empty.
+    #[serde(default)]
+    pub github_repos: Vec<String>,
+    /// Calendar `.ics` file paths the calendar_ics collector should
+    /// watch. Phase C maps the first one to [`Config::calendar_ics`]
+    /// and carries the rest here.
+    #[serde(default)]
+    pub calendar_paths: Vec<String>,
+    /// Whisper model id (e.g. `"base.en"`). Mirrors
+    /// [`VoiceConfig::model`] so the wizard can read it without
+    /// following the typed-struct pointer.
+    #[serde(default)]
+    pub voice_model: String,
+    /// BCP-47 primary subtag for voice transcription (e.g. `"en"`).
+    #[serde(default = "default_voice_language")]
+    pub voice_language: String,
+    /// `"ollama" | "stub"` — the LLM's `summarizer.backend` answer.
+    #[serde(default = "default_summarizer_backend")]
+    pub summarizer_backend: String,
+    /// `"tailscale" | "ssh"` — the LLM's `transport.method` answer.
+    /// Independent of the typed [`TransportConfig`] (which carries
+    /// the SSH skeleton).
+    #[serde(default = "default_transport_method")]
+    pub transport_method: String,
+    /// SSH key path. `Some` after Phase C emits the config
+    /// post-keypair-generation; `None` when the keychain still holds
+    /// the password slot.
+    #[serde(default)]
+    pub ssh_key_path: Option<PathBuf>,
+}
+
+fn default_voice_language() -> String {
+    "en".to_string()
+}
+
+fn default_summarizer_backend() -> String {
+    "stub".to_string()
+}
+
+fn default_transport_method() -> String {
+    "ssh".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

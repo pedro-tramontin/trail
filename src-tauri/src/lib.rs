@@ -69,6 +69,45 @@ fn greet(name: &str) -> String {
     format!("Hello, {name}! You've been greeted from Rust.")
 }
 
+/// Phase 6 §6.3 — Tauri command: Phase C of the onboarding wizard.
+///
+/// Chains three steps in one IPC call:
+///   1. Convert the LLM's `OnboardingAnswers` into the frozen `Config`.
+///   2. Atomically write `~/.trail/config.json` (write + fsync + rename).
+///   3. Append a JSONL row to `~/.trail/onboarding_audit.jsonl`.
+///
+/// `ssh_key_generated` is the `bool` item 1-2 returned: `true` means
+/// the keypair is already in the macOS Keychain, so we emit the
+/// `PublicKey { path }` auth variant. `false` falls back to the
+/// `Password { env_var }` placeholder so the parsed config still
+/// validates (the wizard re-emits the config after item 1-2's
+/// `generate_ssh_key` succeeds).
+///
+/// Errors surface as `String` for the Tauri command boundary, so the
+/// Svelte wizard can render them directly.
+#[tauri::command]
+async fn write_onboarding_config(
+    answers: onboarding::OnboardingAnswers,
+    ssh_key_generated: bool,
+) -> Result<String, String> {
+    // 1. Convert.
+    let cfg = onboarding::config_writer::answers_to_config(&answers, ssh_key_generated);
+
+    // 2. Atomic write to `~/.trail/config.json`.
+    let dest = onboarding::config_writer::config_path();
+    let serialised =
+        serde_json::to_string_pretty(&cfg).map_err(|e| format!("serialise config: {e}"))?;
+    onboarding::config_writer::write_config(&cfg, &dest)
+        .map_err(|e| format!("write config to {}: {e}", dest.display()))?;
+
+    // 3. Append the audit log row (with the sha256 of the just-written
+    //    JSON bytes so the row references the *exact* file we wrote).
+    onboarding::config_writer::append_audit_log_with_hash(&answers, &dest, &serialised)
+        .map_err(|e| format!("append audit log: {e}"))?;
+
+    Ok(dest.display().to_string())
+}
+
 #[tauri::command]
 fn get_config(path: String) -> Result<config::Config, String> {
     config::load_config(std::path::Path::new(&path)).map_err(|e| e.to_string())
@@ -269,6 +308,12 @@ pub fn run() {
             // unreachable. Returns a typed `OnboardingAnswers` for
             // Phase C (item 6-3, config-writer).
             onboarding::llm::ask_onboarding_cmd,
+            // Phase 6 §6.3 — convert the LLM's `OnboardingAnswers`
+            // into the frozen `Config`, atomically write it to
+            // `~/.trail/config.json`, and append a JSONL audit-log
+            // row. The wizard (item 6-4) chains scan → ask →
+            // write_onboarding_config.
+            write_onboarding_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
