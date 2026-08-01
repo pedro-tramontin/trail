@@ -32,30 +32,64 @@ use std::fmt;
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 
 /// Maximum bytes to read from an error response body. Anything
-/// larger is truncated (via `read_capped_body` below) so a
-/// misbehaving server can't blow up the log / IPC error with a
-/// multi-MB body. `reqwest 0.12` does not ship a
-/// `text_with_limit` API, so we read `bytes()` and bound the
-/// lossy decode ourselves.
+/// larger is truncated by [`read_capped_body`] so a misbehaving
+/// server can't blow up the log / IPC error with a multi-MB body.
+/// `reqwest 0.12` does not ship a `text_with_limit` API, so we
+/// drive `Response::chunk()` ourselves and stop as soon as the
+/// accumulated buffer reaches the cap (we do NOT buffer the full
+/// body, so a multi-GB 5xx response still only allocates ~`cap`
+/// bytes on the heap).
 pub const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
-/// Read the response body with a hard byte cap. Returns a UTF-8
-/// lossy-decoded string no longer than `cap` bytes; if the body
-/// was larger, the string is suffixed with a marker so the
-/// operator knows the response was truncated. Decode errors
-/// surface as the placeholder so the caller still gets an error
-/// message rather than panicking.
-async fn read_capped_body(resp: reqwest::Response, cap: usize) -> String {
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => return "<unreadable>".to_string(),
-    };
-    if bytes.len() <= cap {
-        return String::from_utf8_lossy(&bytes).into_owned();
+/// Read up to `cap` bytes from the response body, streaming one
+/// chunk at a time. Returns a UTF-8 lossy-decoded string no
+/// longer than `cap` bytes; if the body was larger than `cap`,
+/// the string is suffixed with a `<truncated at cap bytes>`
+/// marker (the marker does NOT include the total body size —
+/// computing that would require reading past the cap).
+///
+/// I/O and decode errors surface as the `"<unreadable>"`
+/// placeholder so the caller still gets an error message rather
+/// than panicking.
+async fn read_capped_body(resp: &mut reqwest::Response, cap: usize) -> String {
+    let mut buf: Vec<u8> = Vec::with_capacity(cap.min(8 * 1024));
+    let mut truncated = false;
+    loop {
+        match resp.chunk().await {
+            // Stream ended cleanly. We're done.
+            Ok(None) => break,
+            Err(_) => return "<unreadable>".to_string(),
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > cap {
+                    // Take only what fits in the remaining cap, then mark truncated.
+                    let remaining = cap - buf.len();
+                    buf.extend_from_slice(&chunk[..remaining]);
+                    truncated = true;
+                    break;
+                }
+                buf.extend_from_slice(&chunk);
+                if buf.len() == cap {
+                    // Cap reached on a chunk boundary. There may be
+                    // more bytes (we don't know without peeking), so
+                    // mark truncated and stop.
+                    truncated = true;
+                    break;
+                }
+            }
+        }
     }
-    // Truncated: decode up to `cap` and append a marker.
-    let truncated = String::from_utf8_lossy(&bytes[..cap]).into_owned();
-    format!("{truncated}... <truncated, body was {} bytes>", bytes.len())
+    if truncated {
+        // We do NOT include the actual total body size — computing
+        // it would require draining the rest of the stream past the
+        // cap, which defeats the purpose of a true capped read.
+        format!(
+            "{}... <truncated at cap of {} bytes>",
+            String::from_utf8_lossy(&buf),
+            cap,
+        )
+    } else {
+        String::from_utf8_lossy(&buf).into_owned()
+    }
 }
 
 /// Typed errors from the ollama client. The three variants cover the
@@ -158,7 +192,7 @@ impl OllamaClient {
         // branch on the typed variant instead of matching on reqwest
         // error text. `send()` itself only fails on the request build /
         // connect stage; 4xx/5xx come back through the Ok arm.
-        let resp = match self.http.post(&url).json(&body).send().await {
+        let mut resp = match self.http.post(&url).json(&body).send().await {
             Ok(r) => r,
             Err(_) => return Err(OllamaError::NotRunning),
         };
@@ -166,10 +200,10 @@ impl OllamaClient {
         if !status.is_success() {
             // Read the body (best-effort) so the error message
             // includes what ollama told us. Cap the read at
-            // MAX_ERROR_BODY_BYTES so a misbehaving server can't
-            // blow up the log / IPC error with a multi-MB error
-            // body (see `read_capped_body`).
-            let body = read_capped_body(resp, MAX_ERROR_BODY_BYTES).await;
+            // MAX_ERROR_BODY_BYTES via `read_capped_body`, which
+            // streams one chunk at a time and stops at the cap (no
+            // full-body buffering, even on a multi-GB 5xx).
+            let body = read_capped_body(&mut resp, MAX_ERROR_BODY_BYTES).await;
             return Err(OllamaError::Http(format!("status {status}: {body}")));
         }
         let parsed: GenerateResponse = match resp.json().await {
@@ -310,12 +344,17 @@ mod tests {
         );
     }
 
-    /// Test 5: a 4xx with a body larger than MAX_ERROR_BODY_BYTES
-    /// must not blow up the IPC error string. Pre-fix the body
-    /// was read with `text()` (unbounded); the fix wraps the body
-    /// read in `read_capped_body(..., MAX_ERROR_BODY_BYTES)`
-    /// which truncates beyond the cap (and appends a marker so
-    /// operators can see it happened).
+    /// Test 5: a server responding with a 500 whose body is 4×
+    /// `MAX_ERROR_BODY_BYTES` must not blow up the IPC error string.
+    /// Pre-fix the body was read with `text()` (unbounded). The
+    /// first iteration of this fix wrapped `read_capped_body` around
+    /// `bytes().await`, which STILL buffered the whole body before
+    /// truncation — a cosmetic cap, not a memory cap. The current
+    /// version drives `Response::chunk()` one chunk at a time and
+    /// stops as soon as the buffer crosses the cap; we cannot
+    /// know the total body size without reading past the cap, so
+    /// the marker is `<truncated at cap of N bytes>` (the constant
+    /// N), not `body was N bytes` (the actual size).
     #[tokio::test]
     async fn generate_caps_error_body_at_max_bytes() {
         let server = MockServer::start().await;
@@ -334,18 +373,17 @@ mod tests {
         match err {
             OllamaError::Http(msg) => {
                 // The formatted error must include the status and
-                // the truncated-body marker so the operator can
-                // tell what happened.
+                // the truncation marker so the operator can tell
+                // what happened.
                 assert!(msg.contains("500"));
                 assert!(
-                    msg.contains("<truncated,"),
+                    msg.contains("<truncated at cap of"),
                     "expected truncation marker in error, got: {msg}"
                 );
                 // The body is truncated at MAX_ERROR_BODY_BYTES
-                // plus a fixed marker string ("... <truncated,
-                // body was N bytes>"), so the total msg length
-                // is bounded by ~MAX_ERROR_BODY_BYTES + a small
-                // constant for the status prefix + marker.
+                // plus a fixed marker ("... <truncated at cap of N
+                // bytes>"), so the total msg length is bounded by
+                // ~MAX_ERROR_BODY_BYTES + a small constant.
                 assert!(
                     msg.len() < MAX_ERROR_BODY_BYTES + 200,
                     "HTTP error msg is {} bytes (cap = {} + 200)",
