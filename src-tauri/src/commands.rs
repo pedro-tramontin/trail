@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use crate::config;
+use crate::logs::{self, LogEntry};
 use crate::ollama::{OllamaClient, DEFAULT_ENDPOINT};
 use crate::summarizer::{self, SummarizeReceipt};
 use crate::transport::{self, Transport};
@@ -130,6 +131,43 @@ pub async fn record_review_diff(
     let bootstrap =
         record_event(&bootstrap_path, kind, &before, &after).map_err(|e| e.to_string())?;
     Ok(bootstrap.rules.len())
+}
+
+/// Phase 4 §4.1 Tauri command: list every raw collector file for
+/// a given day, sorted by `captured_at` ascending. The frontend
+/// uses this to render the Logs UI rows. Returns an empty Vec
+/// when the day's directory doesn't exist — missing days are not
+/// an error (the UI should show an empty state).
+#[tauri::command]
+pub async fn list_logs(config_path: String, date: String) -> Result<Vec<LogEntry>, String> {
+    let cfg = config::load_config(std::path::Path::new(&config_path)).map_err(|e| e.to_string())?;
+    let trail_root = trail_root_from_config(&cfg);
+    logs::list_logs(&trail_root, &date).map_err(|e| e.to_string())
+}
+
+/// Phase 4 §4.1 Tauri command: delete the raw collector file for
+/// `(date, source)`. Idempotent — calling it on a missing file is
+/// a no-op (so the UI's "delete" button stays safe on re-click).
+#[tauri::command]
+pub async fn delete_log(config_path: String, date: String, source: String) -> Result<(), String> {
+    let cfg = config::load_config(std::path::Path::new(&config_path)).map_err(|e| e.to_string())?;
+    let trail_root = trail_root_from_config(&cfg);
+    logs::delete_log(&trail_root, &date, &source).map_err(|e| e.to_string())
+}
+
+/// Phase 4 §4.1 Tauri command: read + parse the raw JSON file for
+/// `(date, source)`. Returns the parsed `serde_json::Value` so the
+/// frontend can pretty-print, schema-validate, or diff against the
+/// draft.
+#[tauri::command]
+pub async fn get_raw_json(
+    config_path: String,
+    date: String,
+    source: String,
+) -> Result<serde_json::Value, String> {
+    let cfg = config::load_config(std::path::Path::new(&config_path)).map_err(|e| e.to_string())?;
+    let trail_root = trail_root_from_config(&cfg);
+    logs::get_raw_json(&trail_root, &date, &source).map_err(|e| e.to_string())
 }
 
 /// Resolve the `~/.trail/` root directory from the loaded config. The
