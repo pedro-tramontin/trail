@@ -47,3 +47,8 @@ humantime = "2"
 tempfile = { workspace = true }
 # HTTP mock server for the ollama client unit tests — see src/ollama.rs.
 wiremock = { workspace = true }
+# Phase 3 §3.5 — the scheduler uses `tokio::time::pause()` + `advance()`
+# in its `spawn_loop_fires_within_5_second_tolerance` test, both of
+# which live behind the `test-util` feature (the workspace `tokio`
+# dep is `full`, which does not include `test-util`).
+tokio = { workspace = true, features = ["test-util"] }
