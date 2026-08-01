@@ -1,20 +1,25 @@
 <script lang="ts">
-  import { logsState, remove, refresh } from "./stores/logs.svelte";
-  import { getRawJson } from "./api/logs";
+  import { logsState, remove, refresh } from "$lib/stores/logs.svelte";
+  import { getRawJson } from "$lib/api/logs";
   import LogsDetail from "./LogsDetail.svelte";
 
   /**
    * Timeline view for the Logs screen. Renders `logsState.entries`
-   * chronologically (the order returned by the `list_logs` IPC
-   * command, which is sorted newest-first by the Rust side). Each row
-   * can be expanded inline to reveal the raw JSON via `LogsDetail`,
-   * or deleted via the per-row ✕ button.
+   * chronologically in the order returned by the `list_logs` IPC
+   * command (sorted oldest-first by `captured_at`, with `source`
+   * as a deterministic tie-breaker — see `logs::list_logs`). Each
+   * row can be expanded inline to reveal the raw JSON via
+   * `LogsDetail`, or deleted via the per-row ✕ button.
    *
    * Auto-loads on mount via `$effect` so consumers don't have to
    * remember to call `refresh()` themselves.
    */
 
   let expanded = $state<string | null>(null);
+  // Track the request token so we can ignore a stale response if
+  // the user clicks a different row (or collapses) before the
+  // current getRawJson() resolves. (PR #26 Copilot thread T2.)
+  let rawToken = 0;
   let rawJson = $state<unknown>(null);
   let loadingRaw = $state(false);
 
@@ -25,11 +30,27 @@
       return;
     }
     expanded = source;
+    // Clear any payload from a previously expanded row so we never
+    // flash the old JSON while the new fetch is in flight, and
+    // bump the token so an in-flight old request can't overwrite
+    // this row's payload once it lands.
+    rawJson = null;
     loadingRaw = true;
+    const myToken = ++rawToken;
     try {
-      rawJson = await getRawJson(logsState.selectedDate, source);
+      const result = await getRawJson(logsState.selectedDate, source);
+      if (myToken !== rawToken) return; // a newer fetch (or collapse) won
+      rawJson = result;
+    } catch (err) {
+      if (myToken !== rawToken) return;
+      // Leave rawJson null so the panel renders an error message
+      // via LogsDetail instead of stale JSON. The error is logged
+      // for the dev console but not surfaced as a banner — the
+      // row was already expanded by user action.
+      console.error("getRawJson failed for", source, err);
+      rawJson = { error: String(err) };
     } finally {
-      loadingRaw = false;
+      if (myToken === rawToken) loadingRaw = false;
     }
   }
 
@@ -71,24 +92,26 @@
   <ul class="timeline" role="list">
     {#each logsState.entries as entry (entry.source)}
       <li class="row" role="listitem" data-testid="row-{entry.source}">
-        <button
-          class="row-button"
-          type="button"
-          onclick={() => toggleExpand(entry.source)}
-          aria-expanded={expanded === entry.source}
-        >
-          <span class="source">{entry.source}</span>
-          <span class="time">{entry.captured_at}</span>
-          <span class="size">{formatBytes(entry.size_bytes)}</span>
-        </button>
-        <button
-          class="delete"
-          type="button"
-          aria-label="Delete {entry.source} log"
-          onclick={(e) => onDelete(entry.source, e)}
-        >
-          ✕
-        </button>
+        <div class="row-main">
+          <button
+            class="row-button"
+            type="button"
+            onclick={() => toggleExpand(entry.source)}
+            aria-expanded={expanded === entry.source}
+          >
+            <span class="source">{entry.source}</span>
+            <span class="time">{entry.captured_at}</span>
+            <span class="size">{formatBytes(entry.size_bytes)}</span>
+          </button>
+          <button
+            class="delete"
+            type="button"
+            aria-label="Delete {entry.source} log"
+            onclick={(e) => onDelete(entry.source, e)}
+          >
+            ✕
+          </button>
+        </div>
         {#if expanded === entry.source}
           <div class="detail" data-testid="detail">
             {#if loadingRaw}
@@ -118,10 +141,14 @@
     margin-bottom: 0.5rem;
     overflow: hidden;
   }
+  .row-main {
+    display: flex;
+    align-items: stretch;
+  }
   .row-button {
+    flex: 1 1 auto;
     display: flex;
     justify-content: space-between;
-    width: 100%;
     padding: 0.5rem 1rem;
     background: none;
     border: none;
@@ -144,8 +171,10 @@
     margin-left: 1rem;
   }
   .delete {
+    flex: 0 0 auto;
     background: none;
     border: none;
+    border-left: 1px solid var(--border, #ccc);
     color: var(--danger, #c00);
     cursor: pointer;
     padding: 0.5rem 1rem;
