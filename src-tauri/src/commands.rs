@@ -74,10 +74,13 @@ pub fn validate_day_summary(payload: serde_json::Value) -> Result<(), String> {
 /// delegates to `summarizer::run`, and surfaces the receipt (or a
 /// flattened error string) to the frontend.
 ///
-/// `model` — ollama model name to use (e.g. `"llama3"`). For v1 the
-/// caller passes whatever they configured; the command doesn't read
-/// `Config.summarizer.model` because that field lands in Phase 1 §1.x
-/// and the menu-bar UI calls this with a user-picked value.
+/// `model` — ollama model name to use (e.g. `"llama3"`). The
+/// caller passes whatever the user picked; we deliberately ignore
+/// `Config.summarizer.model` (the field exists in `config.rs`
+/// already, but the menu-bar UI passes the model as an explicit
+/// argument so the same call works for "summarize today with the
+/// last-used model" and "summarize today with this experimental
+/// one").
 #[tauri::command]
 pub async fn summarize_day(
     config_path: String,
@@ -237,16 +240,16 @@ pub async fn voice_stop() -> Result<String, String> {
     }
 }
 
-/// Resolve the `~/.trail/` root directory from the loaded config. The
-/// config itself doesn't store its own location (we only ever persist
-/// the raw/drafts subdirs), so we look next to the config file —
-/// matching `resolve_paths` in `lib.rs`.
+/// Resolve the `~/.trail/` root directory from the loaded config.
+/// In v1 we always derive it from `$HOME/.trail` (the Phase 2
+/// collectors' hardcoded path) — there is no `config_path`-relative
+/// resolution yet. A future item (Phase 6) will move the resolution
+/// into the config so the Tauri UI can pick a non-default
+/// `trail_root`; for now both sides must agree on `~/.trail/`.
 fn trail_root_from_config(_cfg: &config::Config) -> std::path::PathBuf {
-    // Phase 3 convention: the trail root is the parent dir of
-    // `config.json`, falling back to `~/.trail/` when the dir layout
-    // is unknown. This avoids baking a Tauri-specific path resolution
-    // into the summarizer (which is also unit-testable without an
-    // `AppHandle`).
+    // The summarizer is unit-testable without an `AppHandle`; using
+    // `$HOME` here matches the collectors' convention so the test
+    // fixtures' `trail_root` aligns with what production will see.
     if let Some(home) = std::env::var_os("HOME") {
         std::path::PathBuf::from(home).join(".trail")
     } else {
