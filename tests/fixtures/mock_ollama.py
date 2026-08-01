@@ -4,10 +4,11 @@ on POST /api/generate + returns 200 on GET /api/tags (health check).
 Run as: python3 mock_ollama.py <port>
 """
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-CANNED_RESPONSE = """\
+CANNED_RESPONSE_TEMPLATE = """\
 ## Summary
 
 Worked on the trail-collector refactor and the day-summary schema migration.
@@ -19,7 +20,7 @@ Worked on the trail-collector refactor and the day-summary schema migration.
 
 ## Blockers
 
-- None
+None
 
 ## People
 
@@ -43,18 +44,50 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        # Read the full body so the e2e harness can verify what the
+        # summarizer actually sent. The pre-fix handler discarded the
+        # body, so the harness couldn't tell whether the learner
+        # bootstrap was injected into the prompt on the second run.
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        # Write the body to a file the harness can grep. The file
+        # path is `$MOCK_LOG_DIR/$MOCK_LOG_FILE`; both are set by
+        # the harness so the mock has no hard-coded knowledge of
+        # where to log.
+        log_dir = os.environ.get("MOCK_LOG_DIR", "/tmp")
+        log_file = os.environ.get("MOCK_LOG_FILE", "mock_ollama-bodies.log")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, log_file), "a") as f:
+                f.write(f"--- POST {self.path} ({length} bytes) ---\n")
+                f.write(body)
+                f.write("\n")
+        except OSError:
+            pass  # logging is best-effort
+
         if self.path == "/api/generate":
-            length = int(self.headers.get("Content-Length", 0))
-            _ = self.rfile.read(length)  # discard body
-            payload = {
-                "model": "llama3",
-                "response": CANNED_RESPONSE,
-                "done": True,
-            }
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(payload).encode())
+            # `body` is the JSON request; parse it to extract the
+            # user_prompt so the canned response can vary by content
+            # (e.g. echo a "bootstrap" marker when the prompt contains
+            # the bootstrap block string).
+            try:
+                req = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                req = {}
+            prompt = req.get("prompt", "")
+            response_text = CANNED_RESPONSE_TEMPLATE
+            # Mark a second-run request that includes the bootstrap.
+            if "User preferences learned" in prompt:
+                response_text = (
+                    CANNED_RESPONSE_TEMPLATE
+                    + "\n\n<!-- e2e marker: bootstrap-injected -->\n"
+                )
+            self.wfile.write(
+                json.dumps({"response": response_text, "done": True}).encode()
+            )
         else:
             self.send_response(404)
             self.end_headers()
@@ -65,7 +98,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 11434
+    # Default to 11435 to avoid colliding with a real ollama running
+    # on 11434. The e2e harness (tests/e2e_summarizer.sh) sets
+    # `MOCK_PORT=11434` when it needs to match the production
+    # endpoint; the script-level default is 11435.
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 11435
     server = HTTPServer(("127.0.0.1", port), Handler)
     print(f"mock_ollama listening on http://127.0.0.1:{port}", flush=True)
     try:
