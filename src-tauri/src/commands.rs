@@ -89,9 +89,47 @@ pub async fn summarize_day(
     let drafts_dir = trail_root.join("drafts");
     let strictness = cfg.summarizer.anonymization_strictness.as_str();
     let client = OllamaClient::new(DEFAULT_ENDPOINT);
-    summarizer::run(&raw_root, &drafts_dir, &date, &model, strictness, &client)
-        .await
-        .map_err(|e| e.to_string())
+    let bootstrap_path = trail_root.join("summary_bootstrap.json");
+    summarizer::run(
+        &raw_root,
+        &drafts_dir,
+        &bootstrap_path,
+        &date,
+        &model,
+        strictness,
+        &client,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Tauri command: record a single user-driven edit to a draft section
+/// (called by the Review UI whenever Pedro edits a section or
+/// unchecks an item). Classifies the (before, after) pair into a
+/// [`crate::learner::LearningKind`], appends it to the
+/// `summary_bootstrap.json` file, and returns the new total rule
+/// count. The `section` argument is currently unused by the
+/// classifier but is reserved for a future version that scopes rules
+/// per `## ` heading.
+#[tauri::command]
+pub async fn record_review_diff(
+    config_path: String,
+    section: String,
+    before: String,
+    after: String,
+) -> Result<usize, String> {
+    use crate::learner::{classify, record_event};
+    let cfg = config::load_config(std::path::Path::new(&config_path)).map_err(|e| e.to_string())?;
+    let trail_root = trail_root_from_config(&cfg);
+    let bootstrap_path = trail_root.join("summary_bootstrap.json");
+    let kind = classify(&before, &after);
+    // v1: treat the whole before/after as a single "pattern → replacement"
+    // rule. A future v2 might tokenize into smaller fragments; the
+    // `section` argument is held back for that work.
+    let _ = section; // currently unused; see doc comment above.
+    let bootstrap =
+        record_event(&bootstrap_path, kind, &before, &after).map_err(|e| e.to_string())?;
+    Ok(bootstrap.rules.len())
 }
 
 /// Resolve the `~/.trail/` root directory from the loaded config. The

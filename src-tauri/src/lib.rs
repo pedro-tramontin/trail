@@ -25,6 +25,13 @@ pub mod summarizer;
 // Today this is a no-op pass-through so `summarizer::run` compiles +
 // tests can exercise the scrubbing call site pre-§3.3.
 pub mod anonymizer;
+// Phase 3 §3.4 — the learner. Classifies user edits to the draft and
+// maintains a `summary_bootstrap.json` file under the trail root so
+// future summarizer runs see prior preferences as few-shot context.
+// The `summarizer::run` signature takes a `bootstrap_path: &Path`
+// argument and calls `learner::bootstrap_block` to render the
+// in-prompt Markdown.
+pub mod learner;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -204,6 +211,7 @@ pub fn run() {
             commands::push_to_vps,
             commands::validate_day_summary,
             commands::summarize_day,
+            commands::record_review_diff,
             list_collectors,
             run_collector_now,
             set_collector_enabled,
