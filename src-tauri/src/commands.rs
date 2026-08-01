@@ -101,6 +101,7 @@ pub async fn summarize_day(
         &date,
         &model,
         strictness,
+        &cfg.summarizer.anonymization_rules,
         &client,
     )
     .await
