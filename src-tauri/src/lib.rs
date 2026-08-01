@@ -46,6 +46,11 @@ pub mod scheduler;
 // `commands.rs` can re-export the commands + tests can drive the
 // module without an `AppHandle` or live filesystem.
 pub mod logs;
+// Phase 5 §5.1 — voice capture pipeline. This item only ships the
+// `model_manager` sub-module (downloads + verifies the whisper GGML
+// file). Audio capture (5-2), transcription (5-3), hotkey (5-4), and
+// IPC (5-5) land in later items as siblings alongside `model_manager`.
+pub mod voice;
 
 use std::path::PathBuf;
 use std::sync::Arc;
