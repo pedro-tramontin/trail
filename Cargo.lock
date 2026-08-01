@@ -5674,6 +5674,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-cron-scheduler",
+ "tokio-util",
  "tracing",
  "whisper-rs",
  "wiremock",
