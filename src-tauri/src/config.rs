@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::anonymizer::AnonymizationRule;
+
 /// Top-level laptop config, loaded from `~/.trail/config.json`.
 /// Mirrors the schema frozen in the master plan. Every field is required
 /// in v1 — there are no serde defaults because a missing required field
@@ -39,9 +41,18 @@ pub struct SummarizerConfig {
     pub model: String,
     /// "local" | "ollama_cloud"
     pub model_provider: String,
-    /// "aggressive" | "moderate" | "off"
+    /// "aggressive" | "moderate" | "off" — defaults to "aggressive" if
+    /// absent in the config file, so older `config.json` blobs that omit
+    /// this field still load.
+    #[serde(default)]
     pub anonymization_strictness: String,
     pub use_generic_categories: bool,
+    /// Per-user anonymization rules (literal substring → placeholder).
+    /// Replaces explicit names ("ACME Corp" → "[COMPANY]") before any
+    /// built-in regex scrubber runs. Defaults to empty so older configs
+    /// without this field still load.
+    #[serde(default)]
+    pub anonymization_rules: Vec<AnonymizationRule>,
 }
 
 /// Transport is an open-ended enum: v1 ships only `Ssh`, but
