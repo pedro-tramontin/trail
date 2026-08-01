@@ -17,6 +17,14 @@ pub mod prompts;
 // Typed HTTP client for the local ollama server — see `src/ollama.rs`
 // for the request shape + error type.
 pub mod ollama;
+// Phase 3 §3.2 — core summarize-day pipeline (loads raw/<date>/*.json,
+// calls ollama, scrubs, validates the five `##` sections, writes the
+// draft, returns a `SummarizeReceipt`).
+pub mod summarizer;
+// Phase 3 §3.2 shim — the real anonymizer regex scrubber lands in §3.3.
+// Today this is a no-op pass-through so `summarizer::run` compiles +
+// tests can exercise the scrubbing call site pre-§3.3.
+pub mod anonymizer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -195,6 +203,7 @@ pub fn run() {
             commands::health_check_transport,
             commands::push_to_vps,
             commands::validate_day_summary,
+            commands::summarize_day,
             list_collectors,
             run_collector_now,
             set_collector_enabled,

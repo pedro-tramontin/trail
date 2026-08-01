@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 
 use crate::config;
+use crate::ollama::{OllamaClient, DEFAULT_ENDPOINT};
+use crate::summarizer::{self, SummarizeReceipt};
 use crate::transport::{self, Transport};
 use crate::validate;
 
@@ -63,6 +65,50 @@ pub async fn push_to_vps(
 #[tauri::command]
 pub fn validate_day_summary(payload: serde_json::Value) -> Result<(), String> {
     validate::validate(&payload).map_err(|e| e.errors.join("\n"))
+}
+
+/// Tauri command: build the per-day draft from the raw collector
+/// JSON. Reads the config (for `trail_root` + model resolution),
+/// spins up a fresh `OllamaClient` against the default endpoint,
+/// delegates to `summarizer::run`, and surfaces the receipt (or a
+/// flattened error string) to the frontend.
+///
+/// `model` — ollama model name to use (e.g. `"llama3"`). For v1 the
+/// caller passes whatever they configured; the command doesn't read
+/// `Config.summarizer.model` because that field lands in Phase 1 §1.x
+/// and the menu-bar UI calls this with a user-picked value.
+#[tauri::command]
+pub async fn summarize_day(
+    config_path: String,
+    date: String,
+    model: String,
+) -> Result<SummarizeReceipt, String> {
+    let cfg = config::load_config(std::path::Path::new(&config_path)).map_err(|e| e.to_string())?;
+    let trail_root = trail_root_from_config(&cfg);
+    let raw_root = trail_root.join("raw");
+    let drafts_dir = trail_root.join("drafts");
+    let strictness = cfg.summarizer.anonymization_strictness.as_str();
+    let client = OllamaClient::new(DEFAULT_ENDPOINT);
+    summarizer::run(&raw_root, &drafts_dir, &date, &model, strictness, &client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve the `~/.trail/` root directory from the loaded config. The
+/// config itself doesn't store its own location (we only ever persist
+/// the raw/drafts subdirs), so we look next to the config file —
+/// matching `resolve_paths` in `lib.rs`.
+fn trail_root_from_config(_cfg: &config::Config) -> std::path::PathBuf {
+    // Phase 3 convention: the trail root is the parent dir of
+    // `config.json`, falling back to `~/.trail/` when the dir layout
+    // is unknown. This avoids baking a Tauri-specific path resolution
+    // into the summarizer (which is also unit-testable without an
+    // `AppHandle`).
+    if let Some(home) = std::env::var_os("HOME") {
+        std::path::PathBuf::from(home).join(".trail")
+    } else {
+        std::path::PathBuf::from(".trail")
+    }
 }
 
 #[cfg(test)]
