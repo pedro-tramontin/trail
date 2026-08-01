@@ -262,6 +262,13 @@ pub fn run() {
             // future onboarding wizard (item 6-4) to enumerate
             // detectors that found artifacts on the user's disk.
             onboarding::scan::scan_laptop_cmd,
+            // Phase 6 §6.2 — LLM-driven onboarding Q&A. Feeds the
+            // scan report to the local ollama server, validates the
+            // response against `schemas/onboarding-answer.schema.json`,
+            // and falls back to a hardcoded baseline when ollama is
+            // unreachable. Returns a typed `OnboardingAnswers` for
+            // Phase C (item 6-3, config-writer).
+            onboarding::llm::ask_onboarding_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");

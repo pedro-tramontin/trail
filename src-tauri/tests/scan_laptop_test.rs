@@ -11,8 +11,8 @@
 use std::path::Path;
 
 use trail_lib::onboarding::scan::{
-    CollectorCandidate, CollectorStatus, EvidenceKind, Platform, ScanReport,
-    scan_laptop_with_config,
+    scan_laptop_with_config, CollectorCandidate, CollectorStatus, EvidenceKind, Platform,
+    ScanReport,
 };
 
 /// Build a tempdir-shaped home directory and stage a single mock
