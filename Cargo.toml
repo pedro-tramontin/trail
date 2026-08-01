@@ -69,6 +69,16 @@ tokio-util = "0.7"
 # provides v4 entry_ids for voice store entries.
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
+# Phase 5 §5.7 — macOS mic permission detection via `objc2` (the modern
+# safe wrapper around Apple's Objective-C runtime). The trio of
+# `objc2` + `objc2-foundation` + `block2` is the standard macOS bindings
+# stack. Pinned at the workspace level so every member that needs them
+# resolves to one version. `target_os = "macos"` gate is downstream —
+# these crates don't compile on Linux (block2 + objc2 both transitively
+# link CoreFoundation) so they only land on macOS at the call site.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
 
 [profile.release]
 opt-level = 3
