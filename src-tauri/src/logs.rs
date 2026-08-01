@@ -37,7 +37,11 @@ pub struct LogEntry {
 
 /// Error type for the logs module. All variants convert into a
 /// `String` at the Tauri command boundary so the frontend can
-/// surface a single human-readable message.
+/// surface a single human-readable message. `InvalidSource` is
+/// raised by the path-traversal defense in `delete_log` /
+/// `get_raw_json` when the caller-supplied `source` is not a
+/// single normal path component (contains a separator, `..`, a
+/// NUL byte, or is empty).
 #[derive(Debug, Error)]
 pub enum LogsError {
     #[error("io error: {0}")]
@@ -46,6 +50,32 @@ pub enum LogsError {
     Json(#[from] serde_json::Error),
     #[error("invalid date: {0}")]
     InvalidDate(String),
+    #[error("invalid source: {0:?}")]
+    InvalidSource(String),
+}
+
+/// Validate that `source` is a single normal path component. We
+/// reject any value that contains a separator (`/` or `\`), a
+/// `..` parent reference, a NUL byte, or is empty. This is the
+/// path-traversal defense for `delete_log` and `get_raw_json`:
+/// without it, a caller could pass `"../../etc/passwd"` as the
+/// source and have the IPC command read or delete files outside
+/// `<trail_root>/raw/<date>/`.
+fn validate_source(source: &str) -> Result<(), LogsError> {
+    if source.is_empty() {
+        return Err(LogsError::InvalidSource(source.to_string()));
+    }
+    if source.contains('/') || source.contains('\\') || source.contains('\0') {
+        return Err(LogsError::InvalidSource(source.to_string()));
+    }
+    if source == "." || source == ".." {
+        return Err(LogsError::InvalidSource(source.to_string()));
+    }
+    // Belt and suspenders: a path component starting with `.` (but
+    // not equal to "." or "..") is fine on disk, but on macOS the
+    // `.DS_Store` etc. could be confusing. Allow it — the only
+    // requirement is that no separator is in the string.
+    Ok(())
 }
 
 /// Parse a `"YYYY-MM-DD"` string into a [`NaiveDate`]. Returns
@@ -62,7 +92,16 @@ pub fn parse_date(date: &str) -> Result<NaiveDate, LogsError> {
 /// `Vec<LogEntry>`. Returns an empty `Vec` if the date directory
 /// doesn't exist — missing days are not an error (the UI should
 /// show an empty state instead of a toast).
+///
+/// The `date` argument is validated via [`parse_date`] (rejecting
+/// non-`YYYY-MM-DD` strings and path-traversal values like
+/// `"../drafts"`) before the directory lookup. This matches what
+/// `delete_log` / `get_raw_json` already do — without the
+/// validation, a malicious caller could read files outside
+/// `<trail_root>/raw/<date>/` by passing a `date` value that
+/// resolves through the path component.
 pub fn list_logs(trail_root: &Path, date: &str) -> Result<Vec<LogEntry>, LogsError> {
+    let _ = parse_date(date)?;
     let dir = trail_raw_dir(trail_root, date);
     if !dir.exists() {
         return Ok(Vec::new());
@@ -95,10 +134,13 @@ pub fn list_logs(trail_root: &Path, date: &str) -> Result<Vec<LogEntry>, LogsErr
             date: date.to_string(),
         });
     }
-    // Chronological order: ascending by `captured_at`. Ties (empty
-    // strings) keep their insertion order, which is the OS's
-    // `read_dir` order — that's stable enough for v1.
-    entries.sort_by(|a, b| a.captured_at.cmp(&b.captured_at));
+    // Chronological order: ascending by `captured_at`, ties broken
+    // by `source` (the file stem). `Vec::sort_by` is not stable, so
+    // we use `sort_by_key` with a tuple to make ties deterministic
+    // across runs/OSes — without the tie-breaker, two files with
+    // empty `captured_at` (missing-field case) could swap order
+    // between runs on macOS vs. Linux.
+    entries.sort_by(|a, b| (&a.captured_at, &a.source).cmp(&(&b.captured_at, &b.source)));
     Ok(entries)
 }
 
@@ -106,11 +148,14 @@ pub fn list_logs(trail_root: &Path, date: &str) -> Result<Vec<LogEntry>, LogsErr
 /// file doesn't exist, returns `Ok(())`. We don't update any
 /// journal/index file in v1; the file just goes away and the next
 /// collector run will write a fresh one.
+///
+/// `source` is validated as a single normal path component
+/// (no separators, no `..`, no NUL, non-empty) before the path is
+/// built, so a caller cannot escape the
+/// `<trail_root>/raw/<date>/` sandbox.
 pub fn delete_log(trail_root: &Path, date: &str, source: &str) -> Result<(), LogsError> {
-    // Validate the date up front so the caller gets a clear
-    // `InvalidDate` instead of a confusing IO error from
-    // `read_dir` against a malformed path component.
     let _ = parse_date(date)?;
+    validate_source(source)?;
     let path = trail_raw_file(trail_root, date, source);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -123,12 +168,17 @@ pub fn delete_log(trail_root: &Path, date: &str, source: &str) -> Result<(), Log
 /// the parsed `serde_json::Value` so the frontend can render it
 /// as it sees fit (pretty-printed, schema-validated, diffed
 /// against the draft, …).
+///
+/// `source` is validated as a single normal path component (see
+/// [`delete_log`]) before the path is built, so a caller cannot
+/// escape the `<trail_root>/raw/<date>/` sandbox.
 pub fn get_raw_json(
     trail_root: &Path,
     date: &str,
     source: &str,
 ) -> Result<serde_json::Value, LogsError> {
     let _ = parse_date(date)?;
+    validate_source(source)?;
     let path = trail_raw_file(trail_root, date, source);
     let bytes = std::fs::read(&path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -294,5 +344,94 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = get_raw_json(tmp.path(), "2026-07-29", "nonexistent");
         assert!(result.is_err());
+    }
+
+    /// Path-traversal defense for `list_logs`: a `date` value like
+    /// `"../drafts"` would (pre-fix) resolve through the
+    /// `<trail_root>/raw/...` path and either silently read a
+    /// different directory or surface a confusing IO error. The
+    /// fix validates `date` via `parse_date()` first and returns
+    /// `LogsError::InvalidDate` for non-`YYYY-MM-DD` strings.
+    #[test]
+    fn list_logs_rejects_path_traversal_in_date() {
+        let tmp = TempDir::new().unwrap();
+        // Set up a sibling "drafts" directory we should NOT be able
+        // to read via a `../drafts` date.
+        std::fs::create_dir_all(tmp.path().join("../drafts")).unwrap();
+        let result = list_logs(tmp.path(), "../drafts");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidDate(_)));
+    }
+
+    /// Path-traversal defense for `delete_log` / `get_raw_json`:
+    /// a `source` value like `"../../etc/passwd"` would (pre-fix)
+    /// resolve to a file outside `<trail_root>/raw/<date>/`. The
+    /// fix validates `source` as a single normal path component
+    /// and returns `LogsError::InvalidSource`.
+    #[test]
+    fn delete_log_rejects_path_traversal_in_source() {
+        let tmp = TempDir::new().unwrap();
+        let result = delete_log(tmp.path(), "2026-07-29", "../../etc/passwd");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidSource(_)));
+    }
+
+    #[test]
+    fn delete_log_rejects_source_with_separator() {
+        let tmp = TempDir::new().unwrap();
+        // A forward slash is a path separator on all platforms.
+        let result = delete_log(tmp.path(), "2026-07-29", "sub/dir/github");
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidSource(_)));
+        // A backslash is a separator on Windows; reject on all
+        // platforms to keep the validation rule uniform.
+        let result = delete_log(tmp.path(), "2026-07-29", "sub\\github");
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidSource(_)));
+        // An empty source is invalid.
+        let result = delete_log(tmp.path(), "2026-07-29", "");
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidSource(_)));
+        // "." and ".." are explicitly rejected even without a
+        // separator (they would resolve to current/parent dir).
+        assert!(matches!(
+            delete_log(tmp.path(), "2026-07-29", ".").unwrap_err(),
+            LogsError::InvalidSource(_)
+        ));
+        assert!(matches!(
+            delete_log(tmp.path(), "2026-07-29", "..").unwrap_err(),
+            LogsError::InvalidSource(_)
+        ));
+    }
+
+    #[test]
+    fn get_raw_json_rejects_path_traversal_in_source() {
+        let tmp = TempDir::new().unwrap();
+        let result = get_raw_json(tmp.path(), "2026-07-29", "../github");
+        assert!(matches!(result.unwrap_err(), LogsError::InvalidSource(_)));
+    }
+
+    /// Sort-stability regression: when two files have the same
+    /// `captured_at` (including the empty-string fallback for
+    /// missing fields), the order must be deterministic across
+    /// runs. The pre-fix `sort_by` was unstable; the fix sorts by
+    /// `(captured_at, source)` so ties resolve by source name.
+    #[test]
+    fn list_logs_sorts_ties_deterministically_by_source() {
+        let tmp = TempDir::new().unwrap();
+        setup_day(
+            tmp.path(),
+            "2026-07-29",
+            &[
+                // Three files with no `captured_at` field (empty
+                // string on both sides — pure tie case).
+                ("zeta", r#"{"source":"zeta","date":"2026-07-29"}"#),
+                ("alpha", r#"{"source":"alpha","date":"2026-07-29"}"#),
+                ("mike", r#"{"source":"mike","date":"2026-07-29"}"#),
+            ],
+        );
+        let entries = list_logs(tmp.path(), "2026-07-29").unwrap();
+        assert_eq!(entries.len(), 3);
+        // Sorted by source: alpha, mike, zeta.
+        assert_eq!(entries[0].source, "alpha");
+        assert_eq!(entries[1].source, "mike");
+        assert_eq!(entries[2].source, "zeta");
     }
 }
