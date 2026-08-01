@@ -14,6 +14,21 @@ use std::path::PathBuf;
 fn main() {
     tauri_build::build();
 
+    // Phase 5 §5.7 — link AVFoundation (and its two transitive
+    // deps that expose the AVMediaTypeAudio extern NSString* + the
+    // audio session primitives that `AVCaptureDevice` calls into)
+    // into the main binary on macOS. `objc2::class!(AVCaptureDevice)`
+    // + `AVMediaTypeAudio` symbol lookup need the framework to be
+    // resolvable at link time; gating to macOS keeps the Linux build
+    // (used in CI) free of `-framework AVFoundation` flags which the
+    // Linux linker wouldn't accept.
+    #[cfg(target_os = "macos")]
+    {
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+    }
+
     // Resolve the workspace root by walking up from CARGO_MANIFEST_DIR
     // (src-tauri/) until we find the `Cargo.toml` that has `[workspace]`.
     // Robust against build-hosts that nest the workspace in `..`.
