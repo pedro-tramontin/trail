@@ -179,10 +179,22 @@ pub async fn run(
     // Render the learner bootstrap as a Markdown block. Returns `None`
     // when the file is missing or the rules list is empty; in both
     // cases the placeholder collapses to the empty string, preserving
-    // the v1 prompt shape.
-    let bootstrap_block_text = crate::learner::bootstrap_block(bootstrap_path)
-        .unwrap_or(None)
-        .unwrap_or_default();
+    // the v1 prompt shape. I/O or JSON errors are logged but
+    // downgraded to "no bootstrap" so a corrupt/missing bootstrap
+    // file doesn't take down the whole summarizer run — the user
+    // just loses the few-shot context, not the day's summary.
+    let bootstrap_block_text = match crate::learner::bootstrap_block(bootstrap_path) {
+        Ok(Some(block)) => block,
+        Ok(None) => String::new(),
+        Err(e) => {
+            eprintln!(
+                "summarizer: bootstrap_block failed at {}: {} (continuing without bootstrap)",
+                bootstrap_path.display(),
+                e
+            );
+            String::new()
+        }
+    };
     let user_prompt = USER_PROMPT_TEMPLATE
         .replace("{date}", date)
         .replace("{bootstrap}", &bootstrap_block_text)
