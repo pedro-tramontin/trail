@@ -113,6 +113,34 @@ fn get_config(path: String) -> Result<config::Config, String> {
     config::load_config(std::path::Path::new(&path)).map_err(|e| e.to_string())
 }
 
+/// Phase 6 §6.4 — Tauri command: probe whether the user's
+/// `~/.trail/config.json` exists on disk. Used by `App.svelte`
+/// to decide whether to mount the onboarding wizard or the
+/// regular shell.
+///
+/// Returns `true` only when the file exists AND is non-empty —
+/// a zero-byte file (a torn write from a previous crash) is
+/// treated as "not present" so the wizard re-runs cleanly.
+/// The path resolution mirrors the dev/CI fallback in
+/// `resolve_paths`: `app_config_dir().join("config.json")` if
+/// a Tauri `AppHandle` is available, otherwise
+/// `$HOME/.trail/config.json`.
+#[tauri::command]
+fn config_exists(app: tauri::AppHandle) -> bool {
+    let dir = match app.path().app_config_dir() {
+        Ok(d) => d,
+        Err(_) => match std::env::var("HOME") {
+            Ok(h) => std::path::PathBuf::from(h).join(".trail"),
+            Err(_) => return false,
+        },
+    };
+    let path = dir.join("config.json");
+    path.is_file()
+        && std::fs::metadata(&path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+}
+
 #[tauri::command]
 fn generate_ssh_key() -> Result<String, String> {
     keyring::generate_and_store().map_err(|e| e.to_string())
@@ -314,6 +342,10 @@ pub fn run() {
             // row. The wizard (item 6-4) chains scan → ask →
             // write_onboarding_config.
             write_onboarding_config,
+            // Phase 6 §6.4 — probe whether `~/.trail/config.json`
+            // exists. Drives the App.svelte gate that mounts
+            // <Onboarding /> vs the regular shell.
+            config_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
