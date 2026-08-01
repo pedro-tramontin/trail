@@ -58,6 +58,8 @@ rubato = "0.15"
 # macOS in src-tauri/Cargo.toml (Linux builds don't need it; the parser
 # + tests run on Linux against a stub).
 global-hotkey = "0.7"
+# Phase 5 §5.4 — CancellationToken for the tray-icon blink loop.
+tokio-util = "0.7"
 
 [profile.release]
 opt-level = 3
