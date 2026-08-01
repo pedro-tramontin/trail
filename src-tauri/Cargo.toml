@@ -38,7 +38,8 @@ tokio-cron-scheduler = { workspace = true }
 # Phase 3 deps — explicit pinned versions (not workspace-inheriting) so
 # release-please v4 can rewrite them later without touching every consumer.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-regex = "1"
+regex = { workspace = true }
+once_cell = { workspace = true }
 notify-rust = "4"
 humantime = "2"
 
