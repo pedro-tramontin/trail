@@ -32,6 +32,14 @@ pub mod anonymizer;
 // argument and calls `learner::bootstrap_block` to render the
 // in-prompt Markdown.
 pub mod learner;
+// Phase 3 §3.5 — the scheduler. Background tokio task that fires the
+// summarizer at the configured `review_time`, posts a system
+// notification via `notify-rust`, and updates the tray-icon badge
+// with `drafts ready: N`. This item only ships the standalone module
+// + 3 unit tests; wiring it into `run()` below is the coordinator's
+// follow-up decision (so we keep the `mod` declaration `pub` for the
+// tests + IPC visibility).
+pub mod scheduler;
 
 use std::path::PathBuf;
 use std::sync::Arc;
