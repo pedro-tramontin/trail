@@ -33,12 +33,14 @@ pub mod anonymizer;
 // in-prompt Markdown.
 pub mod learner;
 // Phase 3 §3.5 — the scheduler. Background tokio task that fires the
-// summarizer at the configured `review_time`, posts a system
-// notification via `notify-rust`, and updates the tray-icon badge
-// with `drafts ready: N`. This item only ships the standalone module
-// + 3 unit tests; wiring it into `run()` below is the coordinator's
+// summarizer at the configured `review_time`, updates the tray-icon
+// badge with `drafts ready: N`, and records the last-fire timestamp
+// in `SchedulerState`. This item only ships the standalone module
+// + unit tests; wiring it into `run()` below is the coordinator's
 // follow-up decision (so we keep the `mod` declaration `pub` for the
-// tests + IPC visibility).
+// tests + IPC visibility). Notifications via `notify-rust` are
+// deferred to a follow-up item — the v1 surface is the tray-badge
+// callback only.
 pub mod scheduler;
 // Phase 4 §4.1 — the logs backend. Three Tauri IPC commands
 // (`list_logs`, `delete_log`, `get_raw_json`) over the day's raw
