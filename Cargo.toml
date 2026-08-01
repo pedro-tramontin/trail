@@ -54,6 +54,10 @@ dirs = "5"
 # resampler to 16 kHz mono for whisper.
 cpal = "0.15"
 rubato = "0.15"
+# Phase 5 §5.3 — global-hotkey for the push-to-talk shortcut. Gated to
+# macOS in src-tauri/Cargo.toml (Linux builds don't need it; the parser
+# + tests run on Linux against a stub).
+global-hotkey = "0.7"
 
 [profile.release]
 opt-level = 3
