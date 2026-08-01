@@ -178,6 +178,15 @@ pub fn run() {
                 resolve_paths(Some(app.handle())).map_err(|e| -> Box<dyn std::error::Error> {
                     format!("resolving config paths: {e}").into()
                 })?;
+            // Phase 5 §5.6 — register the shared `CaptureState` so the
+            // `voice_abort` IPC command can clear the in-memory samples
+            // buffer and `.abort()` the consumer task. Wrapped in an
+            // `Arc` because Tauri hands the State back by value and
+            // `CaptureState` is shared between the cpal-callback
+            // thread, the consumer task, and the abort handler.
+            app.manage(std::sync::Arc::new(
+                crate::voice::capture::CaptureState::new(),
+            ));
             let cfg =
                 config::load_config(&config_path).map_err(|e| -> Box<dyn std::error::Error> {
                     format!("loading config from {}: {e}", config_path.display()).into()
@@ -236,6 +245,10 @@ pub fn run() {
             commands::list_logs,
             commands::delete_log,
             commands::get_raw_json,
+            // Phase 5 §5.6 — voice abort IPC command. Clears the
+            // shared samples buffer, aborts the consumer task, and
+            // removes any partial WAV + JSON files.
+            commands::voice_abort,
             list_collectors,
             run_collector_now,
             set_collector_enabled,

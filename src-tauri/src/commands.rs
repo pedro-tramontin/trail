@@ -3,6 +3,7 @@
 //! only registers the handlers.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config;
 use crate::logs::{self, LogEntry};
@@ -10,6 +11,7 @@ use crate::ollama::{OllamaClient, DEFAULT_ENDPOINT};
 use crate::summarizer::{self, SummarizeReceipt};
 use crate::transport::{self, Transport};
 use crate::validate;
+use crate::voice::capture::CaptureState;
 
 /// Build a `Box<dyn Transport>` from the laptop config on disk. Both
 /// error sources are flattened to `String` so the frontend sees a
@@ -185,6 +187,13 @@ pub async fn get_raw_json(
 // resulting `VoiceEntry` to disk) lands in §5.7 (Part B) once
 // macOS TCC microphone permission is sorted out.
 //
+// `voice_abort` (§5.6) is wired now because the abort path doesn't
+// need a real cpal stream — it just needs the shared
+// `CaptureState` registered via `app.manage()` so it can clear the
+// samples buffer and `.abort()` the consumer JoinHandle. On Linux
+// it returns the same "voice capture is only supported on macOS"
+// error as `voice_start`/`voice_stop`.
+//
 // For Part A we keep the surface stable: on macOS the command
 // names exist (and return a friendly message) so the frontend
 // binding compiles, but the heavy work is deferred. On Linux the
@@ -227,6 +236,16 @@ pub async fn voice_start() -> Result<String, String> {
 /// `voice::store::write_atomic` to persist the JSON + WAV pair.
 /// The full impl lives in §5.7. For Part A we just acknowledge
 /// the request.
+///
+/// §5.6 abort-on-failure: when the future §5.7 impl's
+/// `transcribe` step returns `Err(...)`, the full command will
+/// call `crate::voice::abort::voice_abort(...)` to roll the
+/// partial capture back (drop the samples buffer, abort the
+/// consumer task, delete the partial files). For Part A the
+/// stub returns the friendly message above without touching the
+/// `CaptureState`; the abort path is independently testable via
+/// the `voice_abort` Tauri command and the `voice::abort` unit
+/// tests.
 #[tauri::command]
 #[allow(dead_code)] // Wired into the invoke handler in §5.7 (Part B).
 pub async fn voice_stop() -> Result<String, String> {
@@ -237,16 +256,42 @@ pub async fn voice_stop() -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // Touch the abort module so the §5.6 unit tests stay
+        // covered on non-macOS hosts where the cpal branch is
+        // never reached.
+        crate::voice::no_op_abort().map_err(|e| e.to_string())?;
         Err("voice capture is only supported on macOS".to_string())
     }
 }
 
-/// Resolve the `~/.trail/` root directory from the loaded config.
-/// In v1 we always derive it from `$HOME/.trail` (the Phase 2
-/// collectors' hardcoded path) — there is no `config_path`-relative
-/// resolution yet. A future item (Phase 6) will move the resolution
-/// into the config so the Tauri UI can pick a non-default
-/// `trail_root`; for now both sides must agree on `~/.trail/`.
+/// Phase 5 §5.6 Tauri command: abort an in-progress voice capture.
+///
+/// Drops the in-memory samples buffer, aborts the consumer task
+/// via `JoinHandle.abort()`, and removes any partial WAV + JSON
+/// files from `~/.trail/raw/<date>/voice/<entry_id>.{json,wav}`.
+/// Idempotent — safe to call when no capture is active (returns
+/// `Ok` with the buffer empty and no files removed).
+///
+/// `trail_root` + `date` + `entry_id` identify the partial files
+/// to delete, if any. The store's `delete` is itself idempotent
+/// so passing an `entry_id` with no on-disk file is harmless.
+#[tauri::command]
+pub async fn voice_abort(
+    state: tauri::State<'_, Arc<CaptureState>>,
+    trail_root: std::path::PathBuf,
+    date: String,
+    entry_id: uuid::Uuid,
+) -> Result<String, String> {
+    crate::voice::abort::voice_abort(state.inner(), &trail_root, &date, entry_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("voice capture aborted".into())
+}
+
+/// Resolve the `~/.trail/` root directory from the loaded config. The
+/// config itself doesn't store its own location (we only ever persist
+/// the raw/drafts subdirs), so we look next to the config file —
+/// matching `resolve_paths` in `lib.rs`.
 fn trail_root_from_config(_cfg: &config::Config) -> std::path::PathBuf {
     // The summarizer is unit-testable without an `AppHandle`; using
     // `$HOME` here matches the collectors' convention so the test
