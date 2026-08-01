@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &date,
         "llama3",
         "aggressive",
+        &[], // no user-configured anonymization rules in the e2e harness
         &client,
     )
     .await?;
