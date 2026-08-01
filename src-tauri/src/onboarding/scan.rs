@@ -34,7 +34,7 @@
 //!   they already have on.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 /// per-collector `generated_at` doesn't drift if the scan takes a few
 /// seconds (it doesn't — scan is sync and fast — but we'd rather have
 /// the contract be "one timestamp per report").
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     pub generated_at: DateTime<Utc>,
     pub platform: Platform,
@@ -58,7 +58,7 @@ pub struct ScanReport {
 /// for the three already-implemented sources, plus the seven
 /// additional ones onboarding introduces. UI callers key off this
 /// field; `display_name` is a human-readable label.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectorCandidate {
     pub collector_id: String,
     pub display_name: String,
@@ -69,7 +69,7 @@ pub struct CollectorCandidate {
 }
 
 /// Coarse tri-state. See module-level docs for semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectorStatus {
     /// Evidence found on disk and not yet enabled in config.
@@ -85,7 +85,7 @@ pub enum CollectorStatus {
 /// command-evidence path because it confirms a logged-in user, not
 /// just a stale config file). See `confidence_from_evidence` for
 /// the mapping table.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvidenceKind {
     FileExists { path: PathBuf },
@@ -98,7 +98,7 @@ pub enum EvidenceKind {
 /// Detected host OS. `Other` exists so a future Windows or BSD scan
 /// doesn't break the JSON shape — we just round-trip the
 /// `cfg(target_os = "...")` string back to the caller.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "os", rename_all = "snake_case")]
 pub enum Platform {
     Macos,
