@@ -54,6 +54,10 @@ rubato = { workspace = true }
 # Phase 5 §5.4 — `tokio_util::sync::CancellationToken` for clean shutdown
 # of the tray-icon blink loop spawned by `BlinkLoop::spawn`.
 tokio-util = { workspace = true }
+# Phase 5 §5.5 — parking_lot::Mutex guards the lazy whisper context,
+# uuid::v4 generates entry_ids for voice store writes.
+parking_lot = { workspace = true }
+uuid = { workspace = true }
 
 # cpal pulls in the platform audio backend (CoreAudio on macOS, ALSA on
 # Linux, etc.). §W4 forbids headless Linux agents from trying to capture

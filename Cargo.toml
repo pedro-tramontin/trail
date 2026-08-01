@@ -60,6 +60,11 @@ rubato = "0.15"
 global-hotkey = "0.7"
 # Phase 5 §5.4 — CancellationToken for the tray-icon blink loop.
 tokio-util = "0.7"
+# Phase 5 §5.5 — parking_lot::Mutex wraps the lazy whisper context
+# (faster than std::sync::Mutex under low contention), and uuid
+# provides v4 entry_ids for voice store entries.
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 opt-level = 3
