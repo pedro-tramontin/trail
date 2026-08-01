@@ -7,17 +7,27 @@
 //! (`Ctrl+Shift+Space` by default) and registers it on macOS with
 //! conflict detection. `meter` + `tray_blink` (5-4) compute RMS over
 //! a sliding window and animate the tray icon at a rate proportional
-//! to loudness. Upcoming: `transcriber` (whisper-rs bindings) and
-//! `commands` (5-5 IPC).
+//! to loudness. `transcriber` + `store` (5-5) run the lazy whisper
+//! context and write JSON+WAV atomically. Tauri IPC for
+//! `voice_start`/`voice_stop` lands in §5.7 (Part B).
 
 pub mod capture;
 pub mod hotkey;
 pub mod meter;
 pub mod model_manager;
+pub mod store;
+pub mod transcriber;
 pub mod tray_blink;
 
 pub use capture::{resample_to_16k, spawn_capture_loop, CaptureError, Frame};
 pub use hotkey::{parse_hotkey, register as register_hotkey, HotKey, HotkeyError};
 pub use meter::Meter;
 pub use model_manager::{ensure_model, ensure_model_with, ModelError, EXPECTED_SHA256, MODEL_URL};
+pub use store::{
+    delete as delete_voice_entry, new_entry_id, voice_paths, write_atomic, VoiceEntry,
+};
+pub use transcriber::{
+    init_context as init_whisper_context, transcribe, Segment, TranscribeError, Transcript,
+    WhisperContext,
+};
 pub use tray_blink::{BlinkLoop, IconCallback};
