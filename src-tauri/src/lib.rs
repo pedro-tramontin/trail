@@ -9,6 +9,7 @@ mod collectors;
 mod commands;
 mod config;
 mod keyring;
+pub mod onboarding;
 mod transport;
 mod validate;
 // Frozen Phase 3 prompt template constants — see `src/prompts.rs` for the
@@ -257,6 +258,10 @@ pub fn run() {
             list_collectors,
             run_collector_now,
             set_collector_enabled,
+            // Phase 6 §6.1 — non-invasive laptop scan. Used by the
+            // future onboarding wizard (item 6-4) to enumerate
+            // detectors that found artifacts on the user's disk.
+            onboarding::scan::scan_laptop_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
