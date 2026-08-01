@@ -1,6 +1,7 @@
 /// <reference types="vitest" />
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import path from "node:path";
 
 // Svelte 5 detects jsdom as a "server" environment unless we explicitly
 // hint it as browser via export conditions. The `browser` condition picks
@@ -8,7 +9,18 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 const useBrowserResolve = !!process.env.VITEST;
 
 export default defineConfig({
-  resolve: useBrowserResolve ? { conditions: ["browser"] } : undefined,
+  resolve: useBrowserResolve
+    ? {
+        conditions: ["browser"],
+        alias: {
+          $lib: path.resolve(__dirname, "src/lib"),
+        },
+      }
+    : {
+        alias: {
+          $lib: path.resolve(__dirname, "src/lib"),
+        },
+      },
   plugins: [svelte()],
   clearScreen: false,
   server: {

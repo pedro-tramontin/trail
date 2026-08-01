@@ -1,1 +1,1 @@
-{"source": "claude_sessions", "captured_at": "2026-07-29T18:00:00Z", "date": "2026-07-29", "payload": {"sessions": [{"session_id": "abc-123", "started_at": "2026-07-29T16:00:00Z", "duration_minutes": 45, "summary": "Worked on Phase 3 item 3-2 (summarizer).", "tag": "implement"}]}}
+{"source":"claude_sessions","captured_at":"2026-07-29T17:45:00Z","date":"2026-07-29","payload":{"sessions":[{"id":"sess-1","started_at":"2026-07-29T15:30:00Z","ended_at":"2026-07-29T16:15:00Z","turns":42}]}}
