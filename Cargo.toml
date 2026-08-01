@@ -37,6 +37,11 @@ walkdir = "2"
 tempfile = "3"
 icalendar = "0.7"
 tokio-cron-scheduler = "0.13"
+# Phase 3 — summarizer + anonymizer + scheduler notifications.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1"
+notify-rust = "4"
+humantime = "2"
 
 [profile.release]
 opt-level = 3

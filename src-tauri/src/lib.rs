@@ -11,6 +11,9 @@ mod config;
 mod keyring;
 mod transport;
 mod validate;
+// Frozen Phase 3 prompt template constants — see `src/prompts.rs` for the
+// contract rationale.
+pub mod prompts;
 
 use std::path::PathBuf;
 use std::sync::Arc;
