@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trail.pedrotramontin.com/schemas/onboarding-answer.schema.json",
+  "title": "Trail Onboarding Answer Envelope",
+  "description": "Structured-output envelope for the Phase B LLM-driven onboarding Q&A. The local ollama model is asked to fill one field per question; each field carries the model's choice (selected), an optional reasoning note, and the list of ScanReport collector_ids the model drew on as evidence. The Rust `ask_onboarding` consumer validates the response against this schema and then flattens the envelope into the typed `OnboardingAnswers` struct that Phase C (config-writer) consumes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claude_sessions_paths",
+    "github",
+    "calendar_ics",
+    "voice",
+    "review_time",
+    "summarizer",
+    "transport",
+    "question_log"
+  ],
+  "properties": {
+    "claude_sessions_paths": {
+      "type": "object",
+      "description": "Which ~/.claude/projects/* directories to monitor. selected=true means the model recommends monitoring; the absolute paths live in notes (one per line) when selected=true, or are omitted when the scan found no claude_sessions evidence.",
+      "additionalProperties": false,
+      "required": ["selected"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "notes": {
+          "type": "string",
+          "description": "Free-form reasoning. When selected=true, a bullet list of absolute paths; when selected=false, a one-sentence explanation."
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "ScanReport collector_ids the model drew on (e.g. 'claude_sessions'). Empty when the scan returned no candidates."
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "description": "Whether to enable the github collector. selected=true enables it; repos is a comma-separated list under notes when selected=true.",
+      "additionalProperties": false,
+      "required": ["selected"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "calendar_ics": {
+      "type": "object",
+      "description": "Whether to enable the calendar collector. selected=true enables it; notes may carry the .ics paths when known.",
+      "additionalProperties": false,
+      "required": ["selected"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "description": "Voice capture configuration. selected=true means enable whisper; model+language are enum strings.",
+      "additionalProperties": false,
+      "required": ["selected", "model", "language"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "model": {
+          "type": "string",
+          "enum": ["tiny", "base", "small"],
+          "description": "Whisper model size — tiny (fastest, lowest accuracy), base, small (slowest, highest accuracy of the three)."
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "pt"],
+          "description": "BCP-47 primary subtag the user speaks. Drives the transcribe language hint."
+        },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "review_time": {
+      "type": "object",
+      "description": "When the user wants the daily review pushed. cadence is the broad bucket; hour_utc is the specific hour.",
+      "additionalProperties": false,
+      "required": ["selected", "cadence", "hour_utc"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "cadence": {
+          "type": "string",
+          "enum": ["morning", "evening", "weekly"],
+          "description": "Coarse timing bucket. 'morning' = ~08:00 UTC, 'evening' = ~22:00 UTC, 'weekly' = Friday ~22:00 UTC."
+        },
+        "hour_utc": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "Hour-of-day in UTC, 0-23 inclusive."
+        },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "summarizer": {
+      "type": "object",
+      "description": "Which backend to use for the day-summary. 'ollama' routes to the local ollama server (requires the bin on $PATH); 'stub' is a no-op for laptops without GPU.",
+      "additionalProperties": false,
+      "required": ["selected", "backend", "model"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "backend": {
+          "type": "string",
+          "enum": ["ollama", "stub"]
+        },
+        "model": {
+          "type": "string",
+          "description": "When backend=ollama, the model name (e.g. 'qwen2.5:7b'); when backend=stub, the literal string 'stub'."
+        },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "description": "How the laptop pushes day-summaries to the VPS. 'tailscale' uses the Tailscale MagicDNS hostname (no key exchange); 'ssh' uses the keychain-stored ed25519 key from item 1-2.",
+      "additionalProperties": false,
+      "required": ["selected", "method"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "method": {
+          "type": "string",
+          "enum": ["tailscale", "ssh"]
+        },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "question_log": {
+      "type": "array",
+      "description": "Per-question reasoning trace. One entry per field above; entries are written in the same order as the schema's `required` array so the audit log is stable.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question", "reasoning", "evidence_refs"],
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The question that was asked of the model (verbatim, for auditability)."
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "One-paragraph free-form reasoning. The model's own words; the auditor reads this when the user later disputes a default."
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "ScanReport collector_ids the model referenced when answering this question."
+          }
+        }
+      }
+    }
+  }
+}
