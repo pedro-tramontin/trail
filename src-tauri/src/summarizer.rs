@@ -130,6 +130,7 @@ pub const REQUIRED_SECTIONS: &[&str] = &[
 /// `client` is a pre-built [`OllamaClient`]; tests pass a `wiremock`
 /// server's URI while production code constructs one with
 /// [`OllamaClient::new`] against the default endpoint.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     raw_root: &Path,
     drafts_dir: &Path,
@@ -137,6 +138,7 @@ pub async fn run(
     date: &str,
     model: &str,
     strictness: &str,
+    rules: &[crate::anonymizer::AnonymizationRule],
     client: &OllamaClient,
 ) -> Result<SummarizeReceipt, SummarizerError> {
     // 1. Locate the day's folder. We treat "directory missing" and
@@ -193,7 +195,7 @@ pub async fn run(
 
     // 4. Anonymize. The shim is identity today; once item 3-3 lands
     //    this becomes the regex scrubber gated on `strictness`.
-    let scrubbed = anonymize(&raw_response, strictness, &[]);
+    let scrubbed = anonymize(&raw_response, strictness, rules);
 
     // 5. Validate all five required sections are present, in order,
     //    with no extras. Pre-fix the check was `scrubbed.contains(header)`
@@ -354,6 +356,7 @@ mod tests {
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -395,6 +398,7 @@ mod tests {
             "2099-01-01",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -425,6 +429,7 @@ mod tests {
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -464,6 +469,7 @@ mod tests {
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -498,6 +504,7 @@ mod tests {
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -535,9 +542,11 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -564,9 +573,11 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await
@@ -588,9 +599,11 @@ mod tests {
         let err = run(
             &raw_root,
             &drafts_dir,
+            &test_bootstrap_path(&tmp),
             "2026-07-29",
             "llama3",
             "moderate",
+            &[],
             &client,
         )
         .await

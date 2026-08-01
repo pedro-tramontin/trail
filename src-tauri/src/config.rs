@@ -44,7 +44,7 @@ pub struct SummarizerConfig {
     /// "aggressive" | "moderate" | "off" — defaults to "aggressive" if
     /// absent in the config file, so older `config.json` blobs that omit
     /// this field still load.
-    #[serde(default)]
+    #[serde(default = "default_anonymization_strictness")]
     pub anonymization_strictness: String,
     pub use_generic_categories: bool,
     /// Per-user anonymization rules (literal substring → placeholder).
@@ -53,6 +53,15 @@ pub struct SummarizerConfig {
     /// without this field still load.
     #[serde(default)]
     pub anonymization_rules: Vec<AnonymizationRule>,
+}
+
+/// Serde helper for the `anonymization_strictness` default. Returns
+/// `"aggressive"` so an absent field is indistinguishable from
+/// `"aggressive"` in the parsed config (rather than the
+/// empty-string that `#[serde(default)]` would have produced on
+/// `String`).
+fn default_anonymization_strictness() -> String {
+    "aggressive".to_string()
 }
 
 /// Transport is an open-ended enum: v1 ships only `Ssh`, but
@@ -172,6 +181,33 @@ mod tests {
         let f = write_temp_config(json);
         let result = load_config(f.path());
         assert!(matches!(result, Err(ConfigError::InvalidJson(_))));
+    }
+
+    /// Regression: the pre-fix `#[serde(default)]` on
+    /// `anonymization_strictness` made an absent field default to
+    /// the empty string, which the `AnonymizationStrictness` parser
+    /// would then map to `Aggressive` — silently OK for production
+    /// but the loaded config still showed `""` instead of
+    /// `"aggressive"`. The fix uses
+    /// `#[serde(default = "default_anonymization_strictness")]`
+    /// so an absent field loads as `"aggressive"`.
+    #[test]
+    fn anonymization_strictness_defaults_to_aggressive() {
+        // `anonymization_strictness` is omitted from the JSON.
+        let json = r#"{
+            "claude_sessions_paths": [],
+            "github": {"mode": "gh_cli", "host": "x"},
+            "calendar_ics": "x",
+            "voice": {"enabled": false, "hotkey": "x", "transcriber": "x", "model": "x"},
+            "review_time": "18:00",
+            "summarizer": {"model": "x", "model_provider": "local", "use_generic_categories": false},
+            "transport": {"type": "ssh", "host": "x", "port": 22, "user": "u", "auth": {"auth": "password", "env_var": "X"}, "remote_path": "/tmp/x"},
+            "raw_retention_days": 7,
+            "pending_installs": []
+        }"#;
+        let f = write_temp_config(json);
+        let cfg = load_config(f.path()).unwrap();
+        assert_eq!(cfg.summarizer.anonymization_strictness, "aggressive");
     }
 
     #[test]
