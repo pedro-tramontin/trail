@@ -195,16 +195,55 @@ pub async fn run(
     //    this becomes the regex scrubber gated on `strictness`.
     let scrubbed = anonymize(&raw_response, strictness, &[]);
 
-    // 5. Validate all five required sections are present. Failure
-    //    here means the LLM drifted from the system prompt — we
-    //    refuse to write the draft so the caller can retry.
-    let mut sections_found = Vec::with_capacity(REQUIRED_SECTIONS.len());
-    for header in REQUIRED_SECTIONS {
-        if !scrubbed.contains(header) {
-            return Err(SummarizerError::MissingSection((*header).to_string()));
+    // 5. Validate all five required sections are present, in order,
+    //    with no extras. Pre-fix the check was `scrubbed.contains(header)`
+    //    for each required header, which accepted:
+    //      * out-of-order sections (e.g. Blockers before Wins)
+    //      * duplicate headers (e.g. two `## Summary` blocks)
+    //      * extra `## ...` headers (e.g. an unwanted `## Notes`)
+    //    The fix walks through `scrubbed` once and asserts each
+    //    required header appears in `REQUIRED_SECTIONS` order, with
+    //    no other `## ` headers between any two required ones.
+    //
+    // Note: `REQUIRED_SECTIONS` entries include the `## ` prefix (they
+    // are matched against the raw line in the legacy `contains` form);
+    // for line-by-line matching we compare against the header text
+    // alone (without the prefix). Build a parallel list for that.
+    let required_texts: &[&str] = &["Summary", "Wins", "Blockers", "People", "Open threads"];
+    debug_assert_eq!(required_texts.len(), REQUIRED_SECTIONS.len());
+    let mut idx = 0usize;
+    for line in scrubbed.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            // Trim trailing whitespace and any trailing `#` chars
+            // (some LLMs add a trailing `## Summary ##`).
+            let header = header.trim().trim_end_matches('#').trim();
+            if idx < required_texts.len() && header == required_texts[idx] {
+                idx += 1;
+            } else {
+                // Two failure modes map to different errors:
+                //   * `idx == required_texts.len()`: we already
+                //     saw all 5 required headers, so this extra
+                //     `## ...` line was unexpected.
+                //   * otherwise: the section we expected is missing
+                //     (or appeared out of order) — surface the
+                //     EXPECTED next header so the user can see what
+                //     the LLM should have produced.
+                let expected = if idx < required_texts.len() {
+                    required_texts[idx]
+                } else {
+                    "<end of required sections>"
+                };
+                return Err(SummarizerError::MissingSection(format!("## {expected}")));
+            }
         }
-        sections_found.push((*header).to_string());
     }
+    if idx < required_texts.len() {
+        return Err(SummarizerError::MissingSection(format!(
+            "## {}",
+            required_texts[idx]
+        )));
+    }
+    let sections_found: Vec<String> = REQUIRED_SECTIONS.iter().map(|s| (*s).to_string()).collect();
 
     // 6. Write the draft. `create_dir_all` is idempotent, so the
     //    happy-path launch doesn't need a separate bootstrap step.
@@ -247,6 +286,20 @@ mod tests {
     /// Same shape as CANNED_FIVE_SECTIONS but with `## People` removed,
     /// for the missing-section test.
     const CANNED_MISSING_PEOPLE: &str = "## Summary\n\nA day.\n\n## Wins\n\n- One thing.\n\n## Blockers\n\nNone\n\n## Open threads\n\n- Revisit.\n";
+
+    /// Sections in the wrong order (Blockers before Wins). Pre-fix
+    /// `contains` would have accepted this; the new strict validator
+    /// must reject it.
+    const CANNED_OUT_OF_ORDER: &str = "## Summary\n\nA day.\n\n## Blockers\n\nNone\n\n## Wins\n\n- One thing.\n\n## People\n\n- [PM]\n\n## Open threads\n\n- Revisit.\n";
+
+    /// Duplicate `## Summary` header. Pre-fix `contains` accepted
+    /// this; the new strict validator must reject it.
+    const CANNED_DUPLICATE_HEADER: &str = "## Summary\n\nA day.\n\n## Summary\n\nAgain.\n\n## Wins\n\n- One thing.\n\n## Blockers\n\nNone\n\n## People\n\n- [PM]\n\n## Open threads\n\n- Revisit.\n";
+
+    /// Extra `## Notes` section between required ones. Pre-fix
+    /// `contains` accepted this; the new strict validator must
+    /// reject it.
+    const CANNED_EXTRA_SECTION: &str = "## Summary\n\nA day.\n\n## Notes\n\nExtra section that shouldn't be here.\n\n## Wins\n\n- One thing.\n\n## Blockers\n\nNone\n\n## People\n\n- [PM]\n\n## Open threads\n\n- Revisit.\n";
 
     /// Write a single `raw/<date>/<name>.json` fixture file into the
     /// given tempdir. The contents are minimal Phase-2-shape JSON; the
@@ -465,5 +518,83 @@ mod tests {
             "draft must not be written when ollama fails; found: {}",
             draft_path.display()
         );
+    }
+
+    /// Sections in the wrong order (Blockers before Wins) must
+    /// reject. Pre-fix `contains` would have accepted.
+    #[tokio::test]
+    async fn summarizer_rejects_out_of_order_sections() {
+        let tmp = TempDir::new().expect("tempdir");
+        let raw_root = tmp.path().join("raw");
+        let drafts_dir = tmp.path().join("drafts");
+        write_raw_fixture(&raw_root, "2026-07-29", "github");
+
+        let server = ollama_mock_returning(CANNED_OUT_OF_ORDER).await;
+        let client = OllamaClient::new(server.uri());
+
+        let err = run(
+            &raw_root,
+            &drafts_dir,
+            "2026-07-29",
+            "llama3",
+            "moderate",
+            &client,
+        )
+        .await
+        .expect_err("out-of-order sections must fail validation");
+        assert!(
+            matches!(err, SummarizerError::MissingSection(_)),
+            "expected MissingSection, got {err:?}"
+        );
+        // The draft must not be written.
+        assert!(!drafts_dir.join("2026-07-29.md").exists());
+    }
+
+    /// Duplicate `## Summary` header must reject.
+    #[tokio::test]
+    async fn summarizer_rejects_duplicate_header() {
+        let tmp = TempDir::new().expect("tempdir");
+        let raw_root = tmp.path().join("raw");
+        let drafts_dir = tmp.path().join("drafts");
+        write_raw_fixture(&raw_root, "2026-07-29", "github");
+
+        let server = ollama_mock_returning(CANNED_DUPLICATE_HEADER).await;
+        let client = OllamaClient::new(server.uri());
+
+        let err = run(
+            &raw_root,
+            &drafts_dir,
+            "2026-07-29",
+            "llama3",
+            "moderate",
+            &client,
+        )
+        .await
+        .expect_err("duplicate header must fail validation");
+        assert!(matches!(err, SummarizerError::MissingSection(_)));
+    }
+
+    /// Extra `## Notes` section between required ones must reject.
+    #[tokio::test]
+    async fn summarizer_rejects_extra_section() {
+        let tmp = TempDir::new().expect("tempdir");
+        let raw_root = tmp.path().join("raw");
+        let drafts_dir = tmp.path().join("drafts");
+        write_raw_fixture(&raw_root, "2026-07-29", "github");
+
+        let server = ollama_mock_returning(CANNED_EXTRA_SECTION).await;
+        let client = OllamaClient::new(server.uri());
+
+        let err = run(
+            &raw_root,
+            &drafts_dir,
+            "2026-07-29",
+            "llama3",
+            "moderate",
+            &client,
+        )
+        .await
+        .expect_err("extra section must fail validation");
+        assert!(matches!(err, SummarizerError::MissingSection(_)));
     }
 }
