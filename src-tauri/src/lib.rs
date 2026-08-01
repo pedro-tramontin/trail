@@ -40,6 +40,12 @@ pub mod learner;
 // follow-up decision (so we keep the `mod` declaration `pub` for the
 // tests + IPC visibility).
 pub mod scheduler;
+// Phase 4 §4.1 — the logs backend. Three Tauri IPC commands
+// (`list_logs`, `delete_log`, `get_raw_json`) over the day's raw
+// collector files at `~/.trail/raw/<date>/*.json`. Kept `pub` so
+// `commands.rs` can re-export the commands + tests can drive the
+// module without an `AppHandle` or live filesystem.
+pub mod logs;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -220,6 +226,9 @@ pub fn run() {
             commands::validate_day_summary,
             commands::summarize_day,
             commands::record_review_diff,
+            commands::list_logs,
+            commands::delete_log,
+            commands::get_raw_json,
             list_collectors,
             run_collector_now,
             set_collector_enabled,
