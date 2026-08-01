@@ -170,6 +170,73 @@ pub async fn get_raw_json(
     logs::get_raw_json(&trail_root, &date, &source).map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 §5.5 (Part A) — voice capture Tauri commands.
+//
+// These are stubs: `voice_start` and `voice_stop` are the IPC entry
+// points the menu-bar UI will call to start/stop a push-to-talk
+// session. The full impl (wiring the cpal capture loop into a
+// shared `AppHandle` state, draining the sample channel into a ring
+// buffer, kicking off the whisper run on stop, persisting the
+// resulting `VoiceEntry` to disk) lands in §5.7 (Part B) once
+// macOS TCC microphone permission is sorted out.
+//
+// For Part A we keep the surface stable: on macOS the command
+// names exist (and return a friendly message) so the frontend
+// binding compiles, but the heavy work is deferred. On Linux the
+// commands return `Err("voice capture is only supported on macOS")`
+// so the test suite can exercise them without a real microphone.
+// ---------------------------------------------------------------------------
+
+/// Phase 5 §5.5 Tauri command: start a voice capture session.
+///
+/// On macOS this would spawn the cpal capture loop, wire the audio
+/// meter + tray-icon blink loop, and stash the receive end in
+/// `AppState` so `voice_stop` can drain it. The full impl lives in
+/// §5.7. For Part A we just acknowledge the request.
+///
+/// On non-macOS the command is rejected because cpal + global-hotkey
+/// only build on macOS (see `[target.'cfg(target_os = "macos")'.dependencies]`
+/// in `src-tauri/Cargo.toml`).
+#[tauri::command]
+#[allow(dead_code)] // Wired into the invoke handler in §5.7 (Part B).
+pub async fn voice_start() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Touch the imports so the macOS-only deps are referenced
+        // in the IPC layer (suppresses "unused import" warnings
+        // until §5.7 lands).
+        let _ = std::any::type_name::<crate::voice::capture::CaptureError>();
+        Ok("voice capture starting (full impl in §5.7)".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("voice capture is only supported on macOS".to_string())
+    }
+}
+
+/// Phase 5 §5.5 Tauri command: stop a voice capture session and
+/// persist the result.
+///
+/// On macOS this would drain the sample channel, run
+/// `voice::transcriber::transcribe`, and call
+/// `voice::store::write_atomic` to persist the JSON + WAV pair.
+/// The full impl lives in §5.7. For Part A we just acknowledge
+/// the request.
+#[tauri::command]
+#[allow(dead_code)] // Wired into the invoke handler in §5.7 (Part B).
+pub async fn voice_stop() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::any::type_name::<crate::voice::transcriber::TranscribeError>();
+        Ok("voice capture stopping (full impl in §5.7)".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("voice capture is only supported on macOS".to_string())
+    }
+}
+
 /// Resolve the `~/.trail/` root directory from the loaded config. The
 /// config itself doesn't store its own location (we only ever persist
 /// the raw/drafts subdirs), so we look next to the config file —
