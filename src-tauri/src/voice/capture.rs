@@ -3,8 +3,9 @@
 //! On macOS, `spawn_capture_loop` builds a `cpal` input stream on a
 //! dedicated `std::thread` (cpal streams are `!Send`) and bridges
 //! each callback's interleaved f32 frames into a `tokio::sync::mpsc`
-//! channel of mono 16 kHz frames. The consumer (item 5-3) drains
-//! the channel into a `Vec<f32>` ring buffer that whisper consumes.
+//! channel of mono 16 kHz frames. The consumer (spawned by §5.6's
+//! `spawn_capture_loop` Part B fixup) drains the channel into the
+//! shared `Arc<Mutex<Vec<f32>>>` that whisper consumes.
 //!
 //! On non-macOS, `spawn_capture_loop` returns
 //! `CaptureError::Cpal` per §W4 (headless Linux agents have no
@@ -24,10 +25,16 @@
 //! ## v1 vs v2
 //!
 //! Plan §5.2 Part A ships f32 frames. The downstream ring buffer is
-//! typed as `Vec<f16>` in v1 to align with the plan; v2 may move to
-//! `i16`. This module doesn't own that buffer — it just produces
-//! the 16 kHz mono stream on the channel.
+//! typed as `Vec<f32>` in v1; the spec sketch in STATE.md says
+//! `Vec<f16>` but whisper-rs actually takes `&[f32]`, so we keep
+//! `f32` end-to-end. This module owns the `CaptureState` struct
+//! introduced in §5.6 — the shared `Arc<Mutex<Vec<f32>>>` plus the
+//! consumer `JoinHandle` so `voice_abort` can drop the buffer and
+//! cancel the task cleanly.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use thiserror::Error;
 
 /// All errors `capture` can surface. `Display` is implemented via
@@ -43,6 +50,42 @@ pub enum CaptureError {
     Join,
 }
 
+/// Shared state for an in-flight voice capture. The samples buffer
+/// is `Arc<Mutex<Vec<f32>>>` so the cpal-callback-bound consumer
+/// task and the abort handler can both reach it without owning it.
+/// The consumer `JoinHandle` lets `voice_abort` cancel the drain loop
+/// cleanly when the user clicks "Stop" (or transcription fails).
+///
+/// This replaces the Part-A pattern noted in §5.5's heads-up where
+/// the cpal producer and the downstream consumer each held their
+/// own `Mutex<Vec<f32>>` (the two buffers could drift). With the
+/// shared state below there is exactly one source of truth for the
+/// in-memory samples, and `voice_abort` can wipe it with one
+/// `clear() + shrink_to_fit()` (no `mem::forget`, no stale writes).
+pub struct CaptureState {
+    /// Mono 16 kHz PCM frames captured since `voice_start`.
+    pub samples: Arc<Mutex<Vec<f32>>>,
+    /// Handle for the spawned consumer task. `None` when no capture
+    /// is active; `voice_stop` / `voice_abort` take it and call
+    /// `.abort()` to stop the drain loop.
+    pub consumer_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl CaptureState {
+    pub fn new() -> Self {
+        Self {
+            samples: Arc::new(Mutex::new(Vec::new())),
+            consumer_handle: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for CaptureState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One mono 16 kHz PCM frame. `f32` is the unit type the cpal
 /// callback gives us and the unit type `rubato` consumes, so we
 /// keep it through the channel instead of widening to f16 here.
@@ -56,21 +99,28 @@ pub type Frame = f32;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// Spawn the cpal capture loop (macOS only) and return an mpsc
-/// receiver of mono 16 kHz frames.
+/// Spawn the cpal capture loop (macOS only) AND the consumer task
+/// that drains the sample channel into the shared `CaptureState`.
 ///
-/// The caller should `tokio::task::spawn_blocking` this call so the
-/// cpal stream lives on its own thread without contending with the
-/// tokio reactor. The returned `Receiver<Frame>` is moved into a
-/// `tokio::task::spawn`-ed consumer that drains frames into the
-/// transcription ring buffer.
+/// The cpal stream lives on its own `std::thread` (streams are
+/// `!Send`); the consumer task is a normal `tokio::spawn`ed future
+/// that locks the shared `Arc<Mutex<Vec<f32>>>` and pushes frames
+/// onto it. The `JoinHandle` for the consumer is stored inside
+/// the `CaptureState` so `voice_abort` can call `.abort()` on it
+/// directly without needing a separate reference.
+///
+/// The function returns `()` — the consumer task owns the receive
+/// end of the sample channel, so the caller doesn't need one. The
+/// shared `CaptureState.samples` Vec is the canonical frame store
+/// that `voice_stop` / `voice_abort` (and eventually the whisper
+/// pipeline in §5.7) read from.
 ///
 /// On non-macOS hosts the function returns
 /// `CaptureError::Cpal("...")` instead of compiling in a stub, so
 /// upstream code can branch on the error without `#[cfg]` of its
 /// own.
 #[cfg(target_os = "macos")]
-pub fn spawn_capture_loop() -> Result<tokio::sync::mpsc::Receiver<Frame>, CaptureError> {
+pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> {
     use cpal::traits::{DeviceTrait, StreamTrait};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Frame>(CHANNEL_CAPACITY);
@@ -142,7 +192,22 @@ pub fn spawn_capture_loop() -> Result<tokio::sync::mpsc::Receiver<Frame>, Captur
         })
         .map_err(|e| CaptureError::Cpal(format!("spawn capture thread: {}", e)))?;
 
-    Ok(rx)
+    // Spawn the consumer task: drain the channel into the shared
+    // buffer until the receiver is closed (channel drop on abort)
+    // or the task is `.abort()`ed. Holding the JoinHandle in
+    // `CaptureState.consumer_handle` makes both shutdown paths
+    // possible — graceful close on `voice_stop`, hard cancel on
+    // `voice_abort`.
+    let consumer_samples = state.samples.clone();
+    let handle = tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(frame) = rx.recv().await {
+            consumer_samples.lock().push(frame);
+        }
+    });
+    *state.consumer_handle.lock() = Some(handle);
+
+    Ok(())
 }
 
 /// Non-macOS stub: return an error so callers (5-3 transcription)
@@ -150,7 +215,7 @@ pub fn spawn_capture_loop() -> Result<tokio::sync::mpsc::Receiver<Frame>, Captur
 /// `resample_to_16k` helper below is still available and exercised
 /// by the tests in this module on every host.
 #[cfg(not(target_os = "macos"))]
-pub fn spawn_capture_loop() -> Result<tokio::sync::mpsc::Receiver<Frame>, CaptureError> {
+pub fn spawn_capture_loop(_state: Arc<CaptureState>) -> Result<(), CaptureError> {
     Err(CaptureError::Cpal(
         "cpal capture is only supported on macOS; Linux builds return this error per §W4".into(),
     ))
@@ -315,7 +380,8 @@ mod tests {
         // cpal capture is verified manually on Pedro's Mac per §W4.
         #[cfg(not(target_os = "macos"))]
         {
-            let result = spawn_capture_loop();
+            let state = std::sync::Arc::new(CaptureState::new());
+            let result = spawn_capture_loop(state);
             assert!(result.is_err(), "expected unsupported-platform error");
         }
         #[cfg(target_os = "macos")]
@@ -323,5 +389,32 @@ mod tests {
             // Don't actually open the mic in unit tests — too noisy
             // and not deterministic. Manual verification only.
         }
+    }
+
+    #[test]
+    fn capture_state_starts_empty_with_no_handle() {
+        // `CaptureState::new()` must hand back a usable state object
+        // for `app.manage()` to register. The samples buffer is
+        // empty; no consumer task is running; abort is a no-op on
+        // an empty state.
+        let state = CaptureState::new();
+        assert!(state.samples.lock().is_empty());
+        assert!(state.consumer_handle.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn capture_state_samples_are_shared_via_arc() {
+        // Cloning the Arc gives both handles the same backing Vec.
+        // This is the property §5.6's "collapse the two-Mutex
+        // pattern" fixup relies on — the consumer task and the
+        // abort handler both reach the same buffer.
+        let state = Arc::new(CaptureState::new());
+        let samples_b = state.samples.clone();
+        state.samples.lock().extend_from_slice(&[0.1_f32; 100]);
+        assert_eq!(samples_b.lock().len(), 100);
+        // Wipe from the other handle — the original sees the same
+        // empty buffer.
+        samples_b.lock().clear();
+        assert!(state.samples.lock().is_empty());
     }
 }
