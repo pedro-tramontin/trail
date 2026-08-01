@@ -34,12 +34,28 @@ cp "$REPO_ROOT/tests/fixtures/raw/2026-07-29/"*.json "$TMP_HOME/raw/2026-07-29/"
     exit 1
 }
 
-# Cleanup on exit
-trap 'rm -rf "$TMP_HOME"' EXIT
+# Cleanup on exit. The trap must (a) remove the temp directory AND
+# (b) kill the background mock process; the pre-fix trap did only
+# (a), so a script that errored out (or was killed with CTRL-C) left
+# the mock bound to its port, blocking subsequent runs.
+cleanup() {
+    if [ -n "${MOCK_PID:-}" ]; then
+        kill "$MOCK_PID" 2>/dev/null || true
+        wait "$MOCK_PID" 2>/dev/null || true
+    fi
+    rm -rf "$TMP_HOME"
+}
+trap cleanup EXIT INT TERM
 
 # 1. Start mock ollama in the background.
 MOCK_PORT="${MOCK_PORT:-11435}"
-python3 "$REPO_ROOT/tests/fixtures/mock_ollama.py" "$MOCK_PORT" >/tmp/$TEST_TAG-mock.log 2>&1 &
+# Tell the mock where to log request bodies — used in step 10 to
+# verify the bootstrap was injected into the second-run prompt.
+MOCK_LOG_DIR="${MOCK_LOG_DIR:-/tmp}"
+MOCK_LOG_FILE="${TEST_TAG}-mock-bodies.log"
+export MOCK_LOG_DIR MOCK_LOG_FILE
+python3 "$REPO_ROOT/tests/fixtures/mock_ollama.py" "$MOCK_PORT" \
+    >/tmp/$TEST_TAG-mock.log 2>&1 &
 MOCK_PID=$!
 sleep 1
 
@@ -91,9 +107,15 @@ echo "## Custom" >> "$DRAFT"
 echo "User added this section after reviewing." >> "$DRAFT"
 
 # 7. Feed the edit back to the learner via the CLI (or a small rust example).
+# Use ANSI-C quoting ($'…') so the `\n` becomes a real newline
+# before reaching the learner — the pre-fix `\n` inside double
+# quotes was passed through as the two literal characters
+# backslash + n, so the learner received a different event shape
+# than what a real editor (which inserts a real newline) would
+# produce.
 echo "[step 7] learner::record_event"
 TRAIL_HOME="$TMP_HOME" \
-    cargo run -p trail --example e2e_learn --quiet -- --before "None" --after "## Custom\nUser added this section" 2>&1 \
+    cargo run -p trail --example e2e_learn --quiet -- --before "None" --after $'## Custom\nUser added this section' 2>&1 \
     | tee /tmp/$TEST_TAG-learn.log
 
 # 8. Verify the bootstrap file was written.
@@ -116,12 +138,27 @@ TRAIL_HOME="$TMP_HOME" \
     | tee /tmp/$TEST_TAG-run2.log
 
 # 10. Verify the mock received the bootstrap in the user_prompt.
-#     The mock_ollama.py logs nothing by default, but the request body
-#     is captured by the e2e_summarize example (which should print the
-#     received prompt or write it to a debug file). For now we just
-#     confirm the run succeeded.
+#     The mock_ollama.py writes every received body to
+#     `$MOCK_LOG_DIR/$MOCK_LOG_FILE`. The second run's request body
+#     must contain the bootstrap block string.
+MOCK_BODY_LOG="$MOCK_LOG_DIR/$MOCK_LOG_FILE"
+if [ ! -f "$MOCK_BODY_LOG" ]; then
+    echo "FATAL: mock did not write any body log at $MOCK_BODY_LOG"
+    cat /tmp/$TEST_TAG-mock.log
+    kill $MOCK_PID 2>/dev/null || true
+    exit 1
+fi
+# The mock appends a header before each body, so the *last* body is
+# the second-run request — verify that one contains the bootstrap.
+if ! tail -n 50 "$MOCK_BODY_LOG" | grep -qF "User preferences learned"; then
+    echo "FATAL: second-run prompt does not contain the bootstrap block"
+    echo "Last 50 lines of $MOCK_BODY_LOG:"
+    tail -n 50 "$MOCK_BODY_LOG"
+    kill $MOCK_PID 2>/dev/null || true
+    exit 1
+fi
+echo "[ok] bootstrap block present in second-run prompt"
 
 # 11. Done.
 echo "=== PHASE 3 E2E PASSED ==="
-kill $MOCK_PID 2>/dev/null || true
-wait $MOCK_PID 2>/dev/null || true
+# (cleanup is handled by the EXIT trap above)
