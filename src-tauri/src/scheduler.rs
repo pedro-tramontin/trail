@@ -1,7 +1,7 @@
 //! Phase 3 §3.5 scheduler — fires the summarizer at the configured
-//! `review_time` (default 18:00 local; UTC in v1), posts a system
-//! notification via `notify-rust`, and updates the tray-icon badge
-//! with `drafts ready: N`.
+//! `review_time` (default 18:00 local; UTC in v1), updates the
+//! tray-icon badge with `drafts ready: N`, and records the
+//! last-fire timestamp + last error in [`SchedulerState`].
 //!
 //! ## v1 scope
 //!
@@ -9,6 +9,11 @@
 //!   `summarizer::run` invocation is wired up by the coordinator in a
 //!   follow-up item because it requires the summarizer config + ollama
 //!   client handle at construction time).
+//! - **Notifications are NOT posted by this module in v1.** The
+//!   `notify-rust` dependency is reserved for a follow-up item;
+//!   the v1 surface is the tray-icon badge callback
+//!   (`tray_badge_updater(new_count)`) + the in-memory
+//!   `SchedulerState` fields the IPC layer reads.
 //! - `next_fire_time` is **UTC-only** in v1 even though the user-facing
 //!   spec says "timezone-aware". A future item will accept an optional
 //!   `tz` arg (`chrono-tz` or `IANA tz string`) and use
@@ -18,9 +23,11 @@
 //!   glue in `lib.rs`; this module is platform-agnostic and takes the
 //!   callback as a `Fn(usize) + Send + 'static`.
 //! - `spawn_loop` accepts a `now_fn` so tests can drive the scheduler
-//!   against `tokio::time::Instant::now()` (which respects
-//!   `tokio::time::pause()`), while production uses `Utc::now()`. This
-//!   keeps the wall-clock-vs-paused-clock mismatch out of the way.
+//!   against a paused clock source. `now_fn` is `Fn() -> DateTime<Utc>`
+//!   (NOT `Instant::now()` — `tokio::time::pause()` advances the
+//!   runtime clock, not wall-clock; a test that wants to drive the
+//!   scheduler without `tokio::time::advance` would build a paused
+//!   `DateTime<Utc>` from `Instant::now() - START`).
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -52,12 +59,17 @@ pub struct SchedulerState {
 /// Parse a `"HH:MM"` review time and return the next UTC instant at
 /// which it should fire. If the review time is later today (UTC), that
 /// instant is returned; otherwise tomorrow's slot at the same time.
+///
+/// A review time exactly equal to `now` counts as "still due" (so the
+/// scheduler fires at the boundary instant, not 24h later). This
+/// matches the intuitive reading of "the review time is 18:00 and the
+/// clock just ticked 18:00 — fire now."
 pub fn next_fire_time(review_time: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
     let naive = NaiveTime::parse_from_str(review_time, "%H:%M")
         .map_err(|e| format!("invalid review_time {review_time:?}: {e}"))?;
     let today = now.date_naive().and_time(naive);
     let today_utc: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(today, Utc);
-    if today_utc > now {
+    if today_utc >= now {
         Ok(today_utc)
     } else {
         let tomorrow_date = now
@@ -130,10 +142,17 @@ where
             // The actual summarizer invocation is the coordinator's job
             // (see §3.6 e2e) — this module owns the scheduling + UI
             // callback contract only.
+            //
+            // Capture `now_fn()` once for the fire timestamp — the
+            // pre-fix code called `now_fn()` a second time inside the
+            // lock, which both widened the critical section and could
+            // (for non-deterministic clocks) produce a `last_fired_at`
+            // that's a few ms after the fire's actual instant.
+            let fire_at = now_fn();
             let new_count = {
                 let mut s = state.lock().await;
                 s.drafts_ready_count = s.drafts_ready_count.saturating_add(1);
-                s.last_fired_at = Some(now_fn());
+                s.last_fired_at = Some(fire_at);
                 s.drafts_ready_count
             };
             tray_badge_updater(new_count);
@@ -164,8 +183,41 @@ mod tests {
         assert_eq!(next, expected);
     }
 
+    /// Boundary case: when `now` is exactly the review time, the
+    /// scheduler must still fire today, not tomorrow. Pre-fix
+    /// `if today_utc > now` skipped the slot and rolled forward.
+    #[test]
+    fn next_fire_time_at_exact_boundary_returns_today() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 29, 18, 0, 0).unwrap();
+        let next = next_fire_time("18:00", now).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 7, 29, 18, 0, 0).unwrap();
+        assert_eq!(next, expected);
+    }
+
+    /// One second past the review time: the slot is "gone" and
+    /// we roll forward to tomorrow.
+    #[test]
+    fn next_fire_time_one_second_past_boundary_returns_tomorrow() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 29, 18, 0, 1).unwrap();
+        let next = next_fire_time("18:00", now).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 7, 30, 18, 0, 0).unwrap();
+        assert_eq!(next, expected);
+    }
+
+    /// Paused-clock smoke test for the `spawn_loop` entrypoint. Drives
+    /// the runtime with `start_paused = true`, advances the paused
+    /// clock past the fire time, then asserts that the spawned task
+    /// woke up at least once and incremented `drafts_ready_count`.
+    ///
+    /// Originally named `spawn_loop_fires_within_5_second_tolerance`
+    /// (PR #20 Copilot thread T5): the previous name implied a tight
+    /// upper-bound assertion that the test never actually made — it
+    /// only asserted the loop fired at least once. Renamed to reflect
+    /// the real contract ("at least one fire after a paused-clock
+    /// advance") without claiming a tolerance that wasn't being
+    /// measured.
     #[tokio::test(start_paused = true)]
-    async fn spawn_loop_fires_within_5_second_tolerance() {
+    async fn spawn_loop_fires_after_advance_past_next_fire_time() {
         let state = Arc::new(Mutex::new(SchedulerState::default()));
         let counter = Arc::new(std::sync::Mutex::new(0usize));
         let counter_for_closure = Arc::clone(&counter);
