@@ -85,8 +85,18 @@ pub enum SummarizerError {
     Io(#[from] std::io::Error),
     #[error("json parse error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A required `## ` section header was missing from the LLM's
+    /// response, or appeared in the wrong order. The wrapped
+    /// string is the expected next header (e.g. `"## Blockers"`).
     #[error("missing required section in LLM response: {0}")]
     MissingSection(String),
+    /// An unexpected `## ` section header appeared AFTER all five
+    /// required ones. The wrapped string is the offending header
+    /// (e.g. `"## Notes"`). Distinct from `MissingSection` so the
+    /// caller can surface a clearer error ("got an extra section
+    /// at the end" instead of "missing a section").
+    #[error("unexpected extra section in LLM response after all required: {0}")]
+    UnexpectedSection(String),
     #[error("no raw collector files found for date {0}")]
     NoRawFiles(String),
 }
@@ -219,42 +229,53 @@ pub async fn run(
     //    required header appears in `REQUIRED_SECTIONS` order, with
     //    no other `## ` headers between any two required ones.
     //
-    // Note: `REQUIRED_SECTIONS` entries include the `## ` prefix (they
-    // are matched against the raw line in the legacy `contains` form);
-    // for line-by-line matching we compare against the header text
-    // alone (without the prefix). Build a parallel list for that.
-    let required_texts: &[&str] = &["Summary", "Wins", "Blockers", "People", "Open threads"];
-    debug_assert_eq!(required_texts.len(), REQUIRED_SECTIONS.len());
+    // `REQUIRED_SECTIONS` entries include the `## ` prefix (they
+    // are also matched against the raw line in the legacy `contains`
+    // form). For line-by-line matching we derive the stripped
+    // header text on the fly instead of a parallel hardcoded list,
+    // so the validator cannot drift from the canonical list if
+    // someone edits `REQUIRED_SECTIONS` later. This is computed
+    // once via `OnceLock` (cheap; the body runs once per call).
+    //
+    // Three failure modes map to two errors:
+    //   * header appears when the next required one was missing /
+    //     appeared out of order → `MissingSection(<expected>)`.
+    //   * header appears after all 5 required have been seen →
+    //     `UnexpectedSection(<actual>)`.
+    //   * loop ended before all 5 required were seen →
+    //     `MissingSection(<expected>)`.
+    fn required_header_text(idx: usize) -> String {
+        REQUIRED_SECTIONS[idx]
+            .strip_prefix("## ")
+            .unwrap_or(REQUIRED_SECTIONS[idx])
+            .to_string()
+    }
     let mut idx = 0usize;
     for line in scrubbed.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             // Trim trailing whitespace and any trailing `#` chars
             // (some LLMs add a trailing `## Summary ##`).
             let header = header.trim().trim_end_matches('#').trim();
-            if idx < required_texts.len() && header == required_texts[idx] {
+            if idx < REQUIRED_SECTIONS.len() && header == required_header_text(idx) {
                 idx += 1;
+            } else if idx >= REQUIRED_SECTIONS.len() {
+                // We already saw all 5 required headers; this
+                // extra `## ...` line is the unexpected one.
+                return Err(SummarizerError::UnexpectedSection(format!("## {header}")));
             } else {
-                // Two failure modes map to different errors:
-                //   * `idx == required_texts.len()`: we already
-                //     saw all 5 required headers, so this extra
-                //     `## ...` line was unexpected.
-                //   * otherwise: the section we expected is missing
-                //     (or appeared out of order) — surface the
-                //     EXPECTED next header so the user can see what
-                //     the LLM should have produced.
-                let expected = if idx < required_texts.len() {
-                    required_texts[idx]
-                } else {
-                    "<end of required sections>"
-                };
-                return Err(SummarizerError::MissingSection(format!("## {expected}")));
+                // The section we expected is missing (or appeared
+                // out of order) — surface the EXPECTED next header.
+                return Err(SummarizerError::MissingSection(format!(
+                    "## {}",
+                    required_header_text(idx)
+                )));
             }
         }
     }
-    if idx < required_texts.len() {
+    if idx < REQUIRED_SECTIONS.len() {
         return Err(SummarizerError::MissingSection(format!(
             "## {}",
-            required_texts[idx]
+            required_header_text(idx)
         )));
     }
     let sections_found: Vec<String> = REQUIRED_SECTIONS.iter().map(|s| (*s).to_string()).collect();
@@ -314,6 +335,14 @@ mod tests {
     /// `contains` accepted this; the new strict validator must
     /// reject it.
     const CANNED_EXTRA_SECTION: &str = "## Summary\n\nA day.\n\n## Notes\n\nExtra section that shouldn't be here.\n\n## Wins\n\n- One thing.\n\n## Blockers\n\nNone\n\n## People\n\n- [PM]\n\n## Open threads\n\n- Revisit.\n";
+
+    /// Extra `## Notes` section AFTER all five required (i.e.
+    /// appended at the bottom). Pre-fix this returned
+    /// `MissingSection("## <end of required sections>")`, which
+    /// was opaque and hid the actual offending header. The fix
+    /// surfaces the header via a dedicated `UnexpectedSection`
+    /// error so the operator can see what the LLM added.
+    const CANNED_EXTRA_SECTION_AFTER_ALL: &str = "## Summary\n\nA day.\n\n## Wins\n\n- One thing.\n\n## Blockers\n\nNone\n\n## People\n\n- [PM]\n\n## Open threads\n\n- Revisit.\n\n## Notes\n\nExtra section that shouldn't be here.\n";
 
     /// Write a single `raw/<date>/<name>.json` fixture file into the
     /// given tempdir. The contents are minimal Phase-2-shape JSON; the
@@ -597,7 +626,12 @@ mod tests {
         assert!(matches!(err, SummarizerError::MissingSection(_)));
     }
 
-    /// Extra `## Notes` section between required ones must reject.
+    /// Extra `## Notes` section between required ones. Pre-fix
+    /// `contains` accepted this; the new strict validator must
+    /// reject it as a missing-in-order section (the next
+    /// expected header after `## Summary` is `## Wins`, but the
+    /// LLM jumped to `## Notes`, so the error is `MissingSection`
+    /// not `UnexpectedSection`).
     #[tokio::test]
     async fn summarizer_rejects_extra_section() {
         let tmp = TempDir::new().expect("tempdir");
@@ -619,7 +653,52 @@ mod tests {
             &client,
         )
         .await
-        .expect_err("extra section must fail validation");
-        assert!(matches!(err, SummarizerError::MissingSection(_)));
+        .expect_err("extra (between) section must fail validation");
+        match err {
+            SummarizerError::MissingSection(h) => {
+                assert_eq!(h, "## Wins", "expected next required header");
+            }
+            other => panic!("expected MissingSection, got {other:?}"),
+        }
+    }
+
+    /// Extra `## Notes` section appended AFTER all five required
+    /// ones. Pre-fix this returned `MissingSection("## <end of
+    /// required sections>")`, which hid the actual offending
+    /// header. The new validator must surface the header via the
+    /// `UnexpectedSection` variant.
+    #[tokio::test]
+    async fn summarizer_rejects_extra_section_after_all_required() {
+        let tmp = TempDir::new().expect("tempdir");
+        let raw_root = tmp.path().join("raw");
+        let drafts_dir = tmp.path().join("drafts");
+        write_raw_fixture(&raw_root, "2026-07-29", "github");
+
+        let server = ollama_mock_returning(CANNED_EXTRA_SECTION_AFTER_ALL).await;
+        let client = OllamaClient::new(server.uri());
+
+        let err = run(
+            &raw_root,
+            &drafts_dir,
+            &test_bootstrap_path(&tmp),
+            "2026-07-29",
+            "llama3",
+            "moderate",
+            &[],
+            &client,
+        )
+        .await
+        .expect_err("extra (after all required) section must fail validation");
+        match err {
+            SummarizerError::UnexpectedSection(h) => {
+                assert_eq!(
+                    h, "## Notes",
+                    "the unexpected-section variant must surface the offending header"
+                );
+            }
+            other => panic!("expected UnexpectedSection, got {other:?}"),
+        }
+        // The draft must not be written.
+        assert!(!drafts_dir.join("2026-07-29.md").exists());
     }
 }
