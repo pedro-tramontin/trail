@@ -53,6 +53,11 @@ pub mod logs;
 // file). Audio capture (5-2), transcription (5-3), hotkey (5-4), and
 // IPC (5-5) land in later items as siblings alongside `model_manager`.
 pub mod voice;
+// Phase 5 §5.7 — tray menu filter. Pure-function logic — `tray::MenuEntry`
+// is the enum the future tray-icon builder consumes, and
+// `tray::filtered_items` is the rule set that decides which entries are
+// visible at each permission/recording/conflict state.
+mod tray;
 
 use std::path::PathBuf;
 use std::sync::Arc;
