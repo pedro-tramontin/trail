@@ -64,6 +64,15 @@ jobs:
       # pipeline can run. We use the release's `target_commitish`
       # (which release-please already set correctly to the merge
       # commit on main) as the tag's commit SHA.
+      # Use the default GITHUB_TOKEN (not RELEASE_PLEASE_TOKEN) so
+      # the tag push DOES trigger the downstream tag-triggered
+      # `release.yml` workflow. GitHub intentionally blocks tag
+      # pushes made with PATs from triggering downstream workflows
+      # to prevent rogue PATs from chaining workflow runs — but
+      # pushes made with the workflow's own GITHUB_TOKEN (with
+      # `contents: write` granted above) DO trigger downstream
+      # workflows. The `contents: write` permission at the
+      # workflow level is sufficient for this `git push`.
       - name: Push missing tags for draft releases
         # Always run on push-to-main. The check inside the script
         # is idempotent — if a tag is already on origin or there's
@@ -78,7 +87,7 @@ jobs:
         # shipped a new release that needs its tag pushed.
         if: github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # For every draft release, check if its tag exists on
