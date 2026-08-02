@@ -49,3 +49,39 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Safety net: release-please-action v4 with the `push-to-main`
+      # trigger sometimes creates the GitHub Release as a draft but
+      # fails to push the corresponding `trail-vX.Y.Z` tag. The
+      # release then shows up as `untagged-<hash>` in the GitHub UI
+      # and the downstream tag-triggered `release.yml` workflow never
+      # fires. On the next release-please run the action sees no
+      # upstream tag and tries to re-bump the entire history (open
+      # a v0.5.0 PR whose changelog duplicates v0.4.0's).
+      #
+      # Belt-and-suspenders: if any draft release is missing its
+      # tag, push the tag manually so the tag-triggered build
+      # pipeline can run. We use the release's `target_commitish`
+      # (which release-please already set correctly to the merge
+      # commit on main) as the tag's commit SHA.
+      - name: Push missing tags for draft releases
+        if: github.event_name == 'push' && steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # For every draft release, check if its tag exists on
+          # origin. If not, push it manually using the release's
+          # target_commitish (which release-please set to the merge
+          # commit on main that introduced the version bump).
+          gh api repos/${{ github.repository }}/releases \
+            --jq '.[] | select(.draft == true) | "\(.tag_name) \(.target_commitish)"' \
+            | while IFS=' ' read -r TAG SHA; do
+                [ -z "$TAG" ] && continue
+                if git ls-remote origin "refs/tags/$TAG" 2>/dev/null | grep -q .; then
+                  echo "  TAG $TAG already exists — skipping"
+                  continue
+                fi
+                echo "  Pushing tag $TAG -> $SHA"
+                git push origin "$SHA:refs/tags/$TAG"
+              done
