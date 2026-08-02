@@ -19,13 +19,21 @@
    * — that keeps the IPC boundary inside `App.svelte` so the
    * "delete + re-mount" sequence is atomic at the parent level
    * and the wizard mount isn't racy.
+   *
+   * Phase 7 §7.5 — when `is_demo` is true the "Re-run
+   * onboarding" button is replaced with a disabled "Demo mode —
+   * settings are read-only" placeholder. The user can't actually
+   * run onboarding in demo mode (the bootstrap refuses demo when
+   * a real config exists) and the rest of Settings is
+   * placeholder anyway, so the disabled copy is honest.
    */
 
   interface Props {
     onreset?: () => void;
+    is_demo?: boolean;
   }
 
-  let { onreset = () => {} }: Props = $props();
+  let { onreset = () => {}, is_demo = false }: Props = $props();
 
   function rerun_onboarding(): void {
     if (confirm("This will reset your Trail config. Continue?")) {
@@ -41,11 +49,21 @@
     you can re-run the onboarding wizard if you'd like to add a
     new data source or change the SSH target.
   </p>
-  <button
-    data-testid="rerun-onboarding"
-    type="button"
-    onclick={rerun_onboarding}
-  >
-    Re-run onboarding
-  </button>
+  {#if is_demo}
+    <button
+      data-testid="demo-mode-readonly"
+      type="button"
+      disabled
+    >
+      Demo mode — settings are read-only
+    </button>
+  {:else}
+    <button
+      data-testid="rerun-onboarding"
+      type="button"
+      onclick={rerun_onboarding}
+    >
+      Re-run onboarding
+    </button>
+  {/if}
 </section>
