@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/pedro-tramontin/trail/compare/trail-v0.2.0...trail-v0.2.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** surface release-please job outputs to downstream build jobs ([#69](https://github.com/pedro-tramontin/trail/issues/69)) ([75e89e2](https://github.com/pedro-tramontin/trail/commit/75e89e2bf89ba7e13ab1a706aa8da36ed3474ff1))
+
 ## [0.2.0](https://github.com/pedro-tramontin/trail/compare/trail-v0.1.0...trail-v0.2.0) (2026-08-02)
 
 
