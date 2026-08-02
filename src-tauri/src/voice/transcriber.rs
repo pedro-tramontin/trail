@@ -72,7 +72,16 @@ impl WhisperContext {
             let path_str = path.to_str().ok_or_else(|| {
                 TranscribeError::Whisper(format!("non-utf8 model path: {}", path.display()))
             })?;
-            let ctx = Wctx::new(path_str).map_err(|e| TranscribeError::Whisper(e.to_string()))?;
+            // `WhisperContext::new` was removed in whisper-rs 0.13;
+            // the replacement is `new_with_params` which takes a
+            // `WhisperContextParameters` value. The defaults match
+            // what the old `new(path)` call did (no GPU, no flash
+            // attention, no DTW).
+            let ctx = Wctx::new_with_params(
+                path_str,
+                whisper_rs::WhisperContextParameters::default(),
+            )
+            .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
             Ok(Self {
                 model_path: path.to_path_buf(),
                 _ctx: Box::new(ctx),
@@ -138,7 +147,12 @@ pub async fn transcribe(samples: &[f32]) -> Result<Transcript, TranscribeError> 
         // Touch the imports so the cfg-gated block compiles even
         // though v1 doesn't run the full pipeline yet (the real
         // `state.full(...)` call lands in §5.7).
-        use whisper_rs::SamplingStrategy as _;
+        // whisper-rs 0.13 makes `SamplingStrategy` a public type
+        // accessible via the `whisper_rs::SamplingStrategy` path.
+        // The earlier `as _` trait-import trick was a workaround
+        // for an older release; the proper import now brings the
+        // type into scope so the enum variants resolve.
+        use whisper_rs::SamplingStrategy;
         let _ = SamplingStrategy::Greedy { best_of: 1 };
         let _ = _ctx_loaded;
         Ok(Transcript::default())
