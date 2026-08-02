@@ -232,6 +232,80 @@ else
     fi
 fi
 
+# --- upload-assets YAML structure (Phase 7 §7.7) ---
+# The release.yml file must contain a top-level `upload-assets` job
+# that depends on `release-please` + the build jobs. Pinning + the
+# artifact-upload step shape are the load-bearing checks.
+echo
+echo "=== upload-assets job structure (Phase 7 §7.7) ==="
+
+if grep -qE '^[[:space:]]+upload-assets:[ ]*$' .github/workflows/release.yml; then
+    ok "release.yml has upload-assets job"
+else
+    bad "release.yml missing upload-assets job"
+fi
+
+# Window: from `upload-assets:` line, take the next 8 lines.
+# Note: GNU grep 3.11 has a quirk where `+` in BRE (`grep` without
+# `-E`) is treated as a literal at the start of a pattern. Use
+# `grep -E` (ERE) consistently or use `\{1,\}` (BRE repetition).
+UPLOAD_WINDOW=$(grep -A8 -E '^ +upload-assets:' .github/workflows/release.yml || true)
+
+if echo "$UPLOAD_WINDOW" | grep -qE '^[[:space:]]+needs[[:space:]]?:[[:space:]]*$'; then
+    ok "upload-assets has needs: block"
+else
+    bad "upload-assets is missing needs: block"
+fi
+
+for dep in release-please build-linux-deb build-mac-universal build-matrix-arch; do
+    if echo "$UPLOAD_WINDOW" | grep -qE "^ +-+ +${dep}\$"; then
+        ok "upload-assets needs ${dep}"
+    else
+        bad "upload-assets is missing needs: ${dep}"
+    fi
+done
+
+# --- softprops/action-gh-release@v2 SHA-pinning rule (Phase 7 §7.7) ---
+# Per the supply-chain-audit skill: NEVER reference the action by a
+# mutable tag. The reference MUST be a 40-char commit SHA (or
+# `owner/repo@<full-sha>`). We assert that the SHA is present AND
+# that no `@v1` / `@v2` / `@v2.1` etc. tag-only reference is used.
+echo
+echo "=== softprops/action-gh-release SHA-pinning (supply-chain-audit) ==="
+# Look for the SHA-pinned reference ONLY in actual `uses:` lines
+# (where the action is invoked), not in free-text comments where
+# `softprops/action-gh-release@v2` may appear as documentation.
+# Pattern: line starts with `uses:`, has `softprops/action-gh-release@<40-hex>`
+# Use a pattern that avoids the GNU grep 3.11 `:`+character-class
+# quirk (see the needs-block check above).
+SHA_PINNED=$(grep -E '^ +-? +uses:[[:space:]]+softprops/action-gh-release@[0-9a-f]{40}' .github/workflows/release.yml || true)
+if [ -n "$SHA_PINNED" ]; then
+    PINNED_SHA=$(echo "$SHA_PINNED" | grep -oE '[0-9a-f]{40}' | head -1)
+    ok "softprops/action-gh-release is SHA-pinned: $PINNED_SHA"
+else
+    bad "softprops/action-gh-release is NOT SHA-pinned (must use a commit SHA, not a tag) on a uses: line"
+fi
+
+# Same scope rule for tag-form references — only flag if the tag
+# reference is in an active `uses:` line. Free-text mentions of
+# `@v2` in comments (e.g. "item 7-7 will wire v2 to ...") are
+# documentation, not invocations.
+TAG_REFERENCE=$(grep -E '^ +-? +uses:[[:space:]]+softprops/action-gh-release@(v[0-9]+(\.[0-9]+){0,2})([^0-9a-f]|$)' .github/workflows/release.yml || true)
+if [ -n "$TAG_REFERENCE" ]; then
+    bad "Found tag-form softprops/action-gh-release reference (must use SHA):"
+    echo "$TAG_REFERENCE"
+else
+    ok "no active tag-form references to softprops/action-gh-release (comment mentions ok)"
+fi
+
+# --- draft-build act dry-run guard (Phase 7 §7.7) ---
+# The act -n check above already covers draft-build.yml — explicit
+# echo here so §7.7's checklist has a documented single source of
+# truth. yamllint + act also run in the §7.1 block above.
+echo
+echo "=== draft-build act -n is covered by the [5] act -n block above ==="
+note_warn "if act became installed since this script ran, rerun and check rc_db=0"
+
 # --- Summary ---
 echo
 echo "=== Summary: pass=$PASS, warn=$WARN, fail=$FAIL ==="
