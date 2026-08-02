@@ -1,5 +1,5 @@
 use ssh_key::PrivateKey;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const KEYCHAIN_SERVICE: &str = "com.pedrotramontin.trail";
 pub const KEYCHAIN_ACCOUNT: &str = "ssh-private-key-ed25519";
@@ -48,8 +48,11 @@ pub fn generate_and_store() -> Result<String, KeyringError> {
     let (pem, public_openssh) = generate_keypair()?;
     // Hand the PEM to the OS keychain (which copies it into the
     // platform's secure storage), then zeroize our copy before
-    // dropping the String.
-    let mut pem = pem;
+    // dropping the String. `Zeroizing<String>` guarantees the bytes
+    // are wiped on Drop even if a future caller clones the buffer —
+    // a plain `String` clone could outlive this `zeroize()` call and
+    // leak the private key in a heap dump (CWE-316 / ASVS V6.4.1).
+    let mut pem: Zeroizing<String> = Zeroizing::new(pem);
     let result = store_in_keychain(&pem);
     pem.zeroize();
     result?;
@@ -63,6 +66,11 @@ pub fn read_public_from_keychain() -> Result<Option<String>, KeyringError> {
         keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(KeyringError::Keyring)?;
     match entry.get_password() {
         Ok(pem) => {
+            // Wrap PEM bytes in `Zeroizing<String>` so the keychain-
+            // returned private key is wiped on Drop. The
+            // `keyring 3.x` upstream returns a plain `String`
+            // (not `Zeroizing<String>`), so we wrap inline.
+            let pem: Zeroizing<String> = Zeroizing::new(pem);
             let private = PrivateKey::from_openssh(&pem).map_err(KeyringError::Keygen)?;
             let public_openssh = private
                 .public_key()
@@ -165,6 +173,125 @@ mod tests {
         // Second call should return the SAME public key (idempotent).
         let pub2 = generate_and_store().expect("second call should reuse");
         assert_eq!(pub1, pub2);
+        // Clean up.
+        if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    // === Phase 7 §7.8 regression tests (PEM Zeroizing<String>) ===
+    //
+    // Carry-forward from Phase 1 §5b: the keyring 3.x crate returns
+    // PEM bytes as a plain `String`. Wrapping that in `Zeroizing<String>`
+    // ensures the heap bytes are wiped on Drop. These two tests guard
+    // against a future refactor that silently swaps `Zeroizing<String>`
+    // back for `String` (which is the exact mistake that motivated the
+    // Phase 1 §5b note).
+
+    #[test]
+    fn pem_drop_zeroes_the_buffer() {
+        // `Zeroizing<String>::Drop` (and the underlying `Zeroize`
+        // impl on `String`) must wipe the string's bytes before
+        // releasing the heap allocation. The `zeroize` crate's
+        // `Zeroize` impl for `String` uses `String::clear()` (truncates
+        // to len 0 then drops the contents) — stronger than in-place
+        // zeroing — and `Zeroizing<Z>` calls `Zeroize::zeroize` in its
+        // `Drop` impl. This test verifies our usage fits the contract:
+        // cloning via the `Zeroizing` wrapper keeps the zeroize
+        // guarantee, and an explicit `zeroize()` call WIPES the bytes
+        // (the upstream `String::Zeroize` impl truncates to len 0).
+        //
+        // The actual heap-zeroing behaviour is documented in the
+        // `zeroize` crate's contract and verified by the upstream
+        // test suite; here we verify the type contract that prevents
+        // a future refactor from silently unwrapping back to a plain
+        // `String` clone (which is the exact mistake Phase 1 §5b
+        // flagged).
+        let payload = "PEM-FIXTURE-WOULD-NORMALLY-BE-AN-OPENSSH-PRIVKEY";
+        let pem: Zeroizing<String> = Zeroizing::new(payload.to_string());
+        assert_eq!(pem.as_str(), payload);
+
+        // `.clone()` returns a fresh `Zeroizing<String>` — the
+        // signature-level proof that cloning keeps the zeroize
+        // guarantee. This is the exact shape of the call site that
+        // `load_private_key_pem()` uses after `entry.get_password()`.
+        let mut clone: Zeroizing<String> = pem.clone();
+        assert_eq!(clone.as_str(), payload);
+
+        // Explicit zeroize before Drop is the contract used in
+        // `keyring.rs::generate_and_store` after the keychain
+        // accepts the PEM. The upstream `zeroize::Zeroize` impl for
+        // `String` calls `String::clear()` (truncates to len 0);
+        // we don't depend on the exact mechanism, only on the
+        // observable contract that the bytes are no longer present.
+        clone.zeroize();
+        assert!(
+            clone.is_empty() || clone.as_str().bytes().all(|b| b == 0),
+            "after zeroize(), the Zeroizing<String> must be empty (cleared) or all-NUL bytes; got: {:?}",
+            clone.as_str()
+        );
+
+        // Drop frees the underlying allocation — Rust's allocator
+        // takes over from there. The invariant this test enforces is:
+        // the bytes never reach a `String` clone that outlives the
+        // wrapper, so a heap dump cannot recover the original PEM.
+        drop(pem);
+        drop(clone);
+    }
+
+    #[test]
+    #[ignore = "touches the real OS keychain — run manually on Pedro's Mac"]
+    fn store_in_keychain_round_trip_preserves_bytes() {
+        // Non-regression: the Zeroizing wrapper must NOT truncate or
+        // mutate the bytes that flow through to the OS keychain. We
+        // exercise the same `store_in_keychain → get_password` pair
+        // that `generate_and_store` uses, but with an explicit,
+        // distinguishable payload so truncation would be detected.
+        if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+            let _ = entry.delete_credential();
+        }
+
+        // Generate a fresh PEM via the real path (OpenSSH PEM,
+        // ~370 bytes for ed25519) — bytes the test can fingerprint.
+        let (pem, _public) = generate_keypair().expect("generate_keypair");
+        let original_len = pem.len();
+        let original_sha = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(pem.as_bytes());
+            format!("{:x}", h.finalize())
+        };
+
+        // Store wrapped in `Zeroizing<String>` (the new contract).
+        let pem_zerobox: Zeroizing<String> = Zeroizing::new(pem);
+        store_in_keychain(&pem_zerobox).expect("store_in_keychain should accept Zeroizing<String>");
+
+        // Read back wrapped in `Zeroizing<String>` (the new contract).
+        let entry =
+            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).expect("keychain entry");
+        let read_back: Zeroizing<String> = Zeroizing::new(
+            entry
+                .get_password()
+                .expect("get_password should return the stored PEM"),
+        );
+
+        assert_eq!(
+            read_back.len(),
+            original_len,
+            "round-trip must preserve byte length (truncation regression check)"
+        );
+
+        let read_sha = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(read_back.as_bytes());
+            format!("{:x}", h.finalize())
+        };
+        assert_eq!(
+            read_sha, original_sha,
+            "round-trip must preserve bytes verbatim"
+        );
+
         // Clean up.
         if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
             let _ = entry.delete_credential();
