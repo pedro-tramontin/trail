@@ -3,11 +3,12 @@
 // `mod transport;` lands in Phase 1 §1.4 (SSH transport + IPC bindings).
 // `mod commands;` lands in Phase 1 §1.5 (Tauri IPC bindings for the transport).
 // `mod validate;` lands in Phase 1 §1.6 (client-side pre-push schema validation).
-// They are added incrementally to the workspace below.
-
+// `mod install;` lands in Phase 1 §1.10 (VPS install plan) and is
+// extended in Phase 6 §6.6 with the install-wizard's 3 Tauri commands.
 mod collectors;
 mod commands;
 mod config;
+mod install;
 mod keyring;
 pub mod onboarding;
 mod transport;
@@ -378,6 +379,21 @@ pub fn run() {
             // onboarding wizard can re-run. Used by the
             // "Re-run onboarding" button on the Settings shell.
             delete_config,
+            // Phase 6 §6.6 — install-wizard's 3-option step.
+            // `install_vps_collector` is the auto path; in tests
+            // the `dry_run: true` branch redirects the push to
+            // the `mock-ssh-server` fixture on `127.0.0.1:<port>`.
+            install::install_vps_collector,
+            // Phase 6 §6.6 — install-wizard's "show me the plan"
+            // option. Returns the absolute path of the rendered
+            // `~/.trail/collector.json` so the frontend can hand
+            // it to the platform's reveal/open handler.
+            install::open_collector_script,
+            // Phase 6 §6.6 — install-wizard's "do this later"
+            // option. Appends `collector_id` to the
+            // `pending_installs` array in `~/.trail/config.json`
+            // (idempotent).
+            install::mark_pending_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
