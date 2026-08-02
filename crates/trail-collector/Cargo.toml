@@ -1,10 +1,23 @@
 [package]
 name = "trail-collector"
-version.workspace = true
+# Per-crate inline version (not `version.workspace = true`) per talon
+# issue #2111: release-please bumps workspace-member versions by walking
+# `extraFiles` in release-please-config.json, and only handles inline
+# versions — `version.workspace = true` is invisible to that walker.
+# The workspace root + each member's `[package].version` are kept in
+# lockstep manually; release-please rewrites both on every release.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+# `cargo install trail-collector --git <repo>` discoverability metadata.
+# Without these, `cargo install --list` shows a blank tile and the crates.io
+# page (if ever published) would lack the install instructions. They are
+# the difference between "the binary installs fine but looks orphaned" and
+# "the binary shows up with a description, homepage, and license".
+description = "Trail SSH collector — runs on the VPS, scrapes and ships activity"
+homepage = "https://github.com/pedro-tramontin/trail"
+repository = "https://github.com/pedro-tramontin/trail"
 license.workspace = true
-description = "Generic VPS-side collector for Trail. nginx/envoy-style: --config <path>"
 
 [[bin]]
 name = "trail-collector"
