@@ -51,16 +51,44 @@ jobs:
       - uses: actions/checkout@v4
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
+      # Tauri 2 Linux build prereqs. The collect crate is pure-Rust musl
+      # with no system deps, but `pnpm tauri build` (the main app) pulls
+      # webkit2gtk-4.1 which transitively requires the GTK/glib stack.
+      # The list mirrors Tauri's docs: https://v2.tauri.app/start/prerequisites/
+      - name: Install Linux system deps (Tauri 2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libwebkit2gtk-4.1-dev \
+            libglib2.0-dev
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # pnpm 11+ requires Node.js 22.13+ (calls node:sqlite builtin).
+          # Pin to 22 LTS to match pnpm@10.18.0 (the project's lockfile
+          # version). Bump to 24 if the lockfile moves to pnpm 11.
+          node-version: "22"
 
       - name: Install pnpm
-        run: corepack enable && corepack prepare pnpm@latest --activate
+        # Pin pnpm to the version the project uses (lockfileVersion 9.x
+        # in pnpm-lock.yaml); `pnpm@latest` pulled 11.18.0 which
+        # requires Node 22.13+ AND the node:sqlite builtin, breaking
+        # the previous Node-20 pin.
+        run: corepack enable && corepack prepare pnpm@10.18.0 --activate
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
