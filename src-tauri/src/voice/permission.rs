@@ -234,7 +234,7 @@ mod macos {
     //! change without a major SDK rev.)
 
     use super::MicPermissionState;
-    use block2::{Block, RcBlock};
+    use block2::RcBlock;
     use objc2::runtime::AnyClass;
     use objc2::{class, msg_send};
     use parking_lot::Mutex;
@@ -263,22 +263,30 @@ mod macos {
             #[link_name = "AVMediaTypeAudio"]
             static AVMediaTypeAudio: objc2::runtime::AnyObject;
         }
-        &AVMediaTypeAudio as *const _
+        // SAFETY: Reading an `extern static` is `unsafe` as of
+        // Rust 1.82 (rust-lang/rust#121500) because the linker
+        // doesn't guarantee the symbol is initialized at read time.
+        // In practice `AVMediaTypeAudio` is a read-only constant
+        // NSString* baked into the AVFoundation framework's
+        // __DATA segment, so the read is safe after dyld resolves
+        // the symbol at process load.
+        unsafe { &AVMediaTypeAudio as *const _ }
     }
 
     pub fn authorization_status() -> MicPermissionState {
         // SAFETY: `class!` returns a non-null `&'static AnyClass`
-        // for any class registered with the ObjC runtime. AVCaptureDevice
-        // is registered on every macOS process (it's part of
-        // AVFoundation.framework which we link via build.rs). If
-        // somehow the class lookup fails (extremely unlikely) we
-        // treat it as NotDetermined — same fallback the plan
-        // recommends.
+        // for any class registered with the ObjC runtime.
+        // AVCaptureDevice is registered on every macOS process
+        // (it's part of AVFoundation.framework which we link via
+        // build.rs).
+        //
+        // objc2 0.6 returns `&'static AnyClass` from `class!()`
+        // and dropped the `is_null()` method on the typed wrapper.
+        // The macro guarantees a non-null class on macOS (the
+        // class is registered at process load), so we rely on the
+        // macro invariant and skip the defensive null check.
         unsafe {
             let cls = class!(AVCaptureDevice);
-            if cls.is_null() {
-                return MicPermissionState::Undetermined;
-            }
             let media_type = av_audio_media_type();
             // Class method — call on the metaclass. `msg_send!`
             // accepts `AnyClass` for class-method calls.
@@ -296,14 +304,19 @@ mod macos {
         // a few milliseconds to a few seconds (one TCC prompt).
         let granted_slot: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
         let granted_slot_clone = granted_slot.clone();
-        let block = RcBlock::new(move |granted: bool| {
-            *granted_slot_clone.lock() = Some(granted);
+        // objc2 0.6 / block2 0.6 deliberately don't implement
+        // `EncodeArgument` for `bool` (see the comment on
+        // `EncodeArgument` in objc2's encode.rs: "no places where
+        // this is not just `Encode`. You might be tempted to think
+        // that `bool` could work in this, but that would be a
+        // mistake because it cannot be safely used in custom
+        // defined methods"). Objective-C BOOL is actually
+        // `signed char` underneath, so i8 ↔ bool is well-defined.
+        let block = RcBlock::new(move |granted: i8| {
+            *granted_slot_clone.lock() = Some(granted != 0);
         });
         unsafe {
             let cls = class!(AVCaptureDevice);
-            if cls.is_null() {
-                return MicPermissionState::Undetermined;
-            }
             let media_type = av_audio_media_type();
             // `Block::deref()` recovers the raw `*const Block`
             // pointer for the ObjC call. `requestAccessForMediaType:
