@@ -200,11 +200,20 @@ jobs:
             echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
             echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
             echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+            # tauri-action's `signingIdentity` input overrides the
+            # tauri.conf.json value with whatever we pass here. With
+            # cert present, use the real identity from the secret.
+            echo "APPLE_SIGNING_IDENTITY_FOR_ACTION=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
           else
             echo "::warning::APPLE_CERTIFICATE not set; shipping unsigned .dmg"
+            # Pin the tauri-action input explicitly to an empty
+            # string so codesign is skipped entirely. The literal
+            # string in tauri.conf.json resolves to the empty
+            # string when APPLE_SIGNING_IDENTITY is unset.
+            echo "APPLE_SIGNING_IDENTITY_FOR_ACTION=-" >> "$GITHUB_ENV"
           fi
 
-      - name: Build Tauri bundle (macOS universal)
+      - name: Build Tauri bundle (macOS aarch64)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -214,10 +223,18 @@ jobs:
           releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
           releaseDraft: true
           prerelease: false
+          # `signingIdentity` overrides the value in tauri.conf.json
+          # at build time. Set to the real identity when secrets are
+          # present; set to `-` (tauri-action's "skip signing"
+          # sentinel) when APPLE_CERTIFICATE is unset so codesign
+          # doesn't run. Without this, the `${APPLE_SIGNING_IDENTITY}`
+          # literal in tauri.conf.json survives when the env var is
+          # unset and codesign rejects it as a non-existent identity.
+          signingIdentity: ${{ env.APPLE_SIGNING_IDENTITY_FOR_ACTION }}
           # Native arch only (aarch64-apple-darwin). The previous
           # universal target cross-compiled to x86_64-apple-darwin
           # which broke the libssh2-sys -> openssl-sys build script
-          # (no system OpenSSL for the cross target). See the dtolnay
+          # (no host OpenSSL for the cross target). See the dtolnay
           # setup step above for the corresponding target list.
           args: --target aarch64-apple-darwin
 
