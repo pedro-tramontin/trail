@@ -5629,6 +5629,7 @@ dependencies = [
  "async-trait",
  "block2",
  "chrono",
+ "clap",
  "cpal",
  "dirs",
  "global-hotkey",
