@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.4.2](https://github.com/pedro-tramontin/trail/compare/trail-v0.4.1...trail-v0.4.2) (2026-08-02)
+
+
+### Features
+
+* **anonymizer:** regex scrubber with 3 strictness levels + SummarizerConfig fields + 4 tests ([#18](https://github.com/pedro-tramontin/trail/issues/18)) ([f51ae70](https://github.com/pedro-tramontin/trail/commit/f51ae70b5c5c29c61153f24d1137e886a6aef11b))
+* build.rs musl cross-compile + VPS install + client-side pre-push validation (Phase 1 §1.6/§1.10/§1.12) ([#6](https://github.com/pedro-tramontin/trail/issues/6)) ([c59f2d4](https://github.com/pedro-tramontin/trail/commit/c59f2d4e5f672219c826170c5b1d403b523872fc))
+* **ci:** add Windows build to release pipeline (NSIS .exe installer) ([#74](https://github.com/pedro-tramontin/trail/issues/74)) ([77a788e](https://github.com/pedro-tramontin/trail/commit/77a788edaf46d19b058af5dcae57c18af7eabc3e))
+* **collector:** github-collector module — gh CLI wrapper + state normalization + schema ([#9](https://github.com/pedro-tramontin/trail/issues/9)) ([13a8f94](https://github.com/pedro-tramontin/trail/commit/13a8f943004954371fd6dc423e27fed79338e562))
+* **collectors:** Tauri-side orchestrator + cron schedule + IPC commands ([#12](https://github.com/pedro-tramontin/trail/issues/12)) ([20168cc](https://github.com/pedro-tramontin/trail/commit/20168ccbfb141ef5cd3eb927159b762895e8f646))
+* **install:** Phase D install wizard with 3 Tauri commands + mock-ssh-server test fixture ([#57](https://github.com/pedro-tramontin/trail/issues/57)) ([811388f](https://github.com/pedro-tramontin/trail/commit/811388f844ef786e594a348df7644ebbd842b78c))
+* **learner:** bootstrap classifier + LRU compaction + 5 tests ([#19](https://github.com/pedro-tramontin/trail/issues/19)) ([0175da0](https://github.com/pedro-tramontin/trail/commit/0175da018a704dce7cce6e45f71b5fc94ae737c0))
+* **logs:** 3 IPC commands (list/delete/get_raw) + 7 tests ([#23](https://github.com/pedro-tramontin/trail/issues/23)) ([a3d2470](https://github.com/pedro-tramontin/trail/commit/a3d24706cf36cec65f13cfd84eb70af9256e6c86))
+* **ollama:** typed HTTP client + health check + 4 wiremock cases ([#16](https://github.com/pedro-tramontin/trail/issues/16)) ([48657d2](https://github.com/pedro-tramontin/trail/commit/48657d2f595ce029d728f0b66e2c1bd958986c01))
+* **onboarding:** LLM-driven Q&A via ollama + baseline fallback ([#53](https://github.com/pedro-tramontin/trail/issues/53)) ([69b41b1](https://github.com/pedro-tramontin/trail/commit/69b41b1349357b81faf5f6144b8d1030642955f5))
+* **onboarding:** non-invasive laptop scan + 8 collector candidates ([#52](https://github.com/pedro-tramontin/trail/issues/52)) ([0fa62fe](https://github.com/pedro-tramontin/trail/commit/0fa62fed636e9a3180f656dee7e2b47862cbcdb1))
+* **onboarding:** Phase 6 §6.5 — Re-run onboarding via Settings placeholder ([#56](https://github.com/pedro-tramontin/trail/issues/56)) ([4b0e5eb](https://github.com/pedro-tramontin/trail/commit/4b0e5eb003c6204d62066a67b89e7b6752bc53e5))
+* **onboarding:** Phase A-D multi-step wizard UI ([#55](https://github.com/pedro-tramontin/trail/issues/55)) ([cc90895](https://github.com/pedro-tramontin/trail/commit/cc90895bd81f8bedad445dfb63b22c7132138ae1))
+* **onboarding:** Phase C config writer + atomic JSON write ([#54](https://github.com/pedro-tramontin/trail/issues/54)) ([d55c8c0](https://github.com/pedro-tramontin/trail/commit/d55c8c037ee0c117ce8bcd9fbf47175f78911edc))
+* **prompts:** frozen LLM prompt constants + Phase 3 workspace deps ([#15](https://github.com/pedro-tramontin/trail/issues/15)) ([7aa8f74](https://github.com/pedro-tramontin/trail/commit/7aa8f749c6e09242445ceff120af8eb64aa1823d))
+* scaffold Trail Tauri 2 workspace + Svelte frontend (Phase 1 §1.1) ([#1](https://github.com/pedro-tramontin/trail/issues/1)) ([de17213](https://github.com/pedro-tramontin/trail/commit/de1721322b5aa148f8e7106c651b7b54b4bde39a))
+* **scheduler:** next-fire-time + spawn-loop + 3 tests + tokio test-util ([#20](https://github.com/pedro-tramontin/trail/issues/20)) ([09beffb](https://github.com/pedro-tramontin/trail/commit/09beffb3f78cbeb8993e7cdd16861b976ced94bd))
+* **src-tauri:** config.rs + keyring.rs + 3 Tauri commands (Phase 1 §1.2-1.3) ([#2](https://github.com/pedro-tramontin/trail/issues/2)) ([6463962](https://github.com/pedro-tramontin/trail/commit/64639622003660de48d5fcb4f2fb349dd18685a3))
+* **src-tauri:** Transport trait + SshTransport impl + IPC bindings (Phase 1 §1.4-1.5) ([#3](https://github.com/pedro-tramontin/trail/issues/3)) ([82ce0ed](https://github.com/pedro-tramontin/trail/commit/82ce0ed0baa03785c378e7bf4c58b6e986ccabfd))
+* **summarizer:** core summarize-day pipeline + fixture set + 5 tests ([#17](https://github.com/pedro-tramontin/trail/issues/17)) ([c82b4c4](https://github.com/pedro-tramontin/trail/commit/c82b4c4872bb6de3b64753c7eaf4b034bcf330c9))
+* **ui:** --demo flag + fixture banner for first-run visitors ([#64](https://github.com/pedro-tramontin/trail/issues/64)) ([54825bc](https://github.com/pedro-tramontin/trail/commit/54825bc6295a22d0738972e0a673da7675eba08a))
+* **voice:** audio meter (RMS + EMA) + tray-icon blink loop with CancellationToken ([#31](https://github.com/pedro-tramontin/trail/issues/31)) ([82bf7b4](https://github.com/pedro-tramontin/trail/commit/82bf7b417f10ceb9cf0b08bb8d2f9bdecbd846f5))
+* **voice:** cpal audio capture (macOS) + rubato resampler (cross-platform) ([#29](https://github.com/pedro-tramontin/trail/issues/29)) ([2b130b5](https://github.com/pedro-tramontin/trail/commit/2b130b51d3f9708cd0e989ee0ae78cf89d2c62c0))
+* **voice:** global-hotkey parser + macOS registration with conflict detection ([#30](https://github.com/pedro-tramontin/trail/issues/30)) ([9bc94b5](https://github.com/pedro-tramontin/trail/commit/9bc94b55e409deb903aab25817ba9dd98d112882))
+* **voice:** macOS mic permission detection + tray-menu filter ([#49](https://github.com/pedro-tramontin/trail/issues/49)) ([6d71d3f](https://github.com/pedro-tramontin/trail/commit/6d71d3f2c0553bed64078c218e50f3883b6e278e))
+* **voice:** Phase 5 e2e harness + macOS verification checklist ([#50](https://github.com/pedro-tramontin/trail/issues/50)) ([1a92744](https://github.com/pedro-tramontin/trail/commit/1a9274413ece119b37b314ff40653981d4d47d3f))
+* **voice:** whisper model manager + workspace deps (whisper-rs, hound, dirs) ([#28](https://github.com/pedro-tramontin/trail/issues/28)) ([80e17c6](https://github.com/pedro-tramontin/trail/commit/80e17c6ab6cdc3c21e54949f380dc80418469b5c))
+* **voice:** whisper transcription pipeline + atomic JSON+WAV store + 6 tests ([#32](https://github.com/pedro-tramontin/trail/issues/32)) ([646924f](https://github.com/pedro-tramontin/trail/commit/646924fe70effd735b144e4f6d74ee1f0d8cd6ef))
+
+
+### Bug Fixes
+
+* address post-merge Copilot threads on [#33](https://github.com/pedro-tramontin/trail/issues/33)/[#34](https://github.com/pedro-tramontin/trail/issues/34)/[#35](https://github.com/pedro-tramontin/trail/issues/35) (v2 round) ([#37](https://github.com/pedro-tramontin/trail/issues/37)) ([468aab2](https://github.com/pedro-tramontin/trail/commit/468aab22b0be37f43acac3954bc59c29dd9e4419))
+* address PR [#20](https://github.com/pedro-tramontin/trail/issues/20) scheduler Copilot threads ([#39](https://github.com/pedro-tramontin/trail/issues/39)) ([0613685](https://github.com/pedro-tramontin/trail/commit/0613685d332fff2351d2309040fc2e36b78f0ca5))
+* address PR [#21](https://github.com/pedro-tramontin/trail/issues/21) e2e harness Copilot threads ([#40](https://github.com/pedro-tramontin/trail/issues/40)) ([a765e79](https://github.com/pedro-tramontin/trail/commit/a765e79d711c745df31ddfffd8ef89870844f6ff))
+* address PR [#23](https://github.com/pedro-tramontin/trail/issues/23) logs Copilot threads ([#42](https://github.com/pedro-tramontin/trail/issues/42)) ([14df4bb](https://github.com/pedro-tramontin/trail/commit/14df4bba0be5698b1c323a0f1c65be05cc5114eb))
+* address PR [#27](https://github.com/pedro-tramontin/trail/issues/27) logs e2e Copilot threads ([#47](https://github.com/pedro-tramontin/trail/issues/47)) ([8068fbf](https://github.com/pedro-tramontin/trail/commit/8068fbf92aecfc23a0002472ca9b850b042681a2))
+* address PR [#28](https://github.com/pedro-tramontin/trail/issues/28) model-manager streaming Copilot threads ([#45](https://github.com/pedro-tramontin/trail/issues/45)) ([009c897](https://github.com/pedro-tramontin/trail/commit/009c897e4b446bd5e466f9b9ad6bd0efed9c7f80))
+* **anonymizer:** address Copilot review threads on [#18](https://github.com/pedro-tramontin/trail/issues/18) ([#35](https://github.com/pedro-tramontin/trail/issues/35)) ([fab3e3e](https://github.com/pedro-tramontin/trail/commit/fab3e3e5318f4467bf3c0e32be522a4e51086f0d))
+* **ci:** add icon.ico assets for Windows NSIS build ([66daec7](https://github.com/pedro-tramontin/trail/commit/66daec7e2a7a8799ff82a86c9cc2274e2129d141))
+* **learner:** address Copilot review threads on [#19](https://github.com/pedro-tramontin/trail/issues/19) ([#36](https://github.com/pedro-tramontin/trail/issues/36)) ([d055d4e](https://github.com/pedro-tramontin/trail/commit/d055d4e4e401f4ff62054b1f61c1cc9791e339c1))
+* **ollama:** address Copilot review threads on [#16](https://github.com/pedro-tramontin/trail/issues/16) ([#33](https://github.com/pedro-tramontin/trail/issues/33)) ([370afef](https://github.com/pedro-tramontin/trail/commit/370afef4a0438c92d4176e5b69fad0ed40cc3153))
+* **security:** wrap PEM bytes in Zeroizing&lt;String&gt; on keychain read ([#63](https://github.com/pedro-tramontin/trail/issues/63)) ([9e54c1e](https://github.com/pedro-tramontin/trail/commit/9e54c1e236379577e193466f6e2034caa9c84c3e))
+* **summarizer:** address Copilot review threads on [#17](https://github.com/pedro-tramontin/trail/issues/17) ([#34](https://github.com/pedro-tramontin/trail/issues/34)) ([9d99267](https://github.com/pedro-tramontin/trail/commit/9d99267818f4672078af149cb347bd28b9280106))
+* tighten placeholder regex + document save() Windows non-atomicity ([#38](https://github.com/pedro-tramontin/trail/issues/38)) ([07a8f6f](https://github.com/pedro-tramontin/trail/commit/07a8f6f7566ed7dd743d26729c68bdb74893a408))
+* **voice:** bring macOS voice module up to current Rust + objc2/block2/cpal/whisper APIs ([#75](https://github.com/pedro-tramontin/trail/issues/75)) ([b6c4c1d](https://github.com/pedro-tramontin/trail/commit/b6c4c1d1809c2a43a61332ab1523717fa2c74e85))
+
 ## [0.4.1](https://github.com/pedro-tramontin/trail/compare/v0.4.0...v0.4.1) (2026-08-02)
 
 
