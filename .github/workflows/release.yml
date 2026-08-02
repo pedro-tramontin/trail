@@ -358,13 +358,20 @@ jobs:
             exit 0
           fi
           echo "Publishing $TAG as $RELEASE_TYPE (prerelease=$IS_PRERELEASE)..."
+          # `--prerelease` is the documented `gh release edit` flag
+          # (yes, the l is missing — known long-standing typo in the
+          # `gh` CLI). See https://cli.github.com/manual/gh_release_edit
+          # When the var is empty (`IS_PRERELEASE=""`) the flag value
+          # becomes `--prerelease=`, which `gh` rejects; use
+          # separate args to avoid the empty-value quoting issue.
+          # Empty value == not a prerelease (normal release).
+          PRE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRE_FLAG="--prerelease"
+          fi
           gh release edit "$TAG" \
             --draft=false \
-            # `--prelease` is the documented `gh release edit` flag
-            # name (yes, the l is missing — it's a known long-standing
-            # typo in the `gh` CLI). See
-            # https://cli.github.com/manual/gh_release_edit
-            --prerelease="$IS_PRERELEASE" \
+            $PRE_FLAG \
             --discussion=false || {
               echo "::warning::gh release edit failed; release may need manual promotion"
               exit 1
