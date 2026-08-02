@@ -15,7 +15,7 @@
     }
   },
   "releaseLabels": ["autorelease: pending"],
-  "prerelease": false,
+  "prerelease": true,
   "draft": true,
   "includeComponentInTag": false,
   "tagSeparator": "-"
