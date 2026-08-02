@@ -100,3 +100,10 @@ wiremock = { workspace = true }
 # which live behind the `test-util` feature (the workspace `tokio`
 # dep is `full`, which does not include `test-util`).
 tokio = { workspace = true, features = ["test-util"] }
+# Phase 6 §6.6 — install-wizard dry-run fixture. The
+# `mock-ssh-server` binary lives at `tests/fixtures/mock-ssh-server/`
+# (a workspace member) and is spawned by the
+# `install_vps_collector_dry_run_succeeds_against_mock_ssh` test
+# on an ephemeral port. Gated to `cfg(test)` so the production
+# Tauri binary never carries the fixture.
+mock-ssh-server = { path = "../tests/fixtures/mock-ssh-server" }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "src-tauri",
     "crates/trail-collector",
+    "tests/fixtures/mock-ssh-server",
 ]
 
 [workspace.package]
