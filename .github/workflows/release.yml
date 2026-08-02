@@ -304,3 +304,81 @@ jobs:
           name: trail-collector-${{ matrix.arch }}
           path: target/${{ matrix.arch == 'aarch64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}/release/trail-collector
           if-no-files-found: warn
+
+  # ----- Asset upload (Phase 7 §7.7) -----
+  # The release-please step creates a GitHub Release with the new
+  # tag. This job downloads the per-platform artifacts produced by
+  # the build-matrix jobs above, then uses softprops/action-gh-release
+  # (SHA-pinned per the supply-chain-audit skill) to attach them to
+  # the release. Pinned by commit SHA, NOT a tag — the
+  # supply-chain-audit rule.
+  #
+  # SHA lookup: `gh api repos/softprops/action-gh-release/git/refs/tags/v2`
+  # returns the commit SHA for the v2 tag. Current pinned SHA is
+  # 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 — bump via PR + a fresh
+  # SHA lookup when a new upstream release lands.
+  upload-assets:
+    needs:
+      - release-please
+      - build-mac-universal
+      - build-linux-deb
+      - build-linux-tarball
+      - build-matrix-arch
+    if: needs.release-please.outputs.tag_name != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # required to attach assets to a release
+    steps:
+      - uses: actions/checkout@v4
+        # fork guard — same shape as elsewhere
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+      - name: Download macOS universal binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: trail-darwin-universal
+          path: artifacts/macos
+
+      - name: Download macOS per-arch collector artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trail-collector-aarch64
+          path: artifacts/macos/aarch64
+      - uses: actions/download-artifact@v4
+        with:
+          name: trail-collector-x86_64
+          path: artifacts/macos/x86_64
+
+      - name: Download Linux .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: trail-linux-deb
+          path: artifacts/linux/deb
+
+      - name: Download Linux AppImage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: trail-linux-tarball
+          path: artifacts/linux/tarball
+
+      - name: Upload release assets
+        # SHA-pinned per the supply-chain-audit skill — NEVER use a
+        # mutable tag here. The SHA 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        # corresponds to upstream's v2.1.1 (lookup method:
+        # `gh api repos/softprops/action-gh-release/git/refs/tags/v2`).
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.1.1
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          # Globs are matched against the workspace; missing paths
+          # produce a warning, not an error, so a partial release
+          # doesn't fail the whole pipeline.
+          files: |
+            artifacts/macos/**/*.dmg
+            artifacts/macos/**/*.app
+            artifacts/macos/aarch64/trail-collector
+            artifacts/macos/x86_64/trail-collector
+            artifacts/linux/deb/**/*.deb
+            artifacts/linux/tarball/**/*.AppImage
+          fail_on_unmatched_files: false
+          generate_release_notes: false  # release-please produces the notes
