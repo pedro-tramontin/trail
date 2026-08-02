@@ -200,17 +200,25 @@ jobs:
             echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
             echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
             echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
-            # tauri-action's `signingIdentity` input overrides the
-            # tauri.conf.json value with whatever we pass here. With
-            # cert present, use the real identity from the secret.
-            echo "APPLE_SIGNING_IDENTITY_FOR_ACTION=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
           else
             echo "::warning::APPLE_CERTIFICATE not set; shipping unsigned .dmg"
-            # Pin the tauri-action input explicitly to an empty
-            # string so codesign is skipped entirely. The literal
-            # string in tauri.conf.json resolves to the empty
-            # string when APPLE_SIGNING_IDENTITY is unset.
-            echo "APPLE_SIGNING_IDENTITY_FOR_ACTION=-" >> "$GITHUB_ENV"
+            # Patch tauri.conf.json to blank out the signing identity.
+            # tauri-action doesn't accept a signingIdentity input
+            # (verified 2026-08-02 by reading its action.yml), so the
+            # only way to skip the codesign step is to ensure the
+            # identity tauri.conf.json resolves to is empty. The
+            # literal `${APPLE_SIGNING_IDENTITY}` placeholder in
+            # tauri.conf.json survives when the env var is unset
+            # (tauri's env-var substitution requires the var to be
+            # \`export\`ed, not just present in `$GITHUB_ENV`), and
+            # that literal string fails `codesign --sign` with
+            # `no identity found`. Replace it with an empty string.
+            sed -i.bak \
+              's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": ""|' \
+              src-tauri/tauri.conf.json
+            rm src-tauri/tauri.conf.json.bak
+            echo "tauri.conf.json patched for unsigned build:"
+            grep -A1 'macOS' src-tauri/tauri.conf.json | head -10
           fi
 
       - name: Build Tauri bundle (macOS aarch64)
@@ -223,14 +231,6 @@ jobs:
           releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
           releaseDraft: true
           prerelease: false
-          # `signingIdentity` overrides the value in tauri.conf.json
-          # at build time. Set to the real identity when secrets are
-          # present; set to `-` (tauri-action's "skip signing"
-          # sentinel) when APPLE_CERTIFICATE is unset so codesign
-          # doesn't run. Without this, the `${APPLE_SIGNING_IDENTITY}`
-          # literal in tauri.conf.json survives when the env var is
-          # unset and codesign rejects it as a non-existent identity.
-          signingIdentity: ${{ env.APPLE_SIGNING_IDENTITY_FOR_ACTION }}
           # Native arch only (aarch64-apple-darwin). The previous
           # universal target cross-compiled to x86_64-apple-darwin
           # which broke the libssh2-sys -> openssl-sys build script
