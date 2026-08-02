@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/pedro-tramontin/trail/compare/trail-v0.3.0...trail-v0.4.0) (2026-08-02)
+
+
+### Features
+
+* **ci:** add Windows build to release pipeline (NSIS .exe installer) ([#74](https://github.com/pedro-tramontin/trail/issues/74)) ([77a788e](https://github.com/pedro-tramontin/trail/commit/77a788edaf46d19b058af5dcae57c18af7eabc3e))
+
+
+### Bug Fixes
+
+* **ci:** add icon.ico assets for Windows NSIS build ([66daec7](https://github.com/pedro-tramontin/trail/commit/66daec7e2a7a8799ff82a86c9cc2274e2129d141))
+* **ci:** build gh release edit args cleanly (no comments inside line-continuation) ([f65d708](https://github.com/pedro-tramontin/trail/commit/f65d708e41f8cdfcd34a9d7eef08decc68e01226))
+* **ci:** build macOS for native arm64 only (drop x86_64 cross-compile) ([#76](https://github.com/pedro-tramontin/trail/issues/76)) ([bde8b85](https://github.com/pedro-tramontin/trail/commit/bde8b85f73664b34c2308b7ee3f25fd358089b0c))
+* **ci:** drop --discussion=false flag (renamed in newer gh CLI) ([e8042f4](https://github.com/pedro-tramontin/trail/commit/e8042f4d5c4312f1ee130e151465507a9875f4b8))
+* **ci:** explicitly pass signingIdentity to tauri-action (skip codesign when no cert) ([684fcf9](https://github.com/pedro-tramontin/trail/commit/684fcf972a8930096d6005b6d93a613b45822578))
+* **ci:** fix --prelease→--prerelease typo in finalize job ([dd5b8ca](https://github.com/pedro-tramontin/trail/commit/dd5b8ca94d8ee128974073814b32f50f555782f7))
+* **ci:** patch tauri.conf.json to skip macOS codesign when no cert ([7dd591a](https://github.com/pedro-tramontin/trail/commit/7dd591a2c7864dd5d3f151f6ff264fd34dfb14b5))
+* **ci:** use null instead of empty string for unsigned macOS builds ([229e2b5](https://github.com/pedro-tramontin/trail/commit/229e2b5667c2be33c1c7084f8294fb8a5001cae8))
+* **voice:** bring macOS voice module up to current Rust + objc2/block2/cpal/whisper APIs ([#75](https://github.com/pedro-tramontin/trail/issues/75)) ([b6c4c1d](https://github.com/pedro-tramontin/trail/commit/b6c4c1d1809c2a43a61332ab1523717fa2c74e85))
+
 ## [0.3.0](https://github.com/pedro-tramontin/trail/compare/trail-v0.2.0...trail-v0.3.0) (2026-08-02)
 
 
