@@ -3,12 +3,20 @@
 // `mod transport;` lands in Phase 1 §1.4 (SSH transport + IPC bindings).
 // `mod commands;` lands in Phase 1 §1.5 (Tauri IPC bindings for the transport).
 // `mod validate;` lands in Phase 1 §1.6 (client-side pre-push schema validation).
-// `mod install;` lands in Phase 1 §1.10 (VPS install plan) and is
-// extended in Phase 6 §6.6 with the install-wizard's 3 Tauri commands.
+// `pub mod install;` lands in Phase 1 §1.10 (VPS install plan) and
+// is extended in Phase 6 §6.6 with the install-wizard's 3 Tauri
+// commands. `pub` so the Phase 6 integration test
+// (`tests/onboarding_e2e.rs`) can drive `install_vps_collector`
+// against the in-tree `mock-ssh-server` fixture.
 mod collectors;
 mod commands;
-mod config;
-mod install;
+// `pub mod config;` is re-exported here (was `mod config;` in
+// Phase 1 §1.2) so the Phase 6 integration test
+// (`tests/onboarding_e2e.rs`) can call `config::load_config` to
+// assert the Phase C round-trip — the frozen Config type is the
+// contract the spec binds the e2e against.
+pub mod config;
+pub mod install;
 mod keyring;
 pub mod onboarding;
 mod transport;
