@@ -1,0 +1,18 @@
+[package]
+name = "mock-ssh-server"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Headless fixture for the install-wizard tests: a minimal TCP listener that records install payloads to an inbox. NOT a real SSH server."
+
+[[bin]]
+name = "mock-ssh-server"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
