@@ -42,6 +42,19 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # Explicit job outputs: read the action's `tag_name` + `release_url`
+    # outputs and surface them to downstream jobs via `needs.release-please.outputs.X`.
+    # Without this block, the action's outputs are step-scoped and the
+    # build-linux-* / build-mac-* / upload-assets jobs evaluate
+    # `needs.release-please.outputs.tag_name` as empty string, causing
+    # the `if: needs.release-please.outputs.tag_name != ''` guard to
+    # silently skip them. (googleapis/release-please-action@v4 still
+    # emits the outputs, but the consuming workflow MUST declare them
+    # in the job's `outputs:` block to expose them to `needs`.)
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_url: ${{ steps.release.outputs.release_url }}
+      release_created: ${{ steps.release.outputs.release_created }}
     steps:
       - uses: actions/checkout@v4
         with:
