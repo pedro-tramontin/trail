@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "packageName": "trail-app",
+      "releaseType": "rust",
+      "bumpPatchForMinorPreMajor": true,
+      "bumpMinorForMinorPreMajor": false,
+      "changelogPath": "CHANGELOG.md",
+      "extraFiles": [
+        "src-tauri/tauri.conf.json",
+        "crates/trail-collector/Cargo.toml"
+      ],
+      "pullRequestTitlePattern": "release: v${version}"
+    }
+  },
+  "releaseLabels": ["autorelease: pending"],
+  "prerelease": false,
+  "draft": false,
+  "includeComponentInTag": false,
+  "tagSeparator": "-"
+}

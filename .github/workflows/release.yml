@@ -1,0 +1,78 @@
+# GitHub Actions workflow for release-please + release artifact builds.
+#
+# Per-talon PR #62 pitfall (carried-forward): NEVER use `if:` keys
+# at job/step level to gate on env vars. GH Actions resolves `if:`
+# before secrets are exposed to the runner, so `if: ${{ secrets.X }}`
+# returns falsy even when the secret is set. Use bash guards inside
+# `run:` that check `[ -n "${VAR:-}" ]` and append to `$GITHUB_ENV`
+# only when set. All downstream build jobs (macOS signing+notarization,
+# universal DMG, Linux .deb, Linux .tar.gz) will follow this pattern
+# when they are added in items 7-2 / 7-3 / 7-7.
+#
+# This file is the §7.1 STUB: just the release-please step + a
+# `workflow_dispatch` manual trigger. The build-and-upload jobs
+# are scaffolded in subsequent phase 7 items.
+
+name: release
+
+on:
+  push:
+    branches:
+      - main
+    # release-please pushes a release commit to main when its release
+    # PR merges. That commit's tag (created by release-please, NOT by
+    # this workflow) is the trigger signal for downstream consumers.
+  workflow_dispatch:
+
+# Security note: forks can't push to upstream `main` so the `push`
+# trigger already excludes them. The release-please step below uses
+# GITHUB_TOKEN (or a dedicated RELEASE_PLEASE_TOKEN PAT) to open its
+# release PR — running on a fork would leak the token through
+# actions/checkout of an untrusted SHA. The `if:` is applied per-job
+# in item 7-7 once the build matrix lands.
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write  # required for OIDC-based notarization (added in item 7-2)
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        # Per-step fork guard: forks checking out untrusted SHA is
+        # where the GITHUB_TOKEN token surface lives. Skip step on
+        # fork PRs (pushes from forks cannot reach this workflow —
+        # only `pull_request` does, and item 7-2 will add it on the
+        # build jobs too).
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          # Default to GITHUB_TOKEN. If the repo has a dedicated
+          # RELEASE_PLEASE_TOKEN PAT (recommended — bypasses the
+          # rule that GITHUB_TOKEN cannot trigger downstream workflows),
+          # it will be substituted here at workflow runtime.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # ----- Build jobs (stubs — extended in items 7-2, 7-3, 7-7) -----
+  #
+  # items 7-2 + 7-3 will add:
+  #   - build-macos-universal (aarch64 + x86_64 + lipo + codesign + notarytool)
+  #     gated by `needs.release-please.outputs.tag_name != ''`
+  #     bash-guard pattern for APPLE_CERTIFICATE_BASE64 etc.
+  #   - build-linux-deb (`cargo tauri build --target deb`)
+  #   - build-linux-tarball (`cargo tauri build --target appimage`)
+  #
+  # item 7-7 will add:
+  #   - upload-assets (softprops/action-gh-release@v2)
+  #     uploads the artifacts produced by the build jobs above
+  #     to the GitHub Release that release-please creates.

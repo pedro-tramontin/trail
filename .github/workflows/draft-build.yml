@@ -1,0 +1,83 @@
+# Per-PR draft build workflow.
+#
+# Runs on every opened/synchronized PR to main and uploads an
+# unsigned draft artifact (named `trail-draft-build-{PR_NUMBER}-{SHA}`)
+# so reviewers (and the author) can test before the official
+# release lands. Does NOT push to GitHub Releases — only uploads
+# a downloadable artifact.
+#
+# Why unsigned: signing requires APPLE_CERTIFICATE_BASE64 + the
+# private key in the Apple keychain, which is a per-fork secret.
+# Forks do NOT have access to the upstream repo's secrets, by
+# design (prevents PR-submitted code from getting secret-bearing
+# builds). The unsigned-draft is fine for "does it compile + bundle"
+# QA. Once the PR merges, the official release.yml does the signed
+# build.
+#
+# This file is the §7.1 STUB: just the trigger + a single debug
+# build that runs on Linux (cross-platform with what the headless
+# CI host can do). Items 7-6 / 7-7 will extend it with the macOS
+# universal draft + artifact upload.
+
+name: draft-build
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Fork guard applied per-job below — the GH Actions schema
+# rejects `if:` at the workflow top level.
+
+permissions:
+  contents: read
+
+jobs:
+  draft-linux:
+    # Linux runner — what the headless CI host uses. The artifact
+    # is a `tauri build --debug` output so reviewers can smoke-test
+    # the binary on a Linux VM without needing macOS hardware.
+    #
+    # The macOS universal draft is added in item 7-7 (the build
+    # matrix job there runs on macos-14 for aarch64 + x86_64).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      # Per-step fork guard: forks checking out untrusted SHA pulls
+      # code into a context where secrets are not exposed — skip them
+      # so a fork PR does not consume runner minutes.
+      - uses: actions/checkout@v4
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri debug bundle
+        # `tauri build --debug` produces an unsigned, un-stripped
+        # binary in src-tauri/target/debug/bundle/ — enough for
+        # reviewers to run `--help` / `--health` and confirm the
+        # build wires up.
+        run: pnpm tauri build --debug
+
+      - name: Upload draft artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trail-draft-build-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            src-tauri/target/debug/trail
+            src-tauri/target/debug/bundle/**/*.deb
+            src-tauri/target/debug/bundle/**/*.AppImage
+          if-no-files-found: warn
