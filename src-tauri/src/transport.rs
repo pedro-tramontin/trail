@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::config::{SshAuth, TransportConfig};
 
@@ -98,14 +99,19 @@ impl SshTransport {
     /// this transient string is held for the duration of one SSH
     /// operation, and `ssh2::Session::userauth_pubkey_memory` accepts
     /// PEM-in-memory directly (no on-disk write, no third-party parser).
-    fn load_private_key_pem(&self) -> Result<String, TransportError> {
+    ///
+    /// The returned `Zeroizing<String>` is wiped on Drop — defending
+    /// against a heap-dump leak of the private key even if the
+    /// `keyring 3.x` upstream API returns a plain `String` (which it
+    /// does today).
+    fn load_private_key_pem(&self) -> Result<Zeroizing<String>, TransportError> {
         let entry = keyring::Entry::new(
             crate::keyring::KEYCHAIN_SERVICE,
             crate::keyring::KEYCHAIN_ACCOUNT,
         )
         .map_err(|e| TransportError::Ssh(format!("keychain open: {e}")))?;
         match entry.get_password() {
-            Ok(pem) => Ok(pem),
+            Ok(pem) => Ok(Zeroizing::new(pem)),
             Err(keyring::Error::NoEntry) => Err(TransportError::Ssh(
                 "SSH key not generated yet — run onboarding first".into(),
             )),
