@@ -141,6 +141,34 @@ fn config_exists(app: tauri::AppHandle) -> bool {
             .unwrap_or(false)
 }
 
+/// Phase 6 §6.5 — Tauri command: remove the user's
+/// `~/.trail/config.json` so the onboarding wizard can re-run.
+///
+/// The `cmd` parameter is the absolute path to the config
+/// file. The Tauri IPC layer always passes the resolved
+/// path; the default is `crate::onboarding::config_writer::config_path()`
+/// (the same `~/.trail/config.json` `config_exists` probes).
+/// A missing file is NOT an error — the "reset" path is
+/// idempotent so a re-run from a half-deleted state still
+/// succeeds. Only real IO failures (permission denied, parent
+/// dir gone) surface as `Err(String)`.
+///
+/// The deletion is performed with `std::fs::remove_file` —
+/// no `rm -rf` style recursion, no `sudo`. If the file does
+/// not exist, the `NotFound` error is swallowed and we
+/// return `Ok(())`. The path is the one resolved on the
+/// *frontend* side; the Rust side trusts it (the Tauri
+/// command boundary is local to the user's machine, so
+/// no untrusted-remote mitigation is required).
+#[tauri::command]
+fn delete_config(cmd: std::path::PathBuf) -> Result<(), String> {
+    match std::fs::remove_file(&cmd) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete {}: {e}", cmd.display())),
+    }
+}
+
 #[tauri::command]
 fn generate_ssh_key() -> Result<String, String> {
     keyring::generate_and_store().map_err(|e| e.to_string())
@@ -346,7 +374,79 @@ pub fn run() {
             // exists. Drives the App.svelte gate that mounts
             // <Onboarding /> vs the regular shell.
             config_exists,
+            // Phase 6 §6.5 — remove `~/.trail/config.json` so the
+            // onboarding wizard can re-run. Used by the
+            // "Re-run onboarding" button on the Settings shell.
+            delete_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_config;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// `delete_config` removes an existing file and returns `Ok(())`.
+    #[test]
+    fn delete_config_removes_existing_file() {
+        let tmp = std::env::temp_dir().join(format!(
+            "trail-delete-config-exists-{}.json",
+            std::process::id()
+        ));
+        fs::write(&tmp, b"{}").expect("write");
+        assert!(tmp.is_file());
+
+        let result = delete_config(tmp.clone());
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(!tmp.is_file(), "file must be gone after delete_config");
+
+        // Cleanup if the test left the file behind for any reason.
+        let _ = fs::remove_file(&tmp);
+    }
+
+    /// `delete_config` is idempotent: a missing file is NOT an
+    /// error (the `NotFound` kind is swallowed) so re-runs from a
+    /// half-deleted state still succeed.
+    #[test]
+    fn delete_config_missing_file_is_noop() {
+        let tmp = std::env::temp_dir().join(format!(
+            "trail-delete-config-missing-{}.json",
+            std::process::id()
+        ));
+        // Make sure it really is missing.
+        let _ = fs::remove_file(&tmp);
+        assert!(!tmp.is_file());
+
+        let result = delete_config(tmp);
+        assert!(
+            result.is_ok(),
+            "expected Ok on missing file, got {:?}",
+            result
+        );
+    }
+
+    /// `delete_config` is idempotent across every "not present"
+    /// path: a missing file, a missing parent directory, or a
+    /// path the runtime can't resolve all collapse to `Ok(())`.
+    /// This is the spec'd "no-op if missing" rule — the wizard
+    /// re-run from a half-deleted state must still succeed.
+    #[test]
+    fn delete_config_missing_file_or_parent_is_noop() {
+        // (a) plain missing file.
+        let missing_file = std::env::temp_dir().join(format!(
+            "trail-delete-config-missing-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&missing_file);
+        assert!(delete_config(missing_file).is_ok());
+
+        // (b) missing parent directory.
+        let bogus: PathBuf = std::env::temp_dir()
+            .join("trail-delete-config-missing-dir-never-created")
+            .join("config.json");
+        assert!(delete_config(bogus).is_ok());
+    }
 }
