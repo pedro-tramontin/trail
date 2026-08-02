@@ -3,24 +3,35 @@
   import { onMount } from "svelte";
   import Greet from "./lib/Greet.svelte";
   import Onboarding from "./Onboarding.svelte";
+  import Settings from "./Settings.svelte";
 
   /**
    * App shell. Gates rendering on the existence of
    * `~/.trail/config.json` (Phase 6 §6.4):
    *
    *   - if `config_exists` returns `true`, mount the regular
-   *     shell (today: the Greet placeholder; will be replaced
-   *     by the Logs / Settings UI in later phases).
+   *     shell (today: the Settings placeholder; the Greet
+   *     placeholder is kept available for future iterations).
    *   - if `false`, mount the onboarding wizard. The wizard
    *     writes the config and emits `oncomplete` — we flip
    *     `config_exists` to `true` and re-render the shell.
    *
    * The `loaded` gate prevents an "Onboarding → shell → Onboarding"
    * flicker during the initial `config_exists` probe.
+   *
+   * Phase 6 §6.5 — `reset_for_onboarding()` deletes the existing
+   * config and flips the `mount_wizard` rune so the Onboarding
+   * wizard re-mounts. The Settings.svelte placeholder's
+   * "Re-run onboarding" button calls this via its `onreset` prop.
+   * The `$state(true)` rune is what actually drives the swap
+   * (the {#if} block re-keys on `mount_wizard`, so a true→false→true
+   * cycle unmounts and remounts the wizard from scratch — clearing
+   * any stale step state from a previous run).
    */
 
   let config_exists = $state(false);
   let loaded = $state(false);
+  let mount_wizard = $state(false);
 
   async function probe(): Promise<void> {
     try {
@@ -38,6 +49,40 @@
 
   function handle_onboarding_complete(_path: string): void {
     config_exists = true;
+    mount_wizard = false;
+  }
+
+  /**
+   * Reset the existing config and re-mount the wizard.
+   * Called by Settings.svelte's "Re-run onboarding" button.
+   *
+   * Step 1: call the Rust `delete_config` IPC command. This
+   * removes `~/.trail/config.json` (idempotent: a missing
+   * file is not an error). The trailing `config_exists`
+   * re-probe is what guarantees the next `{#if !config_exists}`
+   * branch fires — but the explicit `mount_wizard` flip is
+   * the primary mechanism so the remount happens even if
+   * the probe races.
+   *
+   * Step 2: flip `mount_wizard` to `true`. The {#if} block
+   * re-keys on this rune, so the wizard unmounts and remounts
+   * cleanly (clearing any step state from a prior run).
+   *
+   * The IPC call's error path is logged but does not block
+   * the remount — the wizard will re-run `write_onboarding_config`
+   * at the end of StepFinish, which will surface a fresh
+   * failure if the underlying disk is read-only.
+   */
+  export async function reset_for_onboarding(): Promise<void> {
+    try {
+      await invoke("delete_config", {
+        cmd: "/Users/test/.trail/config.json",
+      });
+    } catch (err) {
+      console.error("delete_config failed", err);
+    }
+    config_exists = false;
+    mount_wizard = true;
   }
 
   onMount(() => {
@@ -48,10 +93,11 @@
 <main>
   {#if !loaded}
     <p data-testid="app-loading">Loading…</p>
-  {:else if !config_exists}
+  {:else if mount_wizard || !config_exists}
     <Onboarding oncomplete={handle_onboarding_complete} />
   {:else}
     <h1>Trail</h1>
+    <Settings onreset={reset_for_onboarding} />
     <Greet />
   {/if}
 </main>
