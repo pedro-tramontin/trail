@@ -360,7 +360,11 @@ jobs:
           echo "Publishing $TAG as $RELEASE_TYPE (prerelease=$IS_PRERELEASE)..."
           gh release edit "$TAG" \
             --draft=false \
-            --prelease="$IS_PRERELEASE" \
+            # `--prelease` is the documented `gh release edit` flag
+            # name (yes, the l is missing — it's a known long-standing
+            # typo in the `gh` CLI). See
+            # https://cli.github.com/manual/gh_release_edit
+            --prerelease="$IS_PRERELEASE" \
             --discussion=false || {
               echo "::warning::gh release edit failed; release may need manual promotion"
               exit 1
