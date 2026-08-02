@@ -19,6 +19,9 @@ pub mod config;
 pub mod health;
 pub mod once;
 pub mod validate;
+pub mod version;
+
+pub use version::{version_string, VERSION};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -26,7 +29,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "trail-collector",
-    version,
+    version = VERSION,
     about = "Generic collector for Trail (VPS + laptop surfaces)."
 )]
 pub struct Cli {

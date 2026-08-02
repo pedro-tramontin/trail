@@ -145,22 +145,56 @@ fi
 # `version = "X.Y.Z"`). Per talon issue #2111 every workspace member
 # must declare an inline version. Item 7-2 enforces the src-tauri
 # crate; the trail-collector crate's equivalent is item 7-3's scope
-# (the universal-binary build) — not gated here so the smoke passes
-# incrementally as items land.
+# (the universal-binary build).
 echo
 echo "=== Per-crate version invariant (no version.workspace = true) ==="
 WORKSPACE_VERSION_CRATES=0
-for crate_toml in src-tauri/Cargo.toml; do
+for crate_toml in src-tauri/Cargo.toml crates/trail-collector/Cargo.toml; do
     if [ -f "$crate_toml" ]; then
         hits=$(grep -c '^version\.workspace *= *true' "$crate_toml" || true)
         if [ "$hits" -gt 0 ]; then
             bad "$crate_toml uses version.workspace = true (per-crate inline required)"
             WORKSPACE_VERSION_CRATES=$((WORKSPACE_VERSION_CRATES + 1))
+        else
+            ok "$crate_toml uses inline version (not workspace-inherited)"
         fi
     fi
 done
-if [ "$WORKSPACE_VERSION_CRATES" -eq 0 ]; then
-    ok "src-tauri/Cargo.toml uses inline version (not workspace-inherited)"
+if [ "$WORKSPACE_VERSION_CRATES" -ne 0 ]; then
+    : # bad() already incremented the FAIL counter
+fi
+
+# --- Collector `cargo install` discoverability lint (item 7-3) ---
+# `cargo install trail-collector --git <repo>` shows a discoverable
+# tile only when `[package]` declares homepage / repository / description
+# (and a license). Missing fields give a blank install tile and a
+# crates.io page (if ever published) without install instructions.
+echo
+echo "=== Collector cargo-install discoverability (item 7-3) ==="
+COLLECTOR_TOML=crates/trail-collector/Cargo.toml
+if [ ! -f "$COLLECTOR_TOML" ]; then
+    note_warn "$COLLECTOR_TOML missing — skipping discoverability lint"
+else
+    if grep -q '^description = ' "$COLLECTOR_TOML"; then
+        ok "collector has description"
+    else
+        bad "collector missing description field (cargo install tile is blank)"
+    fi
+    if grep -q '^homepage = ' "$COLLECTOR_TOML"; then
+        ok "collector has homepage"
+    else
+        bad "collector missing homepage field"
+    fi
+    if grep -q '^repository = ' "$COLLECTOR_TOML"; then
+        ok "collector has repository"
+    else
+        bad "collector missing repository field"
+    fi
+    if grep -qE '^(license|license\.workspace) *=' "$COLLECTOR_TOML"; then
+        ok "collector has license declaration"
+    else
+        bad "collector missing license declaration"
+    fi
 fi
 
 # --- tauri.conf.json signing-block lint (Phase 7 §7.2) ---
