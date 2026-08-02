@@ -1,6 +1,12 @@
 [package]
 name = "trail"
-version.workspace = true
+# Per-crate inline version (not `version.workspace = true`) per talon
+# issue #2111: release-please bumps workspace-member versions by walking
+# `extraFiles` in release-please-config.json, and only handles inline
+# versions — `version.workspace = true` is invisible to that walker.
+# The workspace root + each member's `[package].version` are kept in
+# lockstep manually; release-please rewrites both on every release.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Passive workday capture and VPS push. Tauri 2 menu-bar app."
