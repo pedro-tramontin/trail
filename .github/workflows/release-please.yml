@@ -1,0 +1,51 @@
+name: Release Please
+
+# Push-to-main trigger. This workflow runs `googleapis/release-please-action@v4`
+# to open the release PR (changelog + version bump). When that PR is merged,
+# release-please creates the GitHub Release as a DRAFT (per the
+# `draft: true` setting in release-please-config.json) and pushes the
+# `trail-X.Y.Z` tag.
+#
+# The downstream `.github/workflows/release.yml` is tag-triggered and
+# picks up the tag to build + attach the binary assets, then flips the
+# draft to a published (or prerelease) release.
+#
+# Why a separate workflow for release-please:
+#   - release-please needs push-to-main trigger to scan for conventional
+#     commits and decide the next version
+#   - the build + asset-upload workflow needs tag-push trigger so it
+#     only runs when there's actually a new release to build
+#   - mixing the two triggers in one workflow creates the
+#     "release-please ran on tag push and tried to create a release
+#     that already exists" bug (the root cause of trail's earlier 0.2.0
+#     empty-asset release)
+#
+# Token: must use a fine-grained PAT (RELEASE_PLEASE_TOKEN) with
+# `Contents: Read and write` + `Pull requests: Read and write`. The
+# default GITHUB_TOKEN is intentionally blocked by GitHub from triggering
+# downstream workflows, which would break release.yml.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
