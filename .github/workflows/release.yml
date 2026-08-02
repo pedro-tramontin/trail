@@ -213,12 +213,20 @@ jobs:
             # \`export\`ed, not just present in `$GITHUB_ENV`), and
             # that literal string fails `codesign --sign` with
             # `no identity found`. Replace it with an empty string.
+            # Set `signingIdentity` to `null` (not `""`). Tauri 2
+            # treats an empty string as "use the default keychain
+            # identity" and runs codesign anyway, which fails with
+            # `no identity found` on a runner with no keychain
+            # identities registered. `null` is the documented
+            # "do not sign" sentinel and skips the codesign step
+            # entirely. Tauri's JSON parser treats `null` as
+            # `Option::None`.
             sed -i.bak \
-              's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": ""|' \
+              's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": null|' \
               src-tauri/tauri.conf.json
             rm src-tauri/tauri.conf.json.bak
             echo "tauri.conf.json patched for unsigned build:"
-            grep -A1 'macOS' src-tauri/tauri.conf.json | head -10
+            grep -A1 signingIdentity src-tauri/tauri.conf.json
           fi
 
       - name: Build Tauri bundle (macOS aarch64)
