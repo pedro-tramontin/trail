@@ -62,6 +62,11 @@ on:
 # Cancel in-flight builds for the same tag if a new commit is pushed
 # to the tag (rare; mainly defensive against release-please re-pushing).
 concurrency:
+  # On tag-push, github.ref_name is the tag. On workflow_dispatch, github.ref_name is
+  # the branch (usually main). The build jobs use env.TAG (which falls back to
+  # inputs.tag for dispatch), but the concurrency group can only reference
+  # built-in contexts. Using github.ref_name is fine — on workflow_dispatch, all
+  # in-flight builds share the same group, which is the safe default.
   group: release-${{ github.ref_name }}
   cancel-in-progress: true
 
@@ -74,6 +79,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # TAG falls back to the ref name (which is the tag on a tag-push
+  # trigger) or to the explicit `inputs.tag` workflow_dispatch input.
+  # Using ${{ }} inside `env:` is fine because env vars are
+  # evaluated at runtime, not at workflow-receive time (unlike `if:`).
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   # ----- Linux build (.deb + AppImage) -----
@@ -116,9 +126,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Trail ${{ github.ref_name }}"
-          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          tagName: ${{ env.TAG }}
+          releaseName: "Trail ${{ env.TAG }}"
+          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
           releaseDraft: true
           prerelease: false
           # `--bundles` is forwarded to `cargo tauri build`. `deb` is
@@ -192,9 +202,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Trail ${{ github.ref_name }}"
-          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          tagName: ${{ env.TAG }}
+          releaseName: "Trail ${{ env.TAG }}"
+          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
           releaseDraft: true
           prerelease: false
           # tauri-action's --target universal-apple-darwin does per-arch
@@ -203,37 +213,58 @@ jobs:
           # installed (which the Setup Rust toolchain step above does).
           args: --target universal-apple-darwin
 
-  # ----- Windows build (.msi) -----
-  # Disabled for now: the project is on a Mac-first development path
-  # and the Tauri Windows build needs WiX + a Windows runner. Re-enable
-  # when the project adds Windows as a supported platform.
-  # build-windows:
-  #   name: Build (Windows)
-  #   runs-on: windows-latest
-  #   timeout-minutes: 30
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: pnpm/action-setup@v4
-  #       with:
-  #         version: 10.18.0
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: 22
-  #         cache: pnpm
-  #     - name: Install UI deps + build
-  #       run: pnpm install --frozen-lockfile && pnpm build
-  #     - name: Build Tauri bundle (Windows)
-  #       uses: tauri-apps/tauri-action@v0
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-  #       with:
-  #         tagName: ${{ github.ref_name }}
-  #         releaseName: "Trail ${{ github.ref_name }}"
-  #         releaseBody: "..."
-  #         releaseDraft: true
-  #         prerelease: false
-  #         args: --target x86_64-pc-windows-msvc
+  # ----- Windows build (.exe installer via NSIS) -----
+  # Tauri's `bundle.targets` includes `nsis` (Nullsoft Scriptable Install
+  # System), which produces a single-file `.exe` installer that bundles
+  # the .app + .runtime. Tauri 2 does NOT use WiX any more — the `nsis`
+  # target only needs the `nsis` CLI on PATH, which is installed by
+  # default on the windows-latest runner.
+  #
+  # The Voice crate is macOS-only (cpal + global-hotkey + objc2 / block2
+  # are all `cfg(target_os = "macos")`-gated). The non-macOS branch in
+  # `voice/permission.rs` returns `MicPermissionState::Undetermined`
+  # directly, so the build will compile on Windows but the audio
+  # capture will be a no-op. That's the documented trade-off and matches
+  # the project's "Mac-first, ports as we go" position.
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-release-windows
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install UI deps + build
+        shell: bash
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        with:
+          tagName: ${{ env.TAG }}
+          releaseName: "Trail ${{ env.TAG }}"
+          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: false
+          # `--target x86_64-pc-windows-msvc` is the default Windows
+          # target (Visual Studio C++ toolchain, preinstalled on the
+          # windows-latest image). `--bundles nsis` tells Tauri's
+          # bundler to produce a single .exe installer.
+          args: --target x86_64-pc-windows-msvc --bundles nsis
 
   # ----- Finalize: publish draft as production or prerelease -----
   # The 3 build jobs above all set `releaseDraft: true`, so the first
@@ -247,7 +278,7 @@ jobs:
   #     a release visible to users
   finalize:
     name: Publish Release
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -259,7 +290,7 @@ jobs:
         id: classify
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.TAG }}
         run: |
           # Tag format: trail-X.Y.Z[-suffix]
           #   trail-X.Y.Z         → production
@@ -284,7 +315,7 @@ jobs:
       - name: Publish the draft release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.TAG }}
           IS_PRERELEASE: ${{ steps.classify.outputs.is_prerelease }}
           RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
         run: |
@@ -307,7 +338,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.TAG }}
           RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
         run: |
           echo "## Release $TAG finalized" >> "$GITHUB_STEP_SUMMARY"
