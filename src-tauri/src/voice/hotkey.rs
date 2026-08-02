@@ -105,6 +105,7 @@ pub fn parse_hotkey(s: &str) -> Result<HotKey, HotkeyError> {
 /// The outer `is_ascii_alphabetic()` guard in `register` ensures
 /// this is only ever called with A-Z, so the `_` branch is
 /// unreachable.
+#[cfg(target_os = "macos")]
 fn ascii_letter_to_code(ch: char) -> global_hotkey::hotkey::Code {
     use global_hotkey::hotkey::Code;
     match ch {
@@ -140,6 +141,7 @@ fn ascii_letter_to_code(ch: char) -> global_hotkey::hotkey::Code {
 
 /// Map a single ASCII digit (0-9) to its `keyboard-types::Code`
 /// variant. Same rationale as `ascii_letter_to_code` above.
+#[cfg(target_os = "macos")]
 fn ascii_digit_to_code(ch: char) -> global_hotkey::hotkey::Code {
     use global_hotkey::hotkey::Code;
     match ch {
