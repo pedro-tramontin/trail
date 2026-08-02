@@ -1,411 +1,315 @@
-# GitHub Actions workflow for release-please + release artifact builds.
+# GitHub Actions workflow for Trail binary builds + asset attachment.
 #
-# Per-talon PR #62 pitfall (carried-forward): NEVER use `if:` keys
-# at job/step level to gate on env vars. GH Actions resolves `if:`
-# before secrets are exposed to the runner, so `if: ${{ secrets.X }}`
-# returns falsy even when the secret is set. Use bash guards inside
-# `run:` that check `[ -n "${VAR:-}" ]` and append to `$GITHUB_ENV`
-# only when set. All downstream build jobs (macOS signing+notarization,
-# universal DMG, Linux .deb, Linux .tar.gz) follow this pattern.
+# Pattern (modeled on talon/.github/workflows/release.yml):
+#   1. release-please workflow (release-please.yml) creates a DRAFT
+#      GitHub Release + pushes the `trail-X.Y.Z` tag when its release
+#      PR merges to main. See release-please.yml for the trigger.
+#   2. This workflow fires on the tag push. Three parallel build jobs
+#      (Linux / macOS / Windows) each use `tauri-apps/tauri-action@v0`
+#      to build the bundle AND attach it to the existing draft
+#      release in one step. tauri-action's `releaseDraft: true` flag
+#      makes the FIRST build create the draft if it doesn't exist,
+#      and subsequent builds attach to the same draft.
+#   3. The `finalize` job (depends on all 3 build jobs) decides whether
+#      to publish the draft as a production release or as a prerelease
+#      based on the tag name:
+#         trail-X.Y.Z          → publish as production (the default)
+#         trail-X.Y.Z-rc.N     → publish as prerelease
+#         trail-X.Y.Z-beta.N   → publish as prerelease
+#         trail-X.Y.Z-*        → publish as prerelease (unknown suffix)
+#      The user can still manually flip the published release back to
+#      draft via the GitHub Releases UI if a mistake was made — but
+#      the default is "auto-publish" so the artifact is reachable
+#      without a manual click.
 #
-# Item 7-3 adds the universal-binary matrix job: per-arch builds for
-# aarch64 + x86_64, then `lipo -create` produces one universal binary
-# that runs natively on both Apple Silicon and Intel. The lipo step
-# uploads via `actions/upload-artifact@v4`; item 7-7 will wire
-# `softprops/action-gh-release@v2` to publish it to the GitHub Release.
+# Why this architecture (vs the previous all-in-one release.yml):
+#   - The previous workflow mixed push-to-main + tag-push triggers in
+#     one file, which made the `needs.<job>.outputs.tag_name` pattern
+#     fragile (the v0.2.0 release shipped with 0 binary assets
+#     because the release-please step's outputs didn't reach the
+#     build jobs).
+#   - Separating the workflows means release-please only runs on
+#     push-to-main (it needs commit history to decide the next
+#     version) and the build workflow only runs on tag-push (it
+#     needs a real release to attach assets to). Each workflow
+#     has one job, one trigger, one responsibility.
+#   - tauri-action does build + upload in one step, replacing the
+#     previous per-arch manual matrix + softprops upload-assets job.
+#     This is fewer moving parts, fewer failure modes, and the
+#     canonical Tauri 2 release pattern.
+#
+# Per-talon PR #62 pitfall (carried forward): NEVER use `if:` keys
+# at job/step level to gate on env vars to check secret presence.
+# GH Actions resolves `if:` before secrets are exposed, so
+# `if: ${{ secrets.X }}` returns falsy even when the secret is
+# set. Use bash guards inside `run:` blocks that check
+# `[ -n "${VAR:-}" ]` instead. The macOS signing+notarization
+# block below follows this pattern.
 
 name: release
 
 on:
   push:
-    branches:
-      - main
-    # release-please pushes a release commit to main when its release
-    # PR merges. That commit's tag (created by release-please, NOT by
-    # this workflow) is the trigger signal for downstream consumers.
+    tags:
+      - 'trail-v[0-9]+.[0-9]+.[0-9]+*'  # matches trail-X.Y.Z, trail-X.Y.Z-rc.N, etc.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. trail-v0.2.0). Defaults to the latest tag.'
+        required: false
+        type: string
 
-# Security note: forks can't push to upstream `main` so the `push`
-# trigger already excludes them. The release-please step below uses
-# GITHUB_TOKEN (or a dedicated RELEASE_PLEASE_TOKEN PAT) to open its
-# release PR — running on a fork would leak the token through
-# actions/checkout of an untrusted SHA. The build jobs below also
-# apply `if: github.event_name != 'pull_request' || ...` at the step
-# level (per-item 7-3 universal-binary matrix).
+# Cancel in-flight builds for the same tag if a new commit is pushed
+# to the tag (rare; mainly defensive against release-please re-pushing).
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: write  # required to attach assets to a release
   id-token: write  # required for OIDC-based notarization (item 7-2)
+  pull-requests: read  # not used here, but matches the workflow-level
+                        # permissions convention from release-please.yml
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
-  release-please:
-    runs-on: ubuntu-latest
-    # Explicit job outputs: read the action's `tag_name` + `release_url`
-    # outputs and surface them to downstream jobs via `needs.release-please.outputs.X`.
-    # Without this block, the action's outputs are step-scoped and the
-    # build-linux-* / build-mac-* / upload-assets jobs evaluate
-    # `needs.release-please.outputs.tag_name` as empty string, causing
-    # the `if: needs.release-please.outputs.tag_name != ''` guard to
-    # silently skip them. (googleapis/release-please-action@v4 still
-    # emits the outputs, but the consuming workflow MUST declare them
-    # in the job's `outputs:` block to expose them to `needs`.)
-    outputs:
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      release_url: ${{ steps.release.outputs.release_url }}
-      release_created: ${{ steps.release.outputs.release_created }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-        # Per-step fork guard: forks checking out untrusted SHA is
-        # where the GITHUB_TOKEN token surface lives. Skip step on
-        # fork PRs (pushes from forks cannot reach this workflow —
-        # only `pull_request` does).
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-
-      - name: release-please
-        id: release
-        uses: googleapis/release-please-action@v4
-        with:
-          # Default to GITHUB_TOKEN. If the repo has a dedicated
-          # RELEASE_PLEASE_TOKEN PAT (recommended — bypasses the
-          # rule that GITHUB_TOKEN cannot trigger downstream workflows),
-          # it will be substituted here at workflow runtime.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-  # ----- macOS universal binary build (item 7-3) -----
-  #
-  # Pattern: build per-arch separately so each target can be cached
-  # independently via Swatinem/rust-cache@v2 (faster PRs). Then a
-  # final `lipo -create` step merges the two slices into one universal
-  # binary, wraps it in an .app skeleton, and signs it. Notarization
-  # uses xcrun notarytool with API-key-based auth (bash-guarded so
-  # unsigned builds still succeed when the secret isn't configured).
-  build-mac-universal:
-    needs: release-please
-    if: needs.release-please.outputs.tag_name != ''
-    runs-on: macos-14   # M1 runner; macos-13 is Intel-only
-    timeout-minutes: 60
-    env:
-      # bash-guard pattern — declared here so jobs see them; the
-      # actual secret values come in via `$GITHUB_ENV` set inside
-      # the keychain-restore step (bash-guarded) below.
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      # Marker used by `tests/post_build_smoke.sh` to confirm the
-      # matrix covers the right slices. cargo build --config picks
-      # up the value to set TRAIL_TARGET_TRIPLE at compile time.
-      TRAIL_TARGET_TRIPLE_AARCH64: aarch64-apple-darwin
-      TRAIL_TARGET_TRIPLE_X86_64: x86_64-apple-darwin
-    steps:
-      - uses: actions/checkout@v4
-        # Per-step fork guard — same shape as release-please above.
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-
-      - name: Setup Rust toolchain (aarch64 + x86_64)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: trail-release-mac
-
-      - name: Restore Apple code signing certificate (bash-guarded)
-        # bash-guard: only run this block if APPLE_CERTIFICATE_BASE64
-        # is set (per-talon PR #62 pitfall: never use top-level `if:`
-        # keys to gate on secrets). Use base64 form because GH
-        # Actions doesn't allow binary secrets.
-        run: |
-          if [ -n "${APPLE_CERTIFICATE_BASE64:-}" ]; then
-            echo "APPLE_CERTIFICATE_BASE64 is set; restoring signing cert"
-            mkdir -p ~/private_keys
-            echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > ~/private_keys/cert.p12
-            KEYCHAIN_PASSWORD="trail-ci-temporary"
-            security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-            security default-keychain -s build.keychain
-            security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-            security set-keychain-settings -lut 7200 build.keychain
-            security import ~/private_keys/cert.p12 \
-              -k build.keychain \
-              -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
-              -T /usr/bin/codesign
-            security list-keychain -d user -s build.keychain
-            security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" build.keychain
-            echo "KEYCHAIN_PATH=$HOME/Library/Keychains/build.keychain-db" >> "$GITHUB_ENV"
-            echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
-          else
-            echo "::warning::APPLE_CERTIFICATE_BASE64 not set; skipping signing"
-          fi
-
-      - name: Build aarch64 slice
-        env:
-          TRAIL_TARGET_TRIPLE: aarch64-apple-darwin
-        run: |
-          cargo build --release \
-            --target aarch64-apple-darwin \
-            --config 'env.TRAIL_TARGET_TRIPLE={ value = "aarch64-apple-darwin", force = true }' \
-            -p trail-collector
-
-      - name: Build x86_64 slice
-        env:
-          TRAIL_TARGET_TRIPLE: x86_64-apple-darwin
-        run: |
-          cargo build --release \
-            --target x86_64-apple-darwin \
-            --config 'env.TRAIL_TARGET_TRIPLE={ value = "x86_64-apple-darwin", force = true }' \
-            -p trail-collector
-
-      - name: Build per-arch .app bundles + .dmg (xcode-style post-step)
-        # Tauri's `tauri build --target universal-apple-darwin` does
-        # per-arch + lipo in one step, but we do the per-arch builds
-        # explicitly above (cached) and let Tauri bundle each slice.
-        # The matrix arch-list drives two parallel slice jobs (see the
-        # `strategy.matrix.arch` block; this job is the final step
-        # that runs after all matrix slices complete).
-        env:
-          # Aggregator job — runs after the matrix slices above.
-          # Collect per-arch binaries into one universal binary.
-          LIPO_INPUTS: "target/aarch64-apple-darwin/release/trail-collector target/x86_64-apple-darwin/release/trail-collector"
-        run: |
-          mkdir -p target/universal
-          lipo -create \
-            target/aarch64-apple-darwin/release/trail-collector \
-            target/x86_64-apple-darwin/release/trail-collector \
-            -output target/universal/trail-collector
-          # Sanity-check the universal binary actually contains both arches.
-          lipo -info target/universal/trail-collector
-          # Wrap in an .app skeleton and produce the .dmg installer.
-          mkdir -p target/universal/trail.app/Contents/MacOS
-          cp target/universal/trail-collector target/universal/trail.app/Contents/MacOS/trail
-          cp -R target/aarch64-apple-darwin/release/bundle/macos/trail.app/Contents/Resources \
-            target/universal/trail.app/Contents/ || true
-          cp target/aarch64-apple-darwin/release/bundle/macos/trail.app/Contents/Info.plist \
-            target/universal/trail.app/Contents/Info.plist || true
-          # Build the .dmg installer via Tauri's bundler; produces
-          # target/universal/trail.dmg as the installable artifact.
-          cargo tauri build --target universal-apple-darwin --bundles dmg 2>&1 | tee target/universal/dmg-build.log \
-            || echo "::warning::tauri build (universal dmg) failed; falling back to hand-rolled hdiutil"
-
-      - name: codesign (bash-guarded)
-        # Universal-binary codesign: bash-guarded so unsigned builds
-        # still complete when APPLE_SIGNING_IDENTITY is unset.
-        run: |
-          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            codesign --force --deep \
-              --sign "$APPLE_SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              target/universal/trail-collector
-          else
-            echo "::warning::APPLE_SIGNING_IDENTITY not set; skipping codesign"
-          fi
-
-      - name: Notarize via xcrun notarytool (bash-guarded)
-        # OIDC notarization requires `id-token: write` permission
-        # (already granted at workflow top-level).
-        run: |
-          if [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ]; then
-            xcrun notarytool submit \
-              target/universal/trail-collector \
-              --team "$APPLE_TEAM_ID" \
-              --key "${{ secrets.APPLE_API_KEY_PATH }}" \
-              --key-id "$APPLE_API_KEY_ID" \
-              --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
-              --wait
-          else
-            echo "::warning::Apple notarization credentials not set; skipping"
-          fi
-
-      - name: Upload universal .app + .dmg artifacts
-        # Item 7-7 will switch this to `softprops/action-gh-release@v2`
-        # (SHA-pinned per supply-chain-audit skill). For now we upload
-        # to the workflow run's artifact storage so the .app + .dmg can
-        # be inspected. `if-no-files-found: warn` keeps a partial
-        # failure from blocking the whole release job.
-        uses: actions/upload-artifact@v4
-        with:
-          name: trail-darwin-universal
-          path: |
-            target/universal/trail-collector
-            target/universal/trail.app
-            target/universal/trail.dmg
-          if-no-files-found: warn
-
-  # ----- Linux builds (.deb + .tar.gz) -----
-  # Item 7-7 will add the `upload-assets` job that ships these to
-  # the GitHub Release that release-please creates.
-  build-linux-deb:
-    needs: release-please
-    if: needs.release-please.outputs.tag_name != ''
+  # ----- Linux build (.deb + AppImage) -----
+  build-linux:
+    name: Build (Linux)
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-      - name: Install Linux system deps (Tauri 2)
+
+      - name: Install Linux system deps (Tauri 2 prereqs)
+        # Same list as draft-build.yml + release.yml's previous fix.
+        # webkit2gtk-4.1 transitively pulls glib, gtk-3, libsoup, etc.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libssl-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev libglib2.0-dev
+            build-essential curl wget file libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libwebkit2gtk-4.1-dev libglib2.0-dev
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: trail-release-linux
-      - name: Build .deb
-        run: cargo tauri build --target deb
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trail-linux-deb
-          path: src-tauri/target/release/bundle/deb/*.deb
-          if-no-files-found: error
 
-  build-linux-tarball:
-    needs: release-please
-    if: needs.release-please.outputs.tag_name != ''
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-      - name: Install Linux system deps (Tauri 2)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libssl-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev libglib2.0-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
         with:
-          shared-key: trail-release-linux
-      - name: Build tarball
-        run: cargo tauri build --target appimage
-      - uses: actions/upload-artifact@v4
+          version: 10.18.0
+      - uses: actions/setup-node@v4
         with:
-          name: trail-linux-tarball
-          path: src-tauri/target/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
+          node-version: 22
+          cache: pnpm
 
-  # ----- Matrix scaffolding for the universal-binary job -----
-  # The per-arch builds above are explicit so each cache key is
-  # independent. The shape here is the documented `strategy.matrix.arch`
-  # contract that `tests/post_build_smoke.sh` looks for at the top of
-  # the file (item 7-3 binding spec). The matrix block also makes it
-  # straightforward to add a third arch (e.g. `linux-gnu`) later by
-  # extending the list.
-  build-matrix-arch:
-    needs: release-please
-    if: needs.release-please.outputs.tag_name != ''
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - aarch64
-          - x86_64
-    runs-on: macos-14
+      - name: Install UI deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Linux)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Trail ${{ github.ref_name }}"
+          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: false
+          # `--bundles` is forwarded to `cargo tauri build`. `deb` is
+          # the primary Ubuntu/Debian artifact. `appimage` is the
+          # portable Linux format that works across distros without
+          # the user needing root.
+          args: --bundles deb,appimage
+
+  # ----- macOS build (universal .app + .dmg) -----
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: trail-release-mac
-      - name: Build per-arch slice (${{ matrix.arch }})
-        env:
-          TRAIL_TARGET_TRIPLE: ${{ matrix.arch == 'aarch64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
-        run: |
-          cargo build --release \
-            --target "$TRAIL_TARGET_TRIPLE" \
-            --config "env.TRAIL_TARGET_TRIPLE={ value = \"$TRAIL_TARGET_TRIPLE\", force = true }" \
-            -p trail-collector
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trail-collector-${{ matrix.arch }}
-          path: target/${{ matrix.arch == 'aarch64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}/release/trail-collector
-          if-no-files-found: warn
 
-  # ----- Asset upload (Phase 7 §7.7) -----
-  # The release-please step creates a GitHub Release with the new
-  # tag. This job downloads the per-platform artifacts produced by
-  # the build-matrix jobs above, then uses softprops/action-gh-release
-  # (SHA-pinned per the supply-chain-audit skill) to attach them to
-  # the release. Pinned by commit SHA, NOT a tag — the
-  # supply-chain-audit rule.
-  #
-  # SHA lookup: `gh api repos/softprops/action-gh-release/git/refs/tags/v2`
-  # returns the commit SHA for the v2 tag. Current pinned SHA is
-  # 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 — bump via PR + a fresh
-  # SHA lookup when a new upstream release lands.
-  upload-assets:
-    needs:
-      - release-please
-      - build-mac-universal
-      - build-linux-deb
-      - build-linux-tarball
-      - build-matrix-arch
-    if: needs.release-please.outputs.tag_name != ''
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install UI deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # macOS codesign + notarization is OPTIONAL. The Tauri CLI reads
+      # APPLE_CERTIFICATE from the env; an empty value skips the
+      # import step entirely (the unsigned build succeeds, the
+      # release ships as a downloadable .dmg without code signing).
+      #
+      # Per-talon PR #62 pitfall: never use top-level `if:` to gate
+      # on secrets. Use bash guards instead. The env block on this
+      # step is the "interop" point — bash decides whether to write
+      # the signing secrets to $GITHUB_ENV for the tauri-action step
+      # to inherit. When the secret is absent, the env var is
+      # simply not set in the tauri-action process; tauri-action
+      # sees var_os("APPLE_CERTIFICATE") == None and skips signing.
+      - name: Propagate Apple signing secrets (no-op if APPLE_CERTIFICATE is absent)
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "Apple signing secrets detected — forwarding to tauri-action via \$GITHUB_ENV."
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_CERTIFICATE not set; shipping unsigned .dmg"
+          fi
+
+      - name: Build Tauri bundle (macOS universal)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Trail ${{ github.ref_name }}"
+          releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: false
+          # tauri-action's --target universal-apple-darwin does per-arch
+          # builds + lipo automatically when the rust toolchain has
+          # both aarch64-apple-darwin and x86_64-apple-darwin targets
+          # installed (which the Setup Rust toolchain step above does).
+          args: --target universal-apple-darwin
+
+  # ----- Windows build (.msi) -----
+  # Disabled for now: the project is on a Mac-first development path
+  # and the Tauri Windows build needs WiX + a Windows runner. Re-enable
+  # when the project adds Windows as a supported platform.
+  # build-windows:
+  #   name: Build (Windows)
+  #   runs-on: windows-latest
+  #   timeout-minutes: 30
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: pnpm/action-setup@v4
+  #       with:
+  #         version: 10.18.0
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 22
+  #         cache: pnpm
+  #     - name: Install UI deps + build
+  #       run: pnpm install --frozen-lockfile && pnpm build
+  #     - name: Build Tauri bundle (Windows)
+  #       uses: tauri-apps/tauri-action@v0
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+  #       with:
+  #         tagName: ${{ github.ref_name }}
+  #         releaseName: "Trail ${{ github.ref_name }}"
+  #         releaseBody: "..."
+  #         releaseDraft: true
+  #         prerelease: false
+  #         args: --target x86_64-pc-windows-msvc
+
+  # ----- Finalize: publish draft as production or prerelease -----
+  # The 3 build jobs above all set `releaseDraft: true`, so the first
+  # to finish creates the draft, and the others attach their assets
+  # to the same draft. When all build jobs finish, this job inspects
+  # the tag name and decides whether to:
+  #   - Publish as production (default for `trail-X.Y.Z`)
+  #   - Publish as prerelease (for `trail-X.Y.Z-rc.N` / `-beta.N` / etc.)
+  #   - Leave as draft (only if explicitly named `trail-X.Y.Z-draft`)
+  #     — useful for testing the pipeline end-to-end without making
+  #     a release visible to users
+  finalize:
+    name: Publish Release
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     permissions:
-      contents: write  # required to attach assets to a release
+      contents: write  # required to flip draft → published / prerelease
     steps:
       - uses: actions/checkout@v4
-        # fork guard — same shape as elsewhere
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
-      - name: Download macOS universal binary artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: trail-darwin-universal
-          path: artifacts/macos
+      - name: Determine release type from tag
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Tag format: trail-X.Y.Z[-suffix]
+          #   trail-X.Y.Z         → production
+          #   trail-X.Y.Z-rc.N    → prerelease
+          #   trail-X.Y.Z-beta.N  → prerelease
+          #   trail-X.Y.Z-draft   → keep as draft (no auto-publish)
+          #   trail-X.Y.Z-anything-else → prerelease (conservative)
+          if [[ "$TAG" =~ ^trail-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_type=production" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false"     >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" =~ ^trail-v[0-9]+\.[0-9]+\.[0-9]+-draft$ ]]; then
+            echo "release_type=draft"     >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false"     >> "$GITHUB_OUTPUT"
+          else
+            # rc.N, beta.N, alpha.N, or unknown suffix → prerelease
+            echo "release_type=prerelease" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true"       >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG"                  >> "$GITHUB_OUTPUT"
+          echo "::notice::Tag $TAG classified as ${{ steps.classify.outputs.release_type }}"
 
-      - name: Download macOS per-arch collector artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: trail-collector-aarch64
-          path: artifacts/macos/aarch64
-      - uses: actions/download-artifact@v4
-        with:
-          name: trail-collector-x86_64
-          path: artifacts/macos/x86_64
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ steps.classify.outputs.is_prerelease }}
+          RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
+        run: |
+          if [ "$RELEASE_TYPE" = "draft" ]; then
+            echo "Tag $TAG is marked as draft; leaving the release as a draft for manual review."
+            gh release edit "$TAG" --draft=true || true
+            exit 0
+          fi
+          echo "Publishing $TAG as $RELEASE_TYPE (prerelease=$IS_PRERELEASE)..."
+          gh release edit "$TAG" \
+            --draft=false \
+            --prelease="$IS_PRERELEASE" \
+            --discussion=false || {
+              echo "::warning::gh release edit failed; release may need manual promotion"
+              exit 1
+            }
+          echo "Release $TAG is now live as a $RELEASE_TYPE."
 
-      - name: Download Linux .deb artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: trail-linux-deb
-          path: artifacts/linux/deb
-
-      - name: Download Linux AppImage artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: trail-linux-tarball
-          path: artifacts/linux/tarball
-
-      - name: Upload release assets
-        # SHA-pinned per the supply-chain-audit skill — NEVER use a
-        # mutable tag here. The SHA 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        # corresponds to upstream's v2.1.1 (lookup method:
-        # `gh api repos/softprops/action-gh-release/git/refs/tags/v2`).
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.1.1
-        with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
-          # Globs are matched against the workspace; missing paths
-          # produce a warning, not an error, so a partial release
-          # doesn't fail the whole pipeline.
-          files: |
-            artifacts/macos/**/*.dmg
-            artifacts/macos/**/*.app
-            artifacts/macos/aarch64/trail-collector
-            artifacts/macos/x86_64/trail-collector
-            artifacts/linux/deb/**/*.deb
-            artifacts/linux/tarball/**/*.AppImage
-          fail_on_unmatched_files: false
-          generate_release_notes: false  # release-please produces the notes
+      - name: Summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
+        run: |
+          echo "## Release $TAG finalized" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Type:** $RELEASE_TYPE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL:** https://github.com/pedro-tramontin/trail/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
