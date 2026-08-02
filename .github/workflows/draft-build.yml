@@ -57,10 +57,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # pnpm 11+ requires Node.js 22.13+ (calls node:sqlite builtin).
+          # Pin to 22 LTS to match pnpm@10.18.0 (the project's lockfile
+          # version). Bump to 24 if the lockfile moves to pnpm 11.
+          node-version: "22"
 
       - name: Install pnpm
-        run: corepack enable && corepack prepare pnpm@latest --activate
+        # Pin pnpm to the version the project uses (lockfileVersion 9.x
+        # in pnpm-lock.yaml); `pnpm@latest` pulled 11.18.0 which
+        # requires Node 22.13+ AND the node:sqlite builtin, breaking
+        # the previous Node-20 pin. See commit `fix/draft-build-node22`.
+        run: corepack enable && corepack prepare pnpm@10.18.0 --activate
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
