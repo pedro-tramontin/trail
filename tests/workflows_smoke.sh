@@ -139,6 +139,65 @@ else
     bad "Cargo.toml version ($ROOT_VER) != manifest version ($MANIFEST_VER)"
 fi
 
+# --- Per-crate version invariant (Phase 7 §7.2 — src-tauri only) ---
+# release-please can't bump workspace-inherited versions (it walks
+# `extraFiles` in release-please-config.json and only handles inline
+# `version = "X.Y.Z"`). Per talon issue #2111 every workspace member
+# must declare an inline version. Item 7-2 enforces the src-tauri
+# crate; the trail-collector crate's equivalent is item 7-3's scope
+# (the universal-binary build) — not gated here so the smoke passes
+# incrementally as items land.
+echo
+echo "=== Per-crate version invariant (no version.workspace = true) ==="
+WORKSPACE_VERSION_CRATES=0
+for crate_toml in src-tauri/Cargo.toml; do
+    if [ -f "$crate_toml" ]; then
+        hits=$(grep -c '^version\.workspace *= *true' "$crate_toml" || true)
+        if [ "$hits" -gt 0 ]; then
+            bad "$crate_toml uses version.workspace = true (per-crate inline required)"
+            WORKSPACE_VERSION_CRATES=$((WORKSPACE_VERSION_CRATES + 1))
+        fi
+    fi
+done
+if [ "$WORKSPACE_VERSION_CRATES" -eq 0 ]; then
+    ok "src-tauri/Cargo.toml uses inline version (not workspace-inherited)"
+fi
+
+# --- tauri.conf.json signing-block lint (Phase 7 §7.2) ---
+# The macOS signing identity + team ID are read from env vars at
+# bundling time (Tauri's ${VAR} expansion). Hardcoding the values
+# would leak the signing identity into the public repo.
+echo
+echo "=== tauri.conf.json signing config (env-driven) ==="
+if ! command -v jq >/dev/null 2>&1; then
+    note_warn "jq not installed; skipping tauri.conf.json signing-block lint"
+else
+    SIGN_IDENTITY=$(jq -r '.bundle.macOS.signingIdentity // empty' src-tauri/tauri.conf.json)
+    if [ "$SIGN_IDENTITY" != '${APPLE_SIGNING_IDENTITY}' ]; then
+        bad "tauri.conf.json bundle.macOS.signingIdentity is not env-driven"
+        echo "  found: '$SIGN_IDENTITY'"
+        echo "  expected: '\${APPLE_SIGNING_IDENTITY}'"
+    else
+        ok "signingIdentity is env-driven: $SIGN_IDENTITY"
+    fi
+    TEAM_ID=$(jq -r '.bundle.macOS.providerShortName // empty' src-tauri/tauri.conf.json)
+    if [ "$TEAM_ID" != '${APPLE_TEAM_ID}' ]; then
+        bad "tauri.conf.json bundle.macOS.providerShortName is not env-driven"
+        echo "  found: '$TEAM_ID'"
+        echo "  expected: '\${APPLE_TEAM_ID}'"
+    else
+        ok "providerShortName is env-driven: $TEAM_ID"
+    fi
+    ENTITLEMENTS=$(jq -r '.bundle.macOS.entitlements // empty' src-tauri/tauri.conf.json)
+    if [ "$ENTITLEMENTS" != '${TRAIL_ENTITLEMENTS_PATH}' ]; then
+        bad "tauri.conf.json bundle.macOS.entitlements is not env-driven"
+        echo "  found: '$ENTITLEMENTS'"
+        echo "  expected: '\${TRAIL_ENTITLEMENTS_PATH}'"
+    else
+        ok "entitlements is env-driven: $ENTITLEMENTS"
+    fi
+fi
+
 # --- Summary ---
 echo
 echo "=== Summary: pass=$PASS, warn=$WARN, fail=$FAIL ==="
