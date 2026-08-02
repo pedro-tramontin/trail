@@ -10,6 +10,13 @@
 // against the in-tree `mock-ssh-server` fixture.
 mod collectors;
 mod commands;
+// Phase 7 §7.2 — env-var self-test for the macOS code-signing +
+// notarization pipeline. Exposes the `notarize_check` Tauri command
+// (returns a `env-var name → "set" | "unset"` map, never the value)
+// so the frontend + CI can confirm the env is wired before invoking
+// `cargo tauri build`. See src/notarize.rs for the env-var list +
+// the security rationale (no value-echo through IPC).
+mod notarize;
 // `pub mod config;` is re-exported here (was `mod config;` in
 // Phase 1 §1.2) so the Phase 6 integration test
 // (`tests/onboarding_e2e.rs`) can call `config::load_config` to
@@ -72,6 +79,19 @@ mod tray;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
+
+/// Phase 7 §7.2 — Tauri command: env-var self-test for the macOS
+/// code-signing + notarization pipeline. Returns a sorted
+/// `env-var name → "set" | "unset"` map (NEVER the value, to
+/// keep the IPC channel free of signing-identity + .p8-path leaks).
+///
+/// The frontend can invoke this from a "Verify signing env" button
+/// in the Settings shell; CI can invoke it via the smoke script to
+/// confirm the workflow's env propagation works end-to-end.
+#[tauri::command]
+fn notarize_check() -> notarize::NotarizeEnvReport {
+    notarize::check()
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -347,6 +367,9 @@ pub fn run() {
             get_config,
             generate_ssh_key,
             get_ssh_public_key,
+            // Phase 7 §7.2 — env-var self-test for the macOS signing +
+            // notarization pipeline. See src/notarize.rs.
+            notarize_check,
             commands::health_check_transport,
             commands::push_to_vps,
             commands::validate_day_summary,
