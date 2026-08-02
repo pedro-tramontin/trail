@@ -121,11 +121,15 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// own.
 #[cfg(target_os = "macos")]
 pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> {
-    use cpal::traits::{DeviceTrait, StreamTrait};
-
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let (tx, rx) = tokio::sync::mpsc::channel::<Frame>(CHANNEL_CAPACITY);
-
-    let device = cpal::default_input_device()
+    // cpal 0.15 moved host selection + default-device lookup behind
+    // the `HostTrait`. `cpal::default_host()` returns the active
+    // audio host (CoreAudio on macOS); calling `.default_input_device()`
+    // on it returns the system's default input. The device itself
+    // still implements `DeviceTrait::default_input_config`.
+    let device = cpal::default_host()
+        .default_input_device()
         .ok_or_else(|| CaptureError::Cpal("no input device available".into()))?;
     let supported = device
         .default_input_config()

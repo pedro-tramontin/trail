@@ -97,6 +97,68 @@ pub fn parse_hotkey(s: &str) -> Result<HotKey, HotkeyError> {
     Ok(hk)
 }
 
+/// Map a single ASCII letter (A-Z) to its `keyboard-types::Code`
+/// variant. keyboard-types 0.7 dropped the `Add<u32>` impl on
+/// `Code`; each KeyA..KeyZ is now a discrete enum entry, so we
+/// enumerate them explicitly. The compiler verifies exhaustiveness.
+///
+/// The outer `is_ascii_alphabetic()` guard in `register` ensures
+/// this is only ever called with A-Z, so the `_` branch is
+/// unreachable.
+#[cfg(target_os = "macos")]
+fn ascii_letter_to_code(ch: char) -> global_hotkey::hotkey::Code {
+    use global_hotkey::hotkey::Code;
+    match ch {
+        'A' => Code::KeyA,
+        'B' => Code::KeyB,
+        'C' => Code::KeyC,
+        'D' => Code::KeyD,
+        'E' => Code::KeyE,
+        'F' => Code::KeyF,
+        'G' => Code::KeyG,
+        'H' => Code::KeyH,
+        'I' => Code::KeyI,
+        'J' => Code::KeyJ,
+        'K' => Code::KeyK,
+        'L' => Code::KeyL,
+        'M' => Code::KeyM,
+        'N' => Code::KeyN,
+        'O' => Code::KeyO,
+        'P' => Code::KeyP,
+        'Q' => Code::KeyQ,
+        'R' => Code::KeyR,
+        'S' => Code::KeyS,
+        'T' => Code::KeyT,
+        'U' => Code::KeyU,
+        'V' => Code::KeyV,
+        'W' => Code::KeyW,
+        'X' => Code::KeyX,
+        'Y' => Code::KeyY,
+        'Z' => Code::KeyZ,
+        _ => unreachable!("non-alphabetic reached KeyA..KeyZ"),
+    }
+}
+
+/// Map a single ASCII digit (0-9) to its `keyboard-types::Code`
+/// variant. Same rationale as `ascii_letter_to_code` above.
+#[cfg(target_os = "macos")]
+fn ascii_digit_to_code(ch: char) -> global_hotkey::hotkey::Code {
+    use global_hotkey::hotkey::Code;
+    match ch {
+        '0' => Code::Digit0,
+        '1' => Code::Digit1,
+        '2' => Code::Digit2,
+        '3' => Code::Digit3,
+        '4' => Code::Digit4,
+        '5' => Code::Digit5,
+        '6' => Code::Digit6,
+        '7' => Code::Digit7,
+        '8' => Code::Digit8,
+        '9' => Code::Digit9,
+        _ => unreachable!("non-digit reached Digit0..Digit9"),
+    }
+}
+
 /// Try to register a hotkey. On macOS, uses `global-hotkey`. On other
 /// platforms, returns `Ok(())` as a no-op (for tests).
 ///
@@ -128,11 +190,11 @@ pub fn register(hk: &HotKey) -> Result<(), HotkeyError> {
             "space" => Code::Space,
             c if c.len() == 1 && c.chars().next().unwrap().is_ascii_alphabetic() => {
                 let ch = c.chars().next().unwrap().to_ascii_uppercase();
-                Code::KeyA + ((ch as u8 - b'A') as u32)
+                ascii_letter_to_code(ch)
             }
             c if c.len() == 1 && c.chars().next().unwrap().is_ascii_digit() => {
-                let d = c.chars().next().unwrap() as u8 - b'0';
-                Code::Digit0 + (d as u32)
+                let d = c.chars().next().unwrap();
+                ascii_digit_to_code(d)
             }
             other => {
                 return Err(HotkeyError::ParseError(format!(
@@ -143,7 +205,14 @@ pub fn register(hk: &HotKey) -> Result<(), HotkeyError> {
         };
 
         let ghk = GHK::new(Some(mods), code);
-        let manager = GlobalHotKeyManager::new();
+        // global-hotkey 0.7 makes `GlobalHotKeyManager::new()` return
+        // `Result<Self, _>` (was infallible in 0.6). Surface the
+        // error as a `Platform` variant — the manager can't be
+        // constructed on a host without the Carbon HIToolbox
+        // backing it would already have failed the `#[cfg]` gate
+        // above, so any error here is genuinely a platform issue.
+        let manager = GlobalHotKeyManager::new()
+            .map_err(|e| HotkeyError::Platform(format!("create manager: {e}")))?;
         manager.register(ghk).map_err(|e| {
             // global-hotkey returns HotkeyError; macOS often returns
             // AlreadyRegistered. String-match the message because the
