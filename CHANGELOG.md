@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedro-tramontin/trail/compare/trail-v0.4.0...trail-v0.5.0) (2026-08-02)
+
+
+### Features
+
+* **ci:** enable `prerelease: true` for trail (Talon pattern) ([8dee21f](https://github.com/pedro-tramontin/trail/commit/8dee21f6f81bd6a415c9143b55b1b0eb3d156346))
+
+
+### Bug Fixes
+
+* **ci:** push missing tags for draft releases (release-please v4 safety net) ([4331a50](https://github.com/pedro-tramontin/trail/commit/4331a503d67ee705dfa2ba40d0117ff3d03eb86c))
+
 ## [0.4.0](https://github.com/pedro-tramontin/trail/compare/trail-v0.3.0...trail-v0.4.0) (2026-08-02)
 
 
