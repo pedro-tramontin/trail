@@ -147,7 +147,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # Only the native arch for now. GitHub's `macos-latest`
+          # runners ship Apple Silicon (aarch64-apple-darwin).
+          # Previously this job built `--target universal-apple-darwin`
+          # which cross-compiled to x86_64, but the cross-compile
+          # path runs into `libssh2-sys` -> `openssl-sys` build-script
+          # failures (no host OpenSSL available for x86_64). We
+          # can revisit x86_64 once the app has users who need it.
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: trail-release-mac
@@ -207,11 +214,12 @@ jobs:
           releaseBody: "See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ env.TAG }}/CHANGELOG.md) for the full release notes."
           releaseDraft: true
           prerelease: false
-          # tauri-action's --target universal-apple-darwin does per-arch
-          # builds + lipo automatically when the rust toolchain has
-          # both aarch64-apple-darwin and x86_64-apple-darwin targets
-          # installed (which the Setup Rust toolchain step above does).
-          args: --target universal-apple-darwin
+          # Native arch only (aarch64-apple-darwin). The previous
+          # universal target cross-compiled to x86_64-apple-darwin
+          # which broke the libssh2-sys -> openssl-sys build script
+          # (no system OpenSSL for the cross target). See the dtolnay
+          # setup step above for the corresponding target list.
+          args: --target aarch64-apple-darwin
 
   # ----- Windows build (.exe installer via NSIS) -----
   # Tauri's `bundle.targets` includes `nsis` (Nullsoft Scriptable Install
