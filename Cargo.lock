@@ -2834,6 +2834,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-ssh-server"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "muda"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5626,6 +5636,7 @@ dependencies = [
  "humantime",
  "jsonschema",
  "keyring",
+ "mock-ssh-server",
  "notify-rust",
  "objc2",
  "objc2-foundation",
