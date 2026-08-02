@@ -4,6 +4,7 @@
   import Greet from "./lib/Greet.svelte";
   import Onboarding from "./Onboarding.svelte";
   import Settings from "./Settings.svelte";
+  import DemoBanner from "./lib/DemoBanner.svelte";
 
   /**
    * App shell. Gates rendering on the existence of
@@ -27,11 +28,18 @@
    * (the {#if} block re-keys on `mount_wizard`, so a true→false→true
    * cycle unmounts and remounts the wizard from scratch — clearing
    * any stale step state from a previous run).
+   *
+   * Phase 7 §7.5 — `is_demo` is the Svelte mirror of the Rust
+   * `demo::DemoState.active` flag. The banner at the top of
+   * every window reads this prop; the Settings shell also reads
+   * it to render the read-only "Demo mode" placeholder instead
+   * of the real "Re-run onboarding" button.
    */
 
   let config_exists = $state(false);
   let loaded = $state(false);
   let mount_wizard = $state(false);
+  let is_demo = $state(false);
 
   async function probe(): Promise<void> {
     try {
@@ -44,6 +52,17 @@
       config_exists = true;
     } finally {
       loaded = true;
+    }
+    // Phase 7 §7.5 — probe demo state. `null` (Tauri side returns
+    // `None` when the bootstrap didn't activate demo) means "not
+    // in demo mode"; an object with `active: true` means the
+    // banner should render + Settings should be read-only.
+    try {
+      const status = await invoke<{ active: boolean } | null>("demo_status");
+      is_demo = status != null && status.active === true;
+    } catch (err) {
+      console.error("demo_status probe failed", err);
+      is_demo = false;
     }
   }
 
@@ -94,10 +113,12 @@
   {#if !loaded}
     <p data-testid="app-loading">Loading…</p>
   {:else if mount_wizard || !config_exists}
+    <DemoBanner is_demo={is_demo} />
     <Onboarding oncomplete={handle_onboarding_complete} />
   {:else}
+    <DemoBanner is_demo={is_demo} />
     <h1>Trail</h1>
-    <Settings onreset={reset_for_onboarding} />
+    <Settings onreset={reset_for_onboarding} {is_demo} />
     <Greet />
   {/if}
 </main>

@@ -1,0 +1,21 @@
+{
+  "date": "2026-07-31",
+  "summary": "Demo: this is fake data shown when you launch with `trail --demo`. No real captures happened.",
+  "wins": [
+    "Sample win 1: Launched Trail in demo mode",
+    "Sample win 2: Reviewed the Review window UI"
+  ],
+  "blockers": [
+    "Sample blocker 1: Real collectors not configured"
+  ],
+  "people": [
+    "[COLLEAGUE]"
+  ],
+  "open_threads": [
+    "Sample thread: Set up real collectors (gh, claude, calendar) in Settings",
+    "Sample thread: Generate an ed25519 keypair in Settings to enable SSH push"
+  ],
+  "voice_notes": [
+    "Sample voice note: \"This is what a captured voice note would look like.\""
+  ]
+}

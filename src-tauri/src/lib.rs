@@ -10,6 +10,11 @@
 // against the in-tree `mock-ssh-server` fixture.
 mod collectors;
 mod commands;
+// Phase 7 §7.5 — demo mode first-run experience. The
+// `activate_if_requested` function decides whether to boot with
+// fixture data + a yellow banner, gated on (--demo flag) AND
+// (no `~/.trail/config.json` on disk).
+mod demo;
 // Phase 7 §7.2 — env-var self-test for the macOS code-signing +
 // notarization pipeline. Exposes the `notarize_check` Tauri command
 // (returns a `env-var name → "set" | "unset"` map, never the value)
@@ -91,6 +96,20 @@ use tauri::Manager;
 #[tauri::command]
 fn notarize_check() -> notarize::NotarizeEnvReport {
     notarize::check()
+}
+
+/// Phase 7 §7.5 — Tauri command: returns the current demo state
+/// so the Svelte `<DemoBanner />` + `<Review />` can render
+/// fixture data + the yellow banner. Reads the same
+/// `TRAIL_DEMO` env var the binary set on `--demo`.
+#[tauri::command]
+fn demo_status() -> Option<demo::DemoState> {
+    let args = demo::Args {
+        demo: std::env::var("TRAIL_DEMO")
+            .map(|v| v == "1")
+            .unwrap_or(false),
+    };
+    demo::activate_if_requested(&args).ok().flatten()
 }
 
 #[tauri::command]
@@ -298,8 +317,26 @@ fn resolve_paths(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Phase 7 §7.5 — decide demo mode BEFORE the Tauri builder so
+    // we can `app.manage(demo_state)` and have it ready when the
+    // Svelte side's first `invoke('demo_status')` fires. The flag
+    // itself is propagated from `main.rs` via the `TRAIL_DEMO`
+    // env var (Tauri's `lib::run()` doesn't take args).
+    let args = demo::Args {
+        demo: std::env::var("TRAIL_DEMO")
+            .map(|v| v == "1")
+            .unwrap_or(false),
+    };
+    let demo_state = demo::activate_if_requested(&args).ok().flatten();
+
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
+            // Phase 7 §7.5 — share the demo state with the
+            // frontend. When `demo_state` is `None` the Svelte side
+            // sees a missing state and renders no banner.
+            if let Some(ref state) = demo_state {
+                app.manage(state.clone());
+            }
             // Build the orchestrator once at launch, hand it to the
             // Tauri-managed state so IPC commands see the same
             // `last_run_at` / `last_exit_code` / `last_error` the
@@ -370,6 +407,7 @@ pub fn run() {
             // Phase 7 §7.2 — env-var self-test for the macOS signing +
             // notarization pipeline. See src/notarize.rs.
             notarize_check,
+            demo_status,
             commands::health_check_transport,
             commands::push_to_vps,
             commands::validate_day_summary,
