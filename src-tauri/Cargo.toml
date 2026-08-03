@@ -6,7 +6,7 @@ name = "trail"
 # versions — `version.workspace = true` is invisible to that walker.
 # The workspace root + each member's `[package].version` are kept in
 # lockstep manually; release-please rewrites both on every release.
-version = "0.4.3"
+version = "0.4.4"
 edition.workspace = true
 rust-version.workspace = true
 description = "Passive workday capture and VPS push. Tauri 2 menu-bar app."
