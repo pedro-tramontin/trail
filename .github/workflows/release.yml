@@ -247,9 +247,13 @@ jobs:
           prerelease: false
           # `--target x86_64-pc-windows-msvc` is the default Windows
           # target (Visual Studio C++ toolchain, preinstalled on the
-          # windows-latest image). `--bundles nsis` tells Tauri's
-          # bundler to produce a single .exe installer.
-          args: --target x86_64-pc-windows-msvc --bundles nsis
+          # windows-latest image). `--bundles nsis,msi` tells Tauri's
+          # bundler to produce BOTH the per-user NSIS installer
+          # (`*.exe`, no admin required) and the WiX-based MSI
+          # installer (`*.msi`, the format most Windows users expect
+          # from "Install an app"). Matches Talon's pattern
+          # (talon/.github/workflows/release.yml line 252).
+          args: --target x86_64-pc-windows-msvc --bundles nsis,msi
 
   # ----- Finalize: publish draft as production or prerelease -----
   # The 3 build jobs above all set `releaseDraft: true`, so the first
