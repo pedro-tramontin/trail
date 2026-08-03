@@ -1,23 +1,61 @@
 # Per-PR draft build workflow.
 #
-# Runs on every opened/synchronized PR to main and uploads an
-# unsigned draft artifact (named `trail-draft-build-{PR_NUMBER}-{SHA}`)
-# so reviewers (and the author) can test before the official
-# release lands. Does NOT push to GitHub Releases — only uploads
-# a downloadable artifact.
+# Runs on every opened/synchronized PR to main and uploads unsigned
+# debug bundles for **all three** target platforms (Linux, macOS,
+# Windows) so reviewers (and the author) can smoke-test the binary
+# before the official release lands. Does NOT push to GitHub
+# Releases — only uploads downloadable artifacts.
 #
 # Why unsigned: signing requires APPLE_CERTIFICATE_BASE64 + the
 # private key in the Apple keychain, which is a per-fork secret.
 # Forks do NOT have access to the upstream repo's secrets, by
 # design (prevents PR-submitted code from getting secret-bearing
-# builds). The unsigned-draft is fine for "does it compile + bundle"
-# QA. Once the PR merges, the official release.yml does the signed
+# builds). The unsigned-draft is fine for "does it compile + bundle
+# + the UI launches" QA. Once the PR merges, the official
+# release.yml does the signed + notarized + universal release
 # build.
 #
-# This file is the §7.1 STUB: just the trigger + a single debug
-# build that runs on Linux (cross-platform with what the headless
-# CI host can do). Items 7-6 / 7-7 will extend it with the macOS
-# universal draft + artifact upload.
+# Why three jobs, not one matrix: the host runners are different
+# (ubuntu-latest vs macos-latest vs windows-latest) and the
+# per-platform setup steps diverge (Linux needs apt webkit2gtk
+# deps, macOS needs the codesign-conf template patched out,
+# Windows needs NSIS downloaded by `pnpm tauri build` itself).
+# Keeping them as three named jobs makes the failure surface
+# obvious: a Mac PR breakage shows up on the draft-macos job
+# specifically instead of one matrix row that obscures which
+# runner failed.
+#
+# What `pnpm tauri build --debug` actually produces per platform
+# (Tauri 2.x canonical paths):
+#   - Linux:   src-tauri/target/debug/bundle/deb/*.deb
+#              + src-tauri/target/debug/bundle/appimage/*.AppImage
+#              + the raw binary at src-tauri/target/debug/trail
+#   - macOS:   src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
+#              + src-tauri/target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
+#              (note: the path includes the target triple because
+#              we pass `--target aarch64-apple-darwin`; without
+#              --target the path would be `target/debug/...` like
+#              Linux/Windows)
+#   - Windows: src-tauri/target/debug/bundle/msi/*.msi
+#              + src-tauri/target/debug/bundle/nsis/*.exe
+#              + the raw binary at src-tauri/target/debug/trail.exe
+#
+# Why --debug not release: debug builds skip LTO + codesign +
+# notarization + universal-binary merge, dropping build time
+# from ~10 min (release on macos-latest) to ~3-4 min. The
+# produced binary is functionally equivalent for smoke-testing:
+# the same Rust code, the same Svelte bundle, the same Tauri
+# 2 runtime. The only difference is binary size and (for macOS)
+# the absence of codesign on the .app. Per the
+# tests/MACOS_PHASE5_CHECKLIST.md trail-voice permission flow
+# the TCC prompt fires on the bundle id, which is identical
+# between debug and release.
+#
+# Item §7.6/7.7 followup: the §7.1 STUB only had draft-linux.
+# This file extends it with draft-macos + draft-windows so every
+# PR ships a downloadable Trail.{app,exe,deb,AppImage,msi} for
+# cross-platform smoke-testing on a HostMyApple macOS VM, a
+# Windows VM, and any Linux host.
 
 name: draft-build
 
@@ -33,13 +71,13 @@ permissions:
   contents: read
 
 jobs:
+  # ===================================================================
+  # Linux draft build (.deb + AppImage + raw binary)
+  # ===================================================================
   draft-linux:
     # Linux runner — what the headless CI host uses. The artifact
     # is a `tauri build --debug` output so reviewers can smoke-test
     # the binary on a Linux VM without needing macOS hardware.
-    #
-    # The macOS universal draft is added in item 7-7 (the build
-    # matrix job there runs on macos-14 for aarch64 + x86_64).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -75,6 +113,18 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Swatinem/rust-cache caches Cargo registry + target/ between
+      # runs. The `shared-key` scopes the cache to draft-linux so
+      # it doesn't collide with release.yml's `trail-release-linux`
+      # cache (different keys = different buckets, which is the
+      # intent: a PR's draft build shouldn't be invalidated by
+      # a release merge or vice versa). Same pattern as release.yml
+      # but with `trail-draft-linux` as the key.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-linux
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -82,30 +132,187 @@ jobs:
           # Pin to 22 LTS to match pnpm@10.18.0 (the project's lockfile
           # version). Bump to 24 if the lockfile moves to pnpm 11.
           node-version: "22"
+          cache: pnpm
 
       - name: Install pnpm
         # Pin pnpm to the version the project uses (lockfileVersion 9.x
         # in pnpm-lock.yaml); `pnpm@latest` pulled 11.18.0 which
         # requires Node 22.13+ AND the node:sqlite builtin, breaking
         # the previous Node-20 pin.
-        run: corepack enable && corepack prepare pnpm@10.18.0 --activate
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri debug bundle
+      - name: Build Tauri debug bundle (Linux)
         # `tauri build --debug` produces an unsigned, un-stripped
         # binary in src-tauri/target/debug/bundle/ — enough for
         # reviewers to run `--help` / `--health` and confirm the
         # build wires up.
         run: pnpm tauri build --debug
 
-      - name: Upload draft artifact
+      - name: Upload Linux draft artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trail-draft-build-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          name: trail-draft-linux-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             src-tauri/target/debug/trail
             src-tauri/target/debug/bundle/**/*.deb
             src-tauri/target/debug/bundle/**/*.AppImage
+          if-no-files-found: warn
+
+  # ===================================================================
+  # macOS draft build (unsigned .app + .dmg)
+  # ===================================================================
+  draft-macos:
+    # macos-14 is the Apple-silicon runner image — matches the
+    # release.yml's `targets: aarch64-apple-darwin`. Avoids the
+    # universal-binary build cost (~2x) for the draft.
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-mac
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # CRITICAL: the release.yml sets `signingIdentity` to
+      # `"${APPLE_SIGNING_IDENTITY}"` (a template that resolves to
+      # the literal string `${APPLE_SIGNING_IDENTITY}` on draft
+      # builds because the Apple secrets are not exposed to PRs,
+      # and Tauri's env-var substitution requires the var to be
+      # `export`ed, not just present in `$GITHUB_ENV`). The literal
+      # placeholder string fails `codesign --sign` with
+      # `no identity found`. The fix is the same one release.yml
+      # uses (lines 204-229): set `signingIdentity` to `null`
+      # (not `""`) — Tauri 2 treats an empty string as "use the
+      # default keychain identity" and runs codesign anyway (which
+      # fails on a runner with no keychain identities), while
+      # `null` is the documented "do not sign" sentinel and skips
+      # the codesign step entirely. This is always correct for a
+      # draft build — PRs never get the Apple secrets, so codesign
+      # must always be disabled here.
+      - name: Disable codesign for unsigned draft build
+        run: |
+          sed -i.bak \
+            's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": null|' \
+            src-tauri/tauri.conf.json
+          rm src-tauri/tauri.conf.json.bak
+          grep -A1 signingIdentity src-tauri/tauri.conf.json
+
+      - name: Build Tauri debug bundle (macOS, aarch64)
+        # `--target aarch64-apple-darwin` keeps the build
+        # single-arch for the draft — the release.yml does the
+        # universal binary merge separately. `--debug` skips
+        # LTO + the universal-merge step.
+        run: pnpm tauri build --debug --target aarch64-apple-darwin
+
+      - name: Upload macOS draft artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # The .app bundle is the unit on macOS — Gatekeeper,
+          # `open`, and the Finder all expect a directory named
+          # `*.app`, not a binary. Note the path includes the
+          # target triple (`aarch64-apple-darwin`) because we
+          # passed `--target aarch64-apple-darwin` above — when
+          # a target is specified, Cargo (and therefore Tauri)
+          # puts the build under `target/<triple>/`, not
+          # `target/`. The .dmg is a nice-to-have; unsigned
+          # .dmg builds can fail if the .app's permissions
+          # are weird, so it's optional (warn if missing).
+          # Reviewers who need the .dmg can re-run the
+          # workflow or build it locally.
+          name: trail-draft-macos-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
+            src-tauri/target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
+          if-no-files-found: warn
+
+  # ===================================================================
+  # Windows draft build (unsigned .msi + .exe)
+  # ===================================================================
+  draft-windows:
+    # windows-latest matches release.yml's choice. As of 2026-08
+    # this is windows-2022; GitHub rolls the "latest" label
+    # forward periodically but the toolchain (VS 2022, Rust msvc,
+    # NSIS 3.x) is the same across recent images.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+      - name: Setup Rust toolchain (msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # The Tauri 2 Windows toolchain needs the MSVC target
+          # explicitly — the default `stable` toolchain is `gnu`
+          # on windows-latest and Tauri can't link WebView2
+          # against the gnu toolchain. `msvc` matches what
+          # release.yml's build-windows job uses.
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-windows
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri debug bundle (Windows, x64)
+        # `pnpm tauri build --debug` on Windows auto-downloads
+        # NSIS 3.x via Tauri's bundle pipeline (no manual
+        # install step needed). The output paths are
+        # `bundle/msi/*.msi` + `bundle/nsis/*.exe` + the raw
+        # `target/debug/trail.exe`.
+        run: pnpm tauri build --debug
+
+      - name: Upload Windows draft artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trail-draft-windows-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            src-tauri/target/debug/trail.exe
+            src-tauri/target/debug/bundle/**/*.msi
+            src-tauri/target/debug/bundle/**/*.exe
           if-no-files-found: warn
