@@ -8,21 +8,21 @@
       "bump-patch-for-minor-pre-major": true,
       "bump-minor-for-minor-pre-major": false,
       "changelog-path": "CHANGELOG.md",
-      "extra-files": [
-        {
-          "type": "json",
-          "path": "src-tauri/tauri.conf.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "package.json",
-          "jsonpath": "$.version"
-        }
-      ],
       "pull-request-title-pattern": "release: v${version}"
     }
   },
+  "extra-files": [
+    {
+      "type": "json",
+      "path": "src-tauri/tauri.conf.json",
+      "jsonpath": "$.version"
+    },
+    {
+      "type": "json",
+      "path": "package.json",
+      "jsonpath": "$.version"
+    }
+  ],
   "release-labels": ["autorelease: pending"],
   "prerelease": true,
   "prerelease-type": "pre",
