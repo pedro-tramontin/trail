@@ -4,12 +4,21 @@
 # Validates the GH Actions workflow files in this repo. Run from the
 # repo root: `bash tests/workflows_smoke.sh`.
 #
-# Cases:
-#   1. release-please-config.json is valid JSON (jq parse).
-#   2. .release-please-manifest.json is valid JSON (jq parse).
-#   3. .github/workflows/{release,draft-build}.yml are valid YAML.
-#   4. yamllint exits 0 for both workflow files (if yamllint installed).
-#   5. act -n exits 0 for both workflow files (if act installed).
+# Cases (Phase 7 + Phase 8 §8.1 cleanup):
+#   1. .github/workflows/{release,draft-build}.yml are valid YAML.
+#   2. yamllint exits 0 for both workflow files (if yamllint installed).
+#   3. act -n exits 0 for both workflow files (if act installed).
+#   4. Top-level `if:` keys do not reference secrets (per-talon PR #62).
+#   5. Per-crate version invariant (no `version.workspace = true`).
+#   6. Collector `cargo install` discoverability lint (item 7-3).
+#   7. tauri.conf.json signing config is env-driven.
+#   8. release.yml has upload-assets job (Phase 7 §7.7).
+#   9. softprops/action-gh-release is SHA-pinned (supply-chain-audit).
+#
+# Phase 8 §8.2 EXTENDS this script with: release-drafter config
+# validity, 3 new workflow files (release-drafter, version-bump,
+# promote) YAML validity, and GITHUB_TOKEN-not-RELEASE_PLEASE_TOKEN
+# check for the new workflows.
 #
 # The script exits 0 when structural validity holds; the optional
 # yamllint + `act -n` checks skip with a `::warning::` line if the
@@ -31,38 +40,8 @@ note_warn() { echo "::warning::$*"; WARN=$((WARN + 1)); }
 echo "=== Workflow smoke ==="
 echo
 
-# --- Case 1: release-please-config.json ---
-echo "[1] release-please-config.json JSON validity"
-if command -v jq >/dev/null 2>&1; then
-    if jq -e . release-please-config.json >/dev/null; then
-        ok "release-please-config.json is valid JSON"
-    else
-        bad "release-please-config.json is not valid JSON"
-    fi
-else
-    python3 -c "import json,sys; json.load(open('release-please-config.json'))" \
-        && ok "release-please-config.json is valid JSON (python fallback)" \
-        || bad "release-please-config.json is not valid JSON"
-fi
-
-# --- Case 2: .release-please-manifest.json ---
-echo
-echo "[2] .release-please-manifest.json JSON validity"
-if command -v jq >/dev/null 2>&1; then
-    if jq -e . .release-please-manifest.json >/dev/null; then
-        ok ".release-please-manifest.json is valid JSON"
-    else
-        bad ".release-please-manifest.json is not valid JSON"
-    fi
-else
-    python3 -c "import json,sys; json.load(open('.release-please-manifest.json'))" \
-        && ok ".release-please-manifest.json is valid JSON (python fallback)" \
-        || bad ".release-please-manifest.json is not valid JSON"
-fi
-
-# --- Case 3: YAML structural validity ---
-echo
-echo "[3] GitHub Actions YAML structural validity"
+# --- Case 1: YAML structural validity ---
+echo "[1] GitHub Actions YAML structural validity"
 if command -v python3 >/dev/null 2>&1 && python3 -c "import yaml" 2>/dev/null; then
     for f in .github/workflows/release.yml .github/workflows/draft-build.yml; do
         if python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" 2>/dev/null; then
@@ -75,9 +54,9 @@ else
     note_warn "python3+yaml not available; skipping YAML structural check"
 fi
 
-# --- Case 4: yamllint (optional) ---
+# --- Case 2: yamllint (optional) ---
 echo
-echo "[4] yamllint (optional)"
+echo "[2] yamllint (optional)"
 if command -v yamllint >/dev/null 2>&1; then
     set +e
     yamllint -d '{extends: default, rules: {line-length: disable}}' \
@@ -94,9 +73,9 @@ else
     note_warn "yamllint not installed; skipping (install with: pip install yamllint)"
 fi
 
-# --- Case 5: act -n dry-run (optional) ---
+# --- Case 3: act -n dry-run (optional) ---
 echo
-echo "[5] act -n dry-run (optional)"
+echo "[3] act -n dry-run (optional)"
 if command -v act >/dev/null 2>&1; then
     set +e
     act -n -W .github/workflows/release.yml >/dev/null 2>&1
@@ -122,21 +101,6 @@ if [ -n "$SECRET_IF" ]; then
     echo "$SECRET_IF"
 else
     ok "No secret-referencing 'if:' keys"
-fi
-
-# --- Version-sync check ---
-echo
-echo "=== Version sync: Cargo.toml <-> release-please manifest ==="
-ROOT_VER=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
-if command -v jq >/dev/null 2>&1; then
-    MANIFEST_VER=$(jq -r '."."' .release-please-manifest.json)
-else
-    MANIFEST_VER=$(python3 -c "import json; print(json.load(open('.release-please-manifest.json'))['.'])")
-fi
-if [ "$ROOT_VER" = "$MANIFEST_VER" ]; then
-    ok "version-sync: Cargo.toml=$ROOT_VER, manifest=$MANIFEST_VER"
-else
-    bad "Cargo.toml version ($ROOT_VER) != manifest version ($MANIFEST_VER)"
 fi
 
 # --- Per-crate version invariant (Phase 7 §7.2 — src-tauri only) ---
