@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/pedro-tramontin/trail/compare/trail-v0.4.4...trail-v0.4.5) (2026-08-03)
+
+
+### Bug Fixes
+
+* **ci:** silence 4 compiler warnings (Windows-only unused vars + unreachable) ([#99](https://github.com/pedro-tramontin/trail/issues/99)) ([0b00499](https://github.com/pedro-tramontin/trail/commit/0b00499e806bada274f460f3f2d88bbe2e824718))
+
 ## [0.4.4](https://github.com/pedro-tramontin/trail/compare/trail-v0.4.3...trail-v0.4.4) (2026-08-03)
 
 
