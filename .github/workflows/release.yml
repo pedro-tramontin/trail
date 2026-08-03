@@ -43,8 +43,10 @@
 # GH Actions resolves `if:` before secrets are exposed, so
 # `if: ${{ secrets.X }}` returns falsy even when the secret is
 # set. Use bash guards inside `run:` blocks that check
-# `[ -n "${VAR:-}" ]` instead. The macOS signing+notarization
-# block below follows this pattern.
+# `[ -n "${VAR:-}" ]` instead. This pitfall is moot in the
+# current design (Trail is unsigned by design — see the
+# macOS build job's "Disable codesign" comment), but the
+# rule is kept here as a reference for future maintainers.
 
 name: release
 
@@ -72,7 +74,6 @@ concurrency:
 
 permissions:
   contents: write  # required to attach assets to a release
-  id-token: write  # required for OIDC-based notarization (item 7-2)
   pull-requests: read  # not used here, but matches the workflow-level
                         # permissions convention from release-please.yml
 
@@ -170,65 +171,16 @@ jobs:
       - name: Install UI deps + build
         run: pnpm install --frozen-lockfile && pnpm build
 
-      # macOS codesign + notarization is OPTIONAL. The Tauri CLI reads
-      # APPLE_CERTIFICATE from the env; an empty value skips the
-      # import step entirely (the unsigned build succeeds, the
-      # release ships as a downloadable .dmg without code signing).
-      #
-      # Per-talon PR #62 pitfall: never use top-level `if:` to gate
-      # on secrets. Use bash guards instead. The env block on this
-      # step is the "interop" point — bash decides whether to write
-      # the signing secrets to $GITHUB_ENV for the tauri-action step
-      # to inherit. When the secret is absent, the env var is
-      # simply not set in the tauri-action process; tauri-action
-      # sees var_os("APPLE_CERTIFICATE") == None and skips signing.
-      - name: Propagate Apple signing secrets (no-op if APPLE_CERTIFICATE is absent)
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [ -n "$APPLE_CERTIFICATE" ]; then
-            echo "Apple signing secrets detected — forwarding to tauri-action via \$GITHUB_ENV."
-            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
-            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
-            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
-            echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
-            echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
-          else
-            echo "::warning::APPLE_CERTIFICATE not set; shipping unsigned .dmg"
-            # Patch tauri.conf.json to blank out the signing identity.
-            # tauri-action doesn't accept a signingIdentity input
-            # (verified 2026-08-02 by reading its action.yml), so the
-            # only way to skip the codesign step is to ensure the
-            # identity tauri.conf.json resolves to is empty. The
-            # literal `${APPLE_SIGNING_IDENTITY}` placeholder in
-            # tauri.conf.json survives when the env var is unset
-            # (tauri's env-var substitution requires the var to be
-            # \`export\`ed, not just present in `$GITHUB_ENV`), and
-            # that literal string fails `codesign --sign` with
-            # `no identity found`. Replace it with an empty string.
-            # Set `signingIdentity` to `null` (not `""`). Tauri 2
-            # treats an empty string as "use the default keychain
-            # identity" and runs codesign anyway, which fails with
-            # `no identity found` on a runner with no keychain
-            # identities registered. `null` is the documented
-            # "do not sign" sentinel and skips the codesign step
-            # entirely. Tauri's JSON parser treats `null` as
-            # `Option::None`.
-            sed -i.bak \
-              's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": null|' \
-              src-tauri/tauri.conf.json
-            rm src-tauri/tauri.conf.json.bak
-            echo "tauri.conf.json patched for unsigned build:"
-            grep -A1 signingIdentity src-tauri/tauri.conf.json
-          fi
-
+      # macOS is unsigned by design. Trail is a personal-use app
+      # (not distributed via the Mac App Store or to external
+      # testers), so we don't pay the Apple Developer Program
+      # enrollment fee or the per-build notarization API cost.
+      # The unsigned .dmg/.app is installed via the standard
+      # right-click → Open first-time bypass (or `xattr -d
+      # com.apple.quarantine <path>` for the unzipped .app).
+      # If Trail is ever shipped to external users, the signing
+      # + notarization pipeline can be re-added — Talon's
+      # release-process.md has the full reference implementation.
       - name: Build Tauri bundle (macOS aarch64)
         uses: tauri-apps/tauri-action@v0
         env:
