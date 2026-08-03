@@ -1,29 +1,47 @@
-# Per-PR draft build workflow.
+# Per-PR + per-pre-release-tag draft build workflow.
 #
-# Runs on every opened/synchronized PR to main and uploads unsigned
-# debug bundles for **all three** target platforms (Linux, macOS,
-# Windows) so reviewers (and the author) can smoke-test the binary
-# before the official release lands. Does NOT push to GitHub
-# Releases — only uploads downloadable artifacts.
+# This workflow has two trigger modes that produce DIFFERENT output
+# destinations:
+#
+#   1. PR mode (PR opened/synchronized against main): uploads
+#      unsigned debug bundles for all 3 platforms to the
+#      **Actions run summary** as workflow artifacts. Used by
+#      reviewers (and the author) to smoke-test the binary in
+#      isolation, e.g. on a HostMyApple macOS VM, before the
+#      official release lands. Does NOT touch GitHub Releases.
+#
+#   2. Pre-release tag mode (`trail-v*-pre.*` tag pushed by
+#      release-please): uploads the same unsigned debug bundles
+#      to the **GitHub pre-release page** that release-please
+#      just created (the one with the "Pre-release" badge).
+#      Talon pattern: every `feat:`/`fix:` PR merge produces a
+#      `-pre.N` tag + pre-release page, and this workflow
+#      attaches the debug binaries to it so anyone with the URL
+#      can download + smoke-test before the stable release.
+#
+# The two modes are mutually exclusive at the job level: each
+# of the 6 jobs (3 PR-review + 3 pre-release-attach) has an
+# `if:` filter on `github.event_name` so only the relevant
+# mode runs for the current trigger.
 #
 # Why unsigned: signing requires APPLE_CERTIFICATE_BASE64 + the
 # private key in the Apple keychain, which is a per-fork secret.
 # Forks do NOT have access to the upstream repo's secrets, by
 # design (prevents PR-submitted code from getting secret-bearing
 # builds). The unsigned-draft is fine for "does it compile + bundle
-# + the UI launches" QA. Once the PR merges, the official
-# release.yml does the signed + notarized + universal release
-# build.
+# + the UI launches" QA. The stable release.yml produces signed
+# + notarized binaries for the published release.
 #
-# Why three jobs, not one matrix: the host runners are different
-# (ubuntu-latest vs macos-latest vs windows-latest) and the
-# per-platform setup steps diverge (Linux needs apt webkit2gtk
-# deps, macOS needs the codesign-conf template patched out,
-# Windows needs NSIS downloaded by `pnpm tauri build` itself).
-# Keeping them as three named jobs makes the failure surface
-# obvious: a Mac PR breakage shows up on the draft-macos job
-# specifically instead of one matrix row that obscures which
-# runner failed.
+# Why two sets of three jobs (6 total), not one matrix: the upload
+# destinations are different (Actions artifacts vs. GitHub
+# Releases) and the tooling differs (actions/upload-artifact@v4
+# vs. tauri-action@v0). A single job trying to do both would
+# need conditional step logic that is harder to reason about
+# than separate jobs. Six jobs also matches Talon's pattern
+# (Talon has 3 tag-triggered jobs that build+attach in one step
+# via tauri-action; Trail has 3 PR-triggered review jobs +
+# 3 tag-triggered attach jobs because we want both PR smoke
+# testing AND pre-release attachments).
 #
 # What `pnpm tauri build --debug` actually produces per platform
 # (Tauri 2.x canonical paths — note the trail Cargo workspace
@@ -52,18 +70,15 @@
 # tests/MACOS_PHASE5_CHECKLIST.md trail-voice permission flow
 # the TCC prompt fires on the bundle id, which is identical
 # between debug and release.
-#
-# Item §7.6/7.7 followup: the §7.1 STUB only had draft-linux.
-# This file extends it with draft-macos + draft-windows so every
-# PR ships a downloadable Trail.{app,exe,deb,AppImage,msi} for
-# cross-platform smoke-testing on a HostMyApple macOS VM, a
-# Windows VM, and any Linux host.
 
 name: draft-build
 
 on:
   pull_request:
     branches: [main]
+  push:
+    tags:
+      - 'trail-v*-pre.*'
   workflow_dispatch:
 
 # Fork guard applied per-job below — the GH Actions schema
@@ -80,6 +95,9 @@ jobs:
     # Linux runner — what the headless CI host uses. The artifact
     # is a `tauri build --debug` output so reviewers can smoke-test
     # the binary on a Linux VM without needing macOS hardware.
+    # Only runs in PR-review mode (workflow_dispatch + tag push are
+    # handled by the attach-linux job below).
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -196,6 +214,9 @@ jobs:
     # macos-14 is the Apple-silicon runner image — matches the
     # release.yml's `targets: aarch64-apple-darwin`. Avoids the
     # universal-binary build cost (~2x) for the draft.
+    # Only runs in PR-review mode (tag push is handled by the
+    # attach-macos job below).
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     timeout-minutes: 30
     env:
@@ -295,6 +316,9 @@ jobs:
     # this is windows-2022; GitHub rolls the "latest" label
     # forward periodically but the toolchain (VS 2022, Rust msvc,
     # NSIS 3.x) is the same across recent images.
+    # Only runs in PR-review mode (tag push is handled by the
+    # attach-windows job below).
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -362,3 +386,192 @@ jobs:
             target/debug/bundle/**/*.msi
             target/debug/bundle/**/*.exe
           if-no-files-found: error
+
+  # ===================================================================
+  # Pre-release attach jobs (Talon pattern) — only run on
+  # `trail-v*-pre.*` tag push. Each job builds the same debug bundle
+  # as the matching draft-* job above, but uses `tauri-action@v0`
+  # to attach the binary to the GitHub pre-release that
+  # release-please just created.
+  #
+  # Why 3 separate jobs (not a matrix): matches the existing
+  # draft-* design and Talon's pattern. Host runners diverge
+  # (apt webkit2gtk on Linux, codesign template patch on macOS,
+  # NSIS on Windows), so a matrix would obscure the failure
+  # surface.
+  #
+  # The `if:` filter ensures these jobs only run for tag pushes.
+  # On a PR push, github.event_name == 'pull_request' and these
+  # jobs are skipped entirely (no runner time wasted).
+  # ===================================================================
+  attach-linux:
+    # Linux tag-triggered build. Uses tauri-action to attach the
+    # .deb + .AppImage to the pre-release page. release-please has
+    # already created the pre-release + tag at this point; we
+    # just attach the binaries.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/trail-v') && contains(github.ref, '-pre.')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write  # required by tauri-action to attach to release
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-linux
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Build + attach Tauri debug bundle to pre-release (Linux)
+        # tauri-action handles the full pipeline: build the bundle
+        # in debug mode, then attach the resulting assets to the
+        # GitHub pre-release that release-please just created.
+        # `tagName: ${{ github.ref_name }}` is the trail-vX.Y.Z-pre.N
+        # tag that fired this workflow. `releaseDraft: true` +
+        # `prerelease: true` are safety nets — if for any reason
+        # the pre-release doesn't exist when tauri-action runs
+        # (e.g. release-please created the tag but failed to
+        # create the release), tauri-action creates it as a
+        # pre-release draft (not auto-published).
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Trail ${{ github.ref_name }}"
+          releaseBody: "**Pre-release (debug build).** See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: true
+          args: --debug --bundles deb,appimage
+
+  attach-macos:
+    # macOS tag-triggered build. Uses tauri-action to attach the
+    # unsigned .app + .dmg to the pre-release page. The macOS
+    # codesign template in tauri.conf.json is patched to null
+    # before the build (mirrors the release.yml pattern) since
+    # PRs/tags don't get the Apple signing secrets.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/trail-v') && contains(github.ref, '-pre.')
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-mac
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # CRITICAL: the release.yml sets `signingIdentity` to
+      # `"${APPLE_SIGNING_IDENTITY}"` (a template that resolves to
+      # the literal string `${APPLE_SIGNING_IDENTITY}` on tag-triggered
+      # runs because the Apple secrets are not exposed to this
+      # workflow, and Tauri's env-var substitution requires the var
+      # to be `export`ed, not just present in `$GITHUB_ENV`). The
+      # literal placeholder string fails `codesign --sign` with
+      # `no identity found`. The fix is the same one release.yml
+      # uses: set `signingIdentity` to `null` (not `""`) — Tauri 2
+      # treats an empty string as "use the default keychain
+      # identity" and runs codesign anyway (which fails on a runner
+      # with no keychain identities), while `null` is the documented
+      # "do not sign" sentinel and skips the codesign step entirely.
+      - name: Disable codesign for unsigned pre-release build
+        run: |
+          sed -i.bak \
+            's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": null|' \
+            src-tauri/tauri.conf.json
+          rm src-tauri/tauri.conf.json.bak
+          grep -A1 signingIdentity src-tauri/tauri.conf.json
+
+      - name: Build + attach Tauri debug bundle to pre-release (macOS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Trail ${{ github.ref_name }}"
+          releaseBody: "**Pre-release (debug build, unsigned macOS).** See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: true
+          args: --debug --target aarch64-apple-darwin
+
+  attach-windows:
+    # Windows tag-triggered build. Uses tauri-action to attach
+    # the .msi + .exe to the pre-release page.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/trail-v') && contains(github.ref, '-pre.')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain (msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-windows
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Build + attach Tauri debug bundle to pre-release (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Trail ${{ github.ref_name }}"
+          releaseBody: "**Pre-release (debug build).** See [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ github.ref_name }}/CHANGELOG.md) for the full release notes."
+          releaseDraft: true
+          prerelease: true
+          args: --debug --bundles msi,nsis
