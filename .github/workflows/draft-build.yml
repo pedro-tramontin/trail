@@ -26,19 +26,21 @@
 # runner failed.
 #
 # What `pnpm tauri build --debug` actually produces per platform
-# (Tauri 2.x canonical paths):
-#   - Linux:   src-tauri/target/debug/bundle/deb/*.deb
-#              + src-tauri/target/debug/bundle/appimage/*.AppImage
-#              + the raw binary at src-tauri/target/debug/trail
-#   - macOS:   src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
-#              + src-tauri/target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
-#              (note: the path includes the target triple because
+# (Tauri 2.x canonical paths — note the trail Cargo workspace
+# has its root at the repo root, so `target/` lives at the repo
+# root, NOT at `src-tauri/target/`):
+#   - Linux:   target/debug/bundle/deb/*.deb
+#              + target/debug/bundle/appimage/*.AppImage
+#              + the raw binary at target/debug/trail
+#   - macOS:   target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
+#              + target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
+#              (the path includes the target triple because
 #              we pass `--target aarch64-apple-darwin`; without
-#              --target the path would be `target/debug/...` like
-#              Linux/Windows)
-#   - Windows: src-tauri/target/debug/bundle/msi/*.msi
-#              + src-tauri/target/debug/bundle/nsis/*.exe
-#              + the raw binary at src-tauri/target/debug/trail.exe
+#              --target the path would be `target/debug/...`
+#              like Linux/Windows)
+#   - Windows: target/debug/bundle/msi/*.msi
+#              + target/debug/bundle/nsis/*.exe
+#              + the raw binary at target/debug/trail.exe
 #
 # Why --debug not release: debug builds skip LTO + codesign +
 # notarization + universal-binary merge, dropping build time
@@ -165,11 +167,27 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trail-draft-linux-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          # The trail Cargo workspace has its root at the repo
+          # root (Cargo.toml lives there), so Cargo's `target/`
+          # is at the repo root, NOT at src-tauri/target/. Tauri
+          # 2 respects this and writes the bundle under
+          # `<repo>/target/debug/bundle/{deb,appimage}/`. The
+          # original draft-build.yml had `src-tauri/target/...`
+          # in this path, which is wrong for a workspace with the
+          # root at the repo top-level — uploads silently
+          # produced zero artifacts because of `if-no-files-found:
+          # warn`. The fix is to drop the `src-tauri/` prefix.
+          # Verified on PR #88 (run 30811406261): the tauri build
+          # log reports the bundles at
+          # /home/runner/work/trail/trail/target/debug/bundle/deb/
+          # and the upload step with `src-tauri/target/...` in
+          # the path warned "No files were found" — exactly this
+          # bug.
           path: |
-            src-tauri/target/debug/trail
-            src-tauri/target/debug/bundle/**/*.deb
-            src-tauri/target/debug/bundle/**/*.AppImage
-          if-no-files-found: warn
+            target/debug/trail
+            target/debug/bundle/**/*.deb
+            target/debug/bundle/**/*.AppImage
+          if-no-files-found: error
 
   # ===================================================================
   # macOS draft build (unsigned .app + .dmg)
@@ -248,21 +266,26 @@ jobs:
         with:
           # The .app bundle is the unit on macOS — Gatekeeper,
           # `open`, and the Finder all expect a directory named
-          # `*.app`, not a binary. Note the path includes the
-          # target triple (`aarch64-apple-darwin`) because we
-          # passed `--target aarch64-apple-darwin` above — when
-          # a target is specified, Cargo (and therefore Tauri)
-          # puts the build under `target/<triple>/`, not
-          # `target/`. The .dmg is a nice-to-have; unsigned
-          # .dmg builds can fail if the .app's permissions
-          # are weird, so it's optional (warn if missing).
-          # Reviewers who need the .dmg can re-run the
-          # workflow or build it locally.
+          # `*.app`, not a binary. The path includes the target
+          # triple (`aarch64-apple-darwin`) because we passed
+          # `--target aarch64-apple-darwin` above — when a
+          # target is specified, Cargo (and therefore Tauri)
+          # puts the build under `<workspace>/target/<triple>/`.
+          # Since trail's Cargo workspace root is the repo
+          # root, the path is `target/aarch64-apple-darwin/...`
+          # (no `src-tauri/` prefix). Verified on PR #88 (run
+          # 30811406261): the build reports the bundle at
+          # /Users/runner/work/trail/trail/target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
+          # and the upload with `src-tauri/target/...` warned
+          # "No files were found". The .dmg is a nice-to-have;
+          # unsigned .dmg builds can fail if the .app's
+          # permissions are weird, so it's optional (warn if
+          # missing) once the .app is uploaded successfully.
           name: trail-draft-macos-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
-            src-tauri/target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
-          if-no-files-found: warn
+            target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
+            target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
+          if-no-files-found: error
 
   # ===================================================================
   # Windows draft build (unsigned .msi + .exe)
@@ -322,9 +345,20 @@ jobs:
       - name: Upload Windows draft artifact
         uses: actions/upload-artifact@v4
         with:
+          # Same fix as draft-linux / draft-macos: the trail
+          # Cargo workspace has its root at the repo root, so
+          # the build artifacts are under `target/`, not
+          # `src-tauri/target/`. Verified on PR #88 (run
+          # 30811406261): the build reported
+          # /home/runner/work/trail/trail/target/debug/bundle/{msi,nsis}/
+          # and the old `src-tauri/target/...` paths warned
+          # "No files were found". Changed `if-no-files-found`
+          # to `error` from `warn` so a future path regression
+          # fails the build instead of silently uploading
+          # nothing.
           name: trail-draft-windows-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            src-tauri/target/debug/trail.exe
-            src-tauri/target/debug/bundle/**/*.msi
-            src-tauri/target/debug/bundle/**/*.exe
-          if-no-files-found: warn
+            target/debug/trail.exe
+            target/debug/bundle/**/*.msi
+            target/debug/bundle/**/*.exe
+          if-no-files-found: error
