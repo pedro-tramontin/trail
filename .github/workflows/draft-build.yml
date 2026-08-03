@@ -125,23 +125,31 @@ jobs:
         with:
           shared-key: trail-draft-linux
 
-      - name: Setup Node
+      - name: Install pnpm
+        # Pin pnpm to the version the project uses (lockfileVersion 9.x
+        # in pnpm-lock.yaml); `pnpm@latest` pulled 11.18.0 which
+        # requires Node 22.13+ AND the node:sqlite builtin, breaking
+        # the previous Node-20 pin. MUST run BEFORE the
+        # `actions/setup-node@v4` step with `cache: pnpm` below —
+        # setup-node looks up `pnpm` on PATH to discover the store
+        # directory, and fails with "Unable to locate executable
+        # file: pnpm" if pnpm isn't on PATH yet. release.yml uses
+        # the same order (pnpm/action-setup first, then setup-node).
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v4
         with:
           # pnpm 11+ requires Node.js 22.13+ (calls node:sqlite builtin).
           # Pin to 22 LTS to match pnpm@10.18.0 (the project's lockfile
           # version). Bump to 24 if the lockfile moves to pnpm 11.
+          # `cache: pnpm` configures the pnpm store as a cache target
+          # — pnpm MUST already be installed (above step) or this
+          # fails with "Unable to locate executable file: pnpm".
           node-version: "22"
           cache: pnpm
-
-      - name: Install pnpm
-        # Pin pnpm to the version the project uses (lockfileVersion 9.x
-        # in pnpm-lock.yaml); `pnpm@latest` pulled 11.18.0 which
-        # requires Node 22.13+ AND the node:sqlite builtin, breaking
-        # the previous Node-20 pin.
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.0
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -188,16 +196,18 @@ jobs:
         with:
           shared-key: trail-draft-mac
 
-      - name: Setup Node
+      - name: Install pnpm
+        # MUST run BEFORE setup-node — see the draft-linux job's
+        # pnpm/action-setup comment for the full explanation.
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: pnpm
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.0
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -285,16 +295,18 @@ jobs:
         with:
           shared-key: trail-draft-windows
 
-      - name: Setup Node
+      - name: Install pnpm
+        # MUST run BEFORE setup-node — see the draft-linux job's
+        # pnpm/action-setup comment for the full explanation.
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+
+      - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: pnpm
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.0
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
