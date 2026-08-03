@@ -18,7 +18,7 @@
   "release-labels": ["autorelease: pending"],
   "prerelease": true,
   "prerelease-type": "pre",
-  "draft": true,
+  "draft": false,
   "include-v-in-tag": true,
   "include-component-in-tag": true,
   "tag-separator": "-"
