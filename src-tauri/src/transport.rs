@@ -131,12 +131,13 @@ impl Transport for SshTransport {
         // and we cannot hold a borrow across `spawn_blocking`.
         let host = self.host.clone();
         let port = self.port;
-        // `user` and `pem` are only used inside the unix-gated
+        // `pem` is only used inside the unix-gated
         // `userauth_pubkey_memory` call below (Windows builds use the
         // password-only path or bail out early with the "pubkey-in-memory
-        // auth requires unix" error). Gate them with `#[cfg(unix)]` to
-        // silence the Windows-only "unused variable" warnings.
-        #[cfg(unix)]
+        // auth requires unix" error). Gate it with `#[cfg(unix)]` to
+        // silence the Windows-only "unused variable" warning. `user` is
+        // still used by both pubkey auth (unix) AND password auth
+        // (cross-platform) so we leave it unconditional.
         let user = self.user.clone();
         #[cfg(unix)]
         let pem = self.load_private_key_pem()?;
