@@ -43,13 +43,31 @@ echo
 # --- Case 1: YAML structural validity ---
 echo "[1] GitHub Actions YAML structural validity"
 if command -v python3 >/dev/null 2>&1 && python3 -c "import yaml" 2>/dev/null; then
-    for f in .github/workflows/release.yml .github/workflows/draft-build.yml; do
-        if python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" 2>/dev/null; then
-            ok "$f parses as YAML"
+    # Phase 7: release.yml + draft-build.yml
+    # Phase 8 §8.2: + release-drafter.yml, version-bump.yml, promote.yml
+    for f in .github/workflows/release.yml .github/workflows/draft-build.yml \
+             .github/workflows/release-drafter.yml .github/workflows/version-bump.yml \
+             .github/workflows/promote.yml; do
+        if [ -f "$f" ]; then
+            if python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" 2>/dev/null; then
+                ok "$f parses as YAML"
+            else
+                bad "$f does not parse as YAML"
+            fi
         else
-            bad "$f does not parse as YAML"
+            note_warn "$f missing (skipped)"
         fi
     done
+    # release-drafter config (Phase 8 §8.2)
+    if [ -f .github/release-drafter.yml ]; then
+        if python3 -c "import yaml; yaml.safe_load(open('.github/release-drafter.yml'))" 2>/dev/null; then
+            ok ".github/release-drafter.yml parses as YAML"
+        else
+            bad ".github/release-drafter.yml does not parse as YAML"
+        fi
+    else
+        note_warn ".github/release-drafter.yml missing (skipped)"
+    fi
 else
     note_warn "python3+yaml not available; skipping YAML structural check"
 fi
@@ -61,11 +79,15 @@ if command -v yamllint >/dev/null 2>&1; then
     set +e
     yamllint -d '{extends: default, rules: {line-length: disable}}' \
         .github/workflows/release.yml \
-        .github/workflows/draft-build.yml
+        .github/workflows/draft-build.yml \
+        .github/workflows/release-drafter.yml \
+        .github/workflows/version-bump.yml \
+        .github/workflows/promote.yml \
+        .github/release-drafter.yml
     rc=$?
     set -e
     if [ "$rc" -eq 0 ]; then
-        ok "yamllint passes on both workflows"
+        ok "yamllint passes on all workflows + release-drafter config"
     else
         bad "yamllint reported issues (exit $rc)"
     fi
@@ -84,7 +106,7 @@ if command -v act >/dev/null 2>&1; then
     rc_db=$?
     set -e
     if [ "$rc_rp" -eq 0 ] && [ "$rc_db" -eq 0 ]; then
-        ok "act -n dry-run passes on both workflows"
+        ok "act -n dry-run passes on both legacy workflows"
     else
         bad "act -n failed (release.yml=$rc_rp, draft-build.yml=$rc_db)"
     fi
@@ -269,6 +291,134 @@ fi
 echo
 echo "=== draft-build act -n is covered by the [5] act -n block above ==="
 note_warn "if act became installed since this script ran, rerun and check rc_db=0"
+
+# --- Phase 8 §8.2: new release-drafter pipeline assertions ---
+# 1. The 3 new workflows use GITHUB_TOKEN, not RELEASE_PLEASE_TOKEN.
+#    Per Pitfall #86 (v0.3.55) the v0.3.55+ convention is to use
+#    GITHUB_TOKEN for all workflow token references. The
+#    release-please token was a fine-grained PAT that rotted out
+#    of band; the new pipeline uses the workflow's default
+#    GITHUB_TOKEN (which is auto-rotated by GitHub).
+# 2. The release-drafter config has the expected top-level keys.
+# 3. promote.yml's gate step regex matches the version-bump commit
+#    shape produced by version-bump.yml.
+echo
+echo "=== Phase 8 §8.2: GITHUB_TOKEN usage in new workflows ==="
+for f in .github/workflows/release-drafter.yml .github/workflows/version-bump.yml .github/workflows/promote.yml; do
+    # Only flag active `uses:` or `env:` references to RELEASE_PLEASE_TOKEN,
+    # not free-text mentions in comments (where the name may appear as
+    # documentation: e.g. "use GITHUB_TOKEN not RELEASE_PLEASE_TOKEN").
+    if grep -E '^[[:space:]]*[^#]' "$f" | grep -qE '(secrets\.RELEASE_PLEASE_TOKEN|RELEASE_PLEASE_TOKEN:[[:space:]]*\$)|RELEASE_PLEASE_TOKEN\b'; then
+        bad "$f still references RELEASE_PLEASE_TOKEN (must use GITHUB_TOKEN per Pitfall #86)"
+    else
+        ok "$f does not reference RELEASE_PLEASE_TOKEN (comment-only mentions allowed)"
+    fi
+    if grep -qE 'secrets\.GITHUB_TOKEN|GITHUB_TOKEN:[[:space:]]*\$' "$f"; then
+        ok "$f references GITHUB_TOKEN"
+    else
+        bad "$f does not reference GITHUB_TOKEN"
+    fi
+done
+
+# Release-drafter config shape
+echo
+echo "=== Phase 8 §8.2: .github/release-drafter.yml shape ==="
+if [ -f .github/release-drafter.yml ]; then
+    for key in tag-prefix version-resolver categories change-template template; do
+        if python3 -c "import yaml; cfg = yaml.safe_load(open('.github/release-drafter.yml')); assert '$key' in cfg, 'missing $key'" 2>/dev/null; then
+            ok "release-drafter.yml has $key"
+        else
+            bad "release-drafter.yml missing $key"
+        fi
+    done
+    # version-resolver: major should match `feat!:` etc.
+    if python3 -c "
+import yaml, sys
+cfg = yaml.safe_load(open('.github/release-drafter.yml'))
+major_kw = cfg.get('version-resolver', {}).get('major', {}).get('keywords', [])
+assert any('feat!:' in k for k in major_kw), 'no major keyword for feat!:'
+minor_kw = cfg.get('version-resolver', {}).get('minor', {}).get('keywords', [])
+assert any('feat:' in k for k in minor_kw), 'no minor keyword for feat:'
+patch_kw = cfg.get('version-resolver', {}).get('patch', {}).get('keywords', [])
+assert any('fix:' in k for k in patch_kw), 'no patch keyword for fix:'
+" 2>/dev/null; then
+        ok "release-drafter.yml version-resolver covers feat!/feat/fix"
+    else
+        bad "release-drafter.yml version-resolver missing feat!/feat/fix keywords"
+    fi
+else
+    bad ".github/release-drafter.yml not found"
+fi
+
+# promote.yml gate regex check (the version-bump commit shape)
+echo
+echo "=== Phase 8 §8.2: promote.yml gate regex ==="
+if [ -f .github/workflows/promote.yml ]; then
+    # The gate regex in promote.yml is a Bash =~ pattern:
+    #   ^chore\(release\): bump version to v[0-9]+\.[0-9]+\.[0-9]+$
+    # Asserts the workflow contains these literal tokens:
+    #   - "(release)" (the type prefix, with backslash-escaped parens)
+    #   - "bump" + "version" + "to" (the action, in that order)
+    #   - "v([0-9]+)" (the major version capture group)
+    #   - ".([0-9]+)" (the minor version capture group)
+    # Use a python regex check to avoid bash-escape / grep-ERE
+    # interaction headaches.
+    if python3 - <<'PY' >/dev/null 2>&1; then
+import re
+with open('.github/workflows/promote.yml') as f:
+    content = f.read()
+required = [
+    r'\(release\)',                    # the type prefix
+    r'\bbump\b.*\bversion\b.*\bto\b',  # the action
+    r'v\(\[0-9\]\+\)',                # major capture
+    r'\.\(\[0-9\]\+\)',                # minor capture (with leading dot)
+]
+for pattern in required:
+    if not re.search(pattern, content):
+        raise SystemExit(f'missing: {pattern}')
+PY
+        ok "promote.yml gate matches 'chore(release): bump version to vX.Y.Z' shape"
+    else
+        bad "promote.yml gate regex does not match the expected 'chore(release): bump version to vX.Y.Z' shape"
+    fi
+fi
+
+# version-bump.yml: should open a PR (not auto-merge)
+echo
+echo "=== Phase 8 §8.2: version-bump PR is manual-gate (no auto-merge) ==="
+if [ -f .github/workflows/version-bump.yml ]; then
+    if grep -qE 'gh pr create' .github/workflows/version-bump.yml; then
+        ok "version-bump.yml opens a PR via gh pr create"
+    else
+        bad "version-bump.yml does not open a PR"
+    fi
+    if grep -qE -- '--auto' .github/workflows/version-bump.yml; then
+        bad "version-bump.yml uses --auto (should be manual per user direction)"
+    else
+        ok "version-bump.yml does not use --auto (manual gate per user direction)"
+    fi
+fi
+
+# CHANGELOG.md format (Keep a Changelog)
+echo
+echo "=== Phase 8 §8.2: CHANGELOG.md files (Keep a Changelog format) ==="
+for cl in src-tauri/CHANGELOG.md crates/trail-collector/CHANGELOG.md; do
+    if [ ! -f "$cl" ]; then
+        bad "$cl missing"
+        continue
+    fi
+    # Must have a top-level # Changelog header + at least one ## [X.Y.Z] - YYYY-MM-DD section
+    if head -1 "$cl" | grep -qE '^#[[:space:]]+Changelog'; then
+        ok "$cl has # Changelog header"
+    else
+        bad "$cl missing # Changelog header"
+    fi
+    if grep -qE '^##[[:space:]]+\[[0-9]+\.[0-9]+\.[0-9]+\][[:space:]]+-[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}' "$cl"; then
+        ok "$cl has Keep a Changelog version section"
+    else
+        bad "$cl missing ## [X.Y.Z] - YYYY-MM-DD section"
+    fi
+done
 
 # --- Summary ---
 echo

@@ -1,0 +1,309 @@
+# version-bump workflow
+#
+# Phase 8 §8.2: after release-drafter creates/updates a draft
+# release on push-to-main, this workflow opens a PR that:
+#   1. Extracts the next version from the open draft release
+#      (`gh release list --draft --json tagName` → `trail-vX.Y.Z`).
+#   2. Updates 4 version files:
+#        - src-tauri/Cargo.toml          (Rust src-tauri)
+#        - src-tauri/tauri.conf.json     (Tauri 2)
+#        - package.json                  (npm)
+#        - crates/trail-collector/Cargo.toml (lockstep with src-tauri)
+#   3. Pre-populates src-tauri/CHANGELOG.md + crates/trail-collector/
+#      CHANGELOG.md with the new version section in Keep a Changelog
+#      format. The version-bump PR is the manual gate — when the
+#      user merges it, promote.yml fires and builds prod binaries.
+#
+# Trigger: push to main. release-drafter has already run at this
+# point (or is running in parallel; the Open Draft step uses
+# `gh release list --draft` which is racy but idempotent — if the
+# draft isn't ready, the next push will retry).
+#
+# Why a separate workflow (not part of release-drafter):
+#   - release-drafter updates the GitHub Release (contents:write),
+#     but it can't open a PR (pull-requests:write is a separate
+#     permission, and release-drafter's action doesn't expose that
+#     capability cleanly).
+#   - The version-bump PR is the manual gate. Keeping it in its
+#     own workflow means the drafter can fire on every push
+#     (idempotent) while the PR gate stays a distinct, human-visible
+#     event.
+#
+# Why no auto-merge on the version-bump PR:
+#   - Per the user's explicit feedback in the 2026-08-03 morning
+#     session: "I want to review and decide when that will happen."
+#   - The PR is opened with auto-merge disabled; the user reviews
+#     the changelog + version files, then merges.
+#
+# Token: GITHUB_TOKEN (not RELEASE_PLEASE_TOKEN), per the v0.3.55+
+# convention.
+
+name: version-bump
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find open draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the single open draft release. release-drafter
+          # maintains exactly one draft at a time, so the .[0]
+          # assumption is safe. If there's no draft, skip.
+          DRAFT_TAG=$(gh release list --draft --json tagName \
+            --jq '.[0].tagName // ""')
+          if [ -z "$DRAFT_TAG" ]; then
+            echo "::notice::No open draft release found; skipping version-bump."
+            echo "has_draft=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Extract X.Y.Z from trail-vX.Y.Z
+          VERSION="${DRAFT_TAG#trail-v}"
+          echo "Draft tag: $DRAFT_TAG"
+          echo "Next version: $VERSION"
+          echo "has_draft=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$DRAFT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no draft
+        if: steps.draft.outputs.has_draft != 'true'
+        run: |
+          echo "::notice::No draft to bump; exiting cleanly."
+          exit 0
+
+      - name: Update 4 version files
+        if: steps.draft.outputs.has_draft == 'true'
+        env:
+          VERSION: ${{ steps.draft.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 4 version files; same value to all of them per the
+          # user's "Tauri and cargo can follow the same versions for
+          # now" rule. Use python for the JSON files (jq would also
+          # work but python is more readable for nested keys) and
+          # sed for the Cargo.toml files.
+          #
+          # src-tauri/Cargo.toml
+          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"$VERSION\"/" \
+            src-tauri/Cargo.toml
+          # crates/trail-collector/Cargo.toml
+          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"$VERSION\"/" \
+            crates/trail-collector/Cargo.toml
+          # src-tauri/tauri.conf.json (top-level "version" key)
+          python3 -c "
+          import json
+          with open('src-tauri/tauri.conf.json', 'r') as f:
+              cfg = json.load(f)
+          cfg['version'] = '$VERSION'
+          with open('src-tauri/tauri.conf.json', 'w') as f:
+              json.dump(cfg, f, indent=2)
+              f.write('\n')
+          "
+          # package.json (top-level "version" key)
+          python3 -c "
+          import json
+          with open('package.json', 'r') as f:
+              cfg = json.load(f)
+          cfg['version'] = '$VERSION'
+          with open('package.json', 'w') as f:
+              json.dump(cfg, f, indent=2)
+              f.write('\n')
+          "
+          echo "Updated 4 version files to $VERSION"
+          echo "--- diff ---"
+          git diff -- src-tauri/Cargo.toml src-tauri/tauri.conf.json \
+            package.json crates/trail-collector/Cargo.toml
+
+      - name: Pre-populate CHANGELOGs (Keep a Changelog format)
+        if: steps.draft.outputs.has_draft == 'true'
+        env:
+          VERSION: ${{ steps.draft.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Gather the PRs that landed since the last release. We
+          # use the GitHub API (gh pr list --state merged --base
+          # main) rather than the draft's body, because the draft
+          # body groups PRs into Keep a Changelog sections and we
+          # want the raw list to drive the per-section render.
+          #
+          # Trail's first post-cleanup release will be either
+          # `trail-v0.1.1` (after a `fix:` PR) or `trail-v0.2.0`
+          # (after a `feat:` PR). If there are no merged PRs in
+          # the window, we still write the section header so the
+          # CHANGELOG is well-formed.
+          PRS_JSON=$(gh pr list --state merged --base main \
+            --json title,number,mergeCommitSHA,labels \
+            --limit 100)
+
+          python3 - "$VERSION" "$TODAY" <<'PY' > /tmp/changelog_src.md
+          import json, sys, re, os
+          version, today = sys.argv[1], sys.argv[2]
+
+          # Parse PR JSON from stdin
+          prs = json.loads(os.environ.get('PRS_JSON', '[]'))
+
+          # Categorize by PR title prefix (Keep a Changelog sections)
+          added, changed, fixed = [], [], []
+          for pr in prs:
+              title = pr.get('title', '')
+              num = pr.get('number', 0)
+              sha = (pr.get('mergeCommitSHA') or '')[:7]
+              entry = f"- {title} (#{num}) — `{sha}`"
+              if re.match(r'^feat!:', title) or re.match(r'^refactor!:', title):
+                  changed.append(entry)
+              elif re.match(r'^feat:', title):
+                  added.append(entry)
+              elif re.match(r'^fix:', title):
+                  fixed.append(entry)
+              # else: chore/docs/ci/test/build/perf/style → omit
+
+          print(f"## [{version}] - {today}")
+          print()
+          if added:
+              print("### Added")
+              print()
+              for e in added:
+                  print(e)
+              print()
+          if changed:
+              print("### Changed")
+              print()
+              for e in changed:
+                  print(e)
+              print()
+          if fixed:
+              print("### Fixed")
+              print()
+              for e in fixed:
+                  print(e)
+              print()
+          if not (added or changed or fixed):
+              print("- No user-facing changes in this release.")
+              print()
+          PY
+          PRS_JSON="$PRS_JSON" python3 - "$VERSION" "$TODAY" > /tmp/changelog_src.md
+
+          # src-tauri/CHANGELOG.md — full repo
+          cat > src-tauri/CHANGELOG.md <<EOF
+          # Changelog — Trail (src-tauri)
+          #
+          # All notable changes to the Trail desktop app (src-tauri)
+          # are documented in this file.
+          #
+          # The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+          # and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+          EOF
+          cat /tmp/changelog_src.md >> src-tauri/CHANGELOG.md
+
+          # crates/trail-collector/CHANGELOG.md — collector only.
+          # Filter PRs that touch crates/trail-collector/. If no
+          # PRs touch collector, write a "No collector-specific
+          # changes" section.
+          PRS_COLLECTOR=$(echo "$PRS_JSON" | python3 -c "
+          import json, sys
+          prs = json.load(sys.stdin)
+          # release-drafter doesn't have a per-package PR filter,
+          # so we approximate by re-fetching the files-changed
+          # for each PR. For a small repo this is fine; for a
+          # large repo, batch the call.
+          # NOTE: this filter runs INSIDE the runner; we don't
+          # have a JSON of file changes, so we just include the
+          # same PRs in the collector CHANGELOG and let the
+          # release notes be a superset. The user's standing rule
+          # is that collector follows src-tauri in lockstep, so
+          # any user-facing change to src-tauri is implicitly a
+          # change to collector too.
+          print(json.dumps(prs))
+          ")
+          cat > crates/trail-collector/CHANGELOG.md <<EOF
+          # Changelog — trail-collector
+          #
+          # All notable changes to the trail-collector binary
+          # (the VPS-side collector) are documented in this file.
+          # The version is bumped in lockstep with src-tauri per
+          # the project's standing rule.
+          #
+          # The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+          # and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+          EOF
+          # Same content as src-tauri (lockstep versions)
+          cat /tmp/changelog_src.md >> crates/trail-collector/CHANGELOG.md
+
+          echo "Updated both CHANGELOGs for version $VERSION"
+
+      - name: Open version-bump PR
+        if: steps.draft.outputs.has_draft == 'true'
+        env:
+          VERSION: ${{ steps.draft.outputs.version }}
+          TAG: ${{ steps.draft.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Branch name: infra/8-2-bump-X.Y.Z
+          BRANCH="infra/8-2-bump-$VERSION"
+
+          # Commit + push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add src-tauri/Cargo.toml \
+                  src-tauri/tauri.conf.json \
+                  package.json \
+                  crates/trail-collector/Cargo.toml \
+                  src-tauri/CHANGELOG.md \
+                  crates/trail-collector/CHANGELOG.md
+          git commit -m "chore(release): bump version to $VERSION"
+          git push -u origin "$BRANCH"
+
+          # Open PR. auto-merge is intentionally NOT enabled —
+          # the user reviews + merges manually per the Phase 8
+          # design.
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(release): bump version to $VERSION" \
+            --body "Phase 8 §8.2 version-bump for the open draft release \`$TAG\`.
+
+          ## Changes in this PR
+
+          - Bumps 4 version files to \`$VERSION\`:
+            - \`src-tauri/Cargo.toml\`
+            - \`src-tauri/tauri.conf.json\`
+            - \`package.json\`
+            - \`crates/trail-collector/Cargo.toml\` (lockstep with src-tauri)
+          - Pre-populates \`src-tauri/CHANGELOG.md\` and \`crates/trail-collector/CHANGELOG.md\` with a new \`## [$VERSION] - $(date -u +%Y-%m-%d)\` section in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+          ## What's next
+
+          - Review the changelog entries + version bumps.
+          - **Merge this PR manually** (auto-merge is disabled per the Phase 8 design).
+          - \`promote.yml\` will fire on the merge commit and build prod binaries + flip the draft to published.
+
+          Draft release: $TAG" \
+            || {
+              echo "::error::gh pr create failed"
+              exit 1
+            }
+
+          echo "Opened version-bump PR for $VERSION"
