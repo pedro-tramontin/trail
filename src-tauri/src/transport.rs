@@ -131,12 +131,19 @@ impl Transport for SshTransport {
         // and we cannot hold a borrow across `spawn_blocking`.
         let host = self.host.clone();
         let port = self.port;
+        // `user` and `pem` are only used inside the unix-gated
+        // `userauth_pubkey_memory` call below (Windows builds use the
+        // password-only path or bail out early with the "pubkey-in-memory
+        // auth requires unix" error). Gate them with `#[cfg(unix)]` to
+        // silence the Windows-only "unused variable" warnings.
+        #[cfg(unix)]
         let user = self.user.clone();
+        #[cfg(unix)]
+        let pem = self.load_private_key_pem()?;
         let auth = self.auth.clone();
         let remote_path = self.remote_path.clone();
         let remote_name = remote_name.to_string();
         let payload = payload.to_vec();
-        let pem = self.load_private_key_pem()?;
 
         tokio::task::spawn_blocking(move || -> Result<(), TransportError> {
             use ssh2::Session;
@@ -199,7 +206,14 @@ impl Transport for SshTransport {
     async fn health_check(&self) -> Result<(), TransportError> {
         let host = self.host.clone();
         let port = self.port;
+        // `user` and `pem` are only used inside the unix-gated
+        // `userauth_pubkey_memory` call below (Windows builds bail out
+        // early with the "pubkey-in-memory auth requires unix" error).
+        // Gate them with `#[cfg(unix)]` to silence the Windows-only
+        // "unused variable" warnings.
+        #[cfg(unix)]
         let user = self.user.clone();
+        #[cfg(unix)]
         let pem = self.load_private_key_pem()?;
 
         tokio::task::spawn_blocking(move || -> Result<(), TransportError> {
@@ -219,16 +233,16 @@ impl Transport for SshTransport {
             {
                 sess.userauth_pubkey_memory(&user, None, &pem, None)
                     .map_err(|e| TransportError::Ssh(format!("pubkey auth: {e}")))?;
+                // If we got here, the connection + auth work. health_check
+                // is a liveness probe, not a full round-trip — no file push.
+                Ok(())
             }
             #[cfg(not(unix))]
             {
-                return Err(TransportError::Ssh(
+                Err(TransportError::Ssh(
                     "pubkey-in-memory auth requires unix in v1; Windows builds are not supported yet".into(),
-                ));
+                ))
             }
-            // If we got here, the connection + auth work. health_check is a
-            // liveness probe, not a full round-trip — no file push.
-            Ok(())
         })
         .await
         .map_err(|e| TransportError::Ssh(format!("join: {e}")))?
