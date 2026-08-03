@@ -235,7 +235,6 @@ mod macos {
 
     use super::MicPermissionState;
     use block2::RcBlock;
-    use objc2::runtime::AnyClass;
     use objc2::{class, msg_send};
     use parking_lot::Mutex;
     use std::sync::Arc;
