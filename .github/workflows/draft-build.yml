@@ -230,35 +230,14 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      # CRITICAL: the release.yml sets `signingIdentity` to
-      # `"${APPLE_SIGNING_IDENTITY}"` (a template that resolves to
-      # the literal string `${APPLE_SIGNING_IDENTITY}` on draft
-      # builds because the Apple secrets are not exposed to PRs,
-      # and Tauri's env-var substitution requires the var to be
-      # `export`ed, not just present in `$GITHUB_ENV`). The literal
-      # placeholder string fails `codesign --sign` with
-      # `no identity found`. The fix is the same one release.yml
-      # uses (lines 204-229): set `signingIdentity` to `null`
-      # (not `""`) — Tauri 2 treats an empty string as "use the
-      # default keychain identity" and runs codesign anyway (which
-      # fails on a runner with no keychain identities), while
-      # `null` is the documented "do not sign" sentinel and skips
-      # the codesign step entirely. This is always correct for a
-      # draft build — PRs never get the Apple secrets, so codesign
-      # must always be disabled here.
-      - name: Disable codesign for unsigned draft build
-        run: |
-          sed -i.bak \
-            's|"signingIdentity": "${APPLE_SIGNING_IDENTITY}"|"signingIdentity": null|' \
-            src-tauri/tauri.conf.json
-          rm src-tauri/tauri.conf.json.bak
-          grep -A1 signingIdentity src-tauri/tauri.conf.json
-
       - name: Build Tauri debug bundle (macOS, aarch64)
         # `--target aarch64-apple-darwin` keeps the build
         # single-arch for the draft — the release.yml does the
         # universal binary merge separately. `--debug` skips
-        # LTO + the universal-merge step.
+        # LTO + the universal-merge step. Trail is unsigned by
+        # design (PR B stripped the Apple signing code), so
+        # tauri.conf.json's bundle.macOS is `{}` and Tauri
+        # produces an unsigned .app + .dmg.
         run: pnpm tauri build --debug --target aarch64-apple-darwin
 
       - name: Upload macOS draft artifact
