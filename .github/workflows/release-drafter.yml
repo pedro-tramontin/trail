@@ -1,0 +1,43 @@
+# release-drafter workflow
+#
+# Runs on every push to main. The action reads merged PRs since
+# the last release, applies the version-resolver from
+# .github/release-drafter.yml, and updates the open draft release
+# (creating one if none exists).
+#
+# Trigger: push to main only. PR pushes (draft_build, draft PRs)
+# are ignored — the draft is recomputed on merge to main.
+#
+# Permissions:
+#   - contents: write    — to create/update the draft release
+#   - pull-requests: read — to enumerate merged PRs
+#
+# Token: GITHUB_TOKEN (not RELEASE_PLEASE_TOKEN). Per Pitfall #86
+# (v0.3.55) the v0.3.55+ convention is to use GITHUB_TOKEN for
+# everything except the Tauri signing secret, which Trail doesn't
+# need (Trail is unsigned by design).
+
+name: release-drafter
+
+on:
+  push:
+    branches:
+      - main
+  # Allow manual re-runs from the Actions UI when the drafter
+  # misses a PR or gets out of sync. workflow_dispatch doesn't
+  # need any inputs.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update_release_draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update draft release
+        uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
