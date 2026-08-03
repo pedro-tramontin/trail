@@ -1,4 +1,4 @@
 {
-  "src-tauri": "0.4.2",
-  "trail-app": "0.1.0"
+  "src-tauri": "0.4.3",
+  "crates/trail-collector": "0.1.0"
 }

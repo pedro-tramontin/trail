@@ -9,6 +9,15 @@
       "bump-minor-for-minor-pre-major": false,
       "changelog-path": "CHANGELOG.md",
       "pull-request-title-pattern": "release: v${version}"
+    },
+    "crates/trail-collector": {
+      "component": "trail-collector",
+      "package-name": "trail-collector",
+      "release-type": "rust",
+      "bump-patch-for-minor-pre-major": true,
+      "bump-minor-for-minor-pre-major": false,
+      "changelog-path": "CHANGELOG.md",
+      "pull-request-title-pattern": "release(collector): v${version}"
     }
   },
   "extra-files": [
