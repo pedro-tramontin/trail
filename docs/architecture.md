@@ -1,13 +1,13 @@
 # Architecture
 
 Trail is a single-user daily-capture tool that lives on two machines: a macOS laptop
-running a Tauri 2 menu-bar app, and a Linux VPS running a small Rust collector. The
+running a Tauri 2 tray-icon app with auto-pop windows, and a Linux VPS running a small Rust collector. The
 two halves communicate over SSH with a keypair stored in the macOS Keychain. All
 summarization happens on the laptop; only the user-approved JSON crosses the network.
 
 This document is the canonical design overview. For the threat-model controls, see
 [`security.md`](security.md). For the release process, see the
-[release-please config](../release-please-config.json) and
+[release-drafter config](../.github/release-drafter.yml) and
 [`.github/workflows/`](../.github/workflows/).
 
 ## Crate layout
@@ -16,7 +16,7 @@ The repository is a Cargo workspace with three members.
 
 | Crate | Purpose |
 |---|---|
-| `src-tauri` | Tauri 2 menu-bar app (`trail_lib`). The only user-facing surface. Owns the `TrayIcon`, the Svelte 5 UI, the IPC command surface, the local summarizer (via `ollama`), the voice capture, and the SSH transport. |
+| `src-tauri` | Tauri 2 tray-icon app with auto-pop windows (`trail_lib`). The only user-facing surface. Owns the `TrayIcon`, the Svelte 5 UI, the IPC command surface, the local summarizer (via `ollama`), the voice capture, and the SSH transport. |
 | `crates/trail-collector` | A single static Rust binary that runs on the VPS. Three CLI modes (`--health`, `--once`, `--validate`) and three collector source kinds (`github`, `claude_sessions`, `calendar`). Bundled into the macOS `.app` via `cargo-bundle`'s `bundled` field (the binary is placed at `src-tauri/resources/trail-collector` so the Tauri install command can scp it to the VPS). |
 | `tests/fixtures/mock-ssh-server` | A tiny mock SSH server used by the install module's unit tests on headless hosts. |
 
