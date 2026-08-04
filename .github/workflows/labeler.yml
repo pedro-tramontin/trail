@@ -78,14 +78,22 @@ jobs:
           # parens, which JSON requires escaping. The .py form
           # lets the regex read naturally and gives us a `match()`
           # helper to share.
-          RULES_COUNT=$(python3 -c "
-          import sys
-          sys.path.insert(0, '.github')
-          import label_rules
-          print(len(label_rules.RULES))
+          # Read label-rules.py as a module. We use importlib
+          # (spec_from_file_location) instead of plain
+          # `import label_rules` because .github/ has no
+          # __init__.py and isn't a package on the import path;
+          # `sys.path.insert + import` fails with ModuleNotFoundError
+          # on ubuntu-latest runners even though the file is
+          # present. importlib bypasses the package machinery.
+          RULE_COUNT=$(python3 -c "
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          print(len(mod.RULES))
           ")
           echo "rules_module=.github/label-rules.py" >> "$GITHUB_OUTPUT"
-          echo "Loaded $RULES_COUNT label rules from label-rules.py"
+          echo "Loaded $RULE_COUNT label rules from label-rules.py"
 
       - name: Ensure labels exist on the repo
         env:
@@ -101,9 +109,10 @@ jobs:
           # config's convention: red for breaking, blue for
           # features, green for docs, etc.
           python3 -c "
-          import sys
-          sys.path.insert(0, '.github')
-          import label_rules
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
           # Reasonable default colors + descriptions for the
           # common Conventional Commits types. Anything not in this
           # map gets a neutral grey + the bare label name.
@@ -120,7 +129,7 @@ jobs:
             'type: build':    ('5319e7', 'Build system or external dependency change'),
             'type: style':    ('ededed', 'Formatting / whitespace only'),
           }
-          for label, _pattern in label_rules.RULES:
+          for label, _pattern in mod.RULES:
               color, desc = palette.get(label, ('ededed', label))
               print(f'{label}|{color}|{desc}')
           " | while IFS='|' read -r label color desc; do
@@ -149,10 +158,11 @@ jobs:
           #    job in draft-build.yml will fail the PR with a
           #    helpful "title doesn't match any known prefix" error.
           MATCHED_LABEL=$(python3 -c "
-          import sys
-          sys.path.insert(0, '.github')
-          import label_rules
-          print(label_rules.match(sys.argv[1]) or '')
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          print(mod.match(sys.argv[1]) or '')
           " "$PR_TITLE" 2>/dev/null || true)
 
           if [ -n "$MATCHED_LABEL" ]; then

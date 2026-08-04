@@ -144,10 +144,18 @@ jobs:
           # title SHOULD have, then compares to /tmp/pr_labels.txt.
           # Exits non-zero with a clear error if any check fails.
           python3 - <<'PY'
-          import sys, os
-          sys.path.insert(0, '.github')
-          import label_rules
+          import sys, os, importlib.util
           from pathlib import Path
+          # Load label_rules via importlib because .github/ has no
+          # __init__.py and isn't a package; the standard
+          # `sys.path.insert + import` pattern fails with
+          # ModuleNotFoundError on ubuntu-latest runners even when
+          # the file is present. importlib bypasses the package
+          # machinery.
+          spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          label_rules = mod
 
           title = os.environ['PR_TITLE']
           current_labels = [
