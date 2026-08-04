@@ -7,7 +7,7 @@
 #
 # Flow:
 #   1. PR opened / edited / reopened / synchronized
-#   2. labeler.yml reads .github/label-rules.json (the single
+#   2. labeler.yml reads .github/label-rules.py (the single
 #      source of truth for title->label mapping)
 #   3. Each rule's `title_regex` is tested against the PR title;
 #      the first match wins (rules are ordered most-specific first,
@@ -145,9 +145,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          # 1. Read label-rules.json
+          # 1. Read label-rules.py
           # 2. Test each rule's title_regex against $PR_TITLE in
-          #    declared order (first match wins - rules.json is
+          #    declared order (first match wins - RULES is
           #    ordered most-specific first so `feat!:` matches
           #    `type: breaking` before `feat:` matches
           #    `type: feature`).
@@ -157,13 +157,36 @@ jobs:
           # 4. If no match: don't add anything; the pr-label-check
           #    job in draft-build.yml will fail the PR with a
           #    helpful "title doesn't match any known prefix" error.
-          MATCHED_LABEL=$(python3 -c "
-          import importlib.util
+          # Use env var to pass PR_TITLE rather than sys.argv,
+          # so we don't have to worry about shell quoting issues
+          # with special characters in the title (colons, parens,
+          # etc). The `import sys` below is needed for the
+          # `sys.exit()` call when the label is missing.
+          # BUGFIX 2026-08-04: previously the heredoc used
+          # `print(mod.match(sys.argv[1]) or '')` without an
+          # `import sys`, so the python step raised
+          # NameError silently (2>/dev/null || true), MATCHED_LABEL
+          # ended up empty, and the labeler "succeeded" without
+          # applying any label. Switched to env var + import sys
+          # to make the error visible.
+          MATCHED_LABEL=$(PR_TITLE="$PR_TITLE" python3 -c "
+          import importlib.util, os, sys
           spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
           mod = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(mod)
-          print(mod.match(sys.argv[1]) or '')
-          " "$PR_TITLE" 2>/dev/null || true)
+          result = mod.match(os.environ['PR_TITLE'])
+          if result is None:
+              sys.exit(2)  # distinct exit so the outer || true can tell
+          print(result)
+          " "$PR_TITLE" 2>&1) || {
+            rc=$?
+            if [ $rc -eq 2 ]; then
+              : # no match - handled below
+            else
+              echo "::error::labeler python step failed (exit $rc): $MATCHED_LABEL"
+              exit 1
+            fi
+          }
 
           if [ -n "$MATCHED_LABEL" ]; then
             echo "Title '$PR_TITLE' matched label: $MATCHED_LABEL"
@@ -187,7 +210,7 @@ jobs:
               fi
             done
           else
-            echo "::notice::Title '$PR_TITLE' didn't match any rule in label-rules.json."
+            echo "::notice::Title '$PR_TITLE' didn't match any rule in label-rules.py."
             echo "::notice::pr-label-check in draft-build.yml will fail this PR."
             echo "::notice::Expected: feat: | fix: | feat!: | chore: | docs: | etc."
           fi

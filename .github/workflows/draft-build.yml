@@ -95,7 +95,7 @@ jobs:
     #
     # What it checks:
     #   1. PR title matches at least one rule in
-    #      .github/label-rules.json (i.e. starts with a known
+    #      .github/label-rules.py (i.e. starts with a known
     #      Conventional Commits prefix).
     #   2. The PR has exactly one `type: *` label.
     #   3. The single `type: *` label is the one the title would
@@ -140,7 +140,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # Pure-Python validation - no API calls. Reads
-          # .github/label-rules.json, computes what label the
+          # .github/label-rules.py, computes what label the
           # title SHOULD have, then compares to /tmp/pr_labels.txt.
           # Exits non-zero with a clear error if any check fails.
           python3 - <<'PY'
