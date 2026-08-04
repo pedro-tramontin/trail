@@ -104,6 +104,17 @@ impl SshTransport {
     /// against a heap-dump leak of the private key even if the
     /// `keyring 3.x` upstream API returns a plain `String` (which it
     /// does today).
+    ///
+    /// `#[cfg(unix)]` because both call sites (the `push` and the
+    /// `health_check` async fns further down) are gated on unix —
+    /// pubkey-in-memory auth is not implemented for Windows yet
+    /// (see `cfg(not(unix))` branches in `push` returning an
+    /// explicit "Windows pubkey auth is not supported in v1" error).
+    /// Gating the method to match gates the dead-code warning that
+    /// fires on `cargo check --target x86_64-pc-windows-msvc` and
+    /// on the GitHub Actions Windows runner for the promote.yml
+    /// Windows job.
+    #[cfg(unix)]
     fn load_private_key_pem(&self) -> Result<Zeroizing<String>, TransportError> {
         let entry = keyring::Entry::new(
             crate::keyring::KEYCHAIN_SERVICE,
