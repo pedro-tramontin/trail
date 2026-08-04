@@ -23,6 +23,16 @@
 //! assertion: "no config → ConfigState::AwaitingOnboarding →
 //! write config → start_collectors → ConfigState::Ready +
 //! scheduler alive") without the Tauri runtime.
+//!
+//! ## §9.2 — `headless_launch_tray_icon_is_built`
+//!
+//! Phase 9 §9.2 adds a second test that asserts the tray-icon
+//! menu items (the only testable surface of the §9.2
+//! `TrayIconBuilder` wiring without a live Tauri runtime — see
+//! `src/window_bridge.rs` for why). The actual `tray-icon` build
+//! happens inside `lib.rs`'s setup closure, which `mock_app`
+//! can't reach; instead, this test asserts the *content* of the
+//! menu descriptor the setup closure iterates over.
 
 use std::time::Duration;
 
@@ -174,4 +184,114 @@ fn headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write()
         !sched_task.is_finished(),
         "scheduler task should still be alive 500ms after start_collectors"
     );
+}
+
+/// Phase 9 §9.2 — the tray icon's menu items are wired.
+///
+/// The actual `tauri::tray::TrayIconBuilder` call lives inside
+/// `lib.rs`'s `run()` setup closure. The `tauri::test::mock_app`
+/// shim does NOT run the setup closure synchronously (Tauri
+/// 2.11.5 — see the file-level doc above), so this test can't
+/// reach the live `TrayIconBuilder::build(app)?` site. Instead
+/// it asserts the *content* of the menu items slice the setup
+/// closure iterates over (`MAIN_TRAY_MENU_ITEMS` in
+/// `src/window_bridge.rs`).
+///
+/// What this test catches:
+/// - A regression that drops the "show" id (the user would have
+///   no way to bring up the main window from the menu-bar icon).
+/// - A regression that drops the "quit" id (the user would have
+///   no way to exit the menu-bar app).
+/// - A regression that re-orders the items (macOS menu-bar
+///   convention is "actions first, Quit last").
+/// - A regression that introduces a duplicate id (the
+///   `on_menu_event` closure's `_ => {}` arm would silently
+///   swallow the second occurrence).
+///
+/// What this test does NOT cover (would need a live Tauri
+/// runtime + a real platform menu-bar to assert):
+/// - The `TrayIconBuilder::with_id("main-tray")` call site
+///   actually executes (a missing call would be a clear
+///   regression caught by `cargo build` since the setup closure
+///   wouldn't type-check).
+/// - The left-click → show-main-window handler fires correctly.
+/// - The `app.exit(0)` quit handler actually terminates the
+///   process.
+#[test]
+fn headless_launch_tray_icon_is_built() {
+    // The setup closure iterates over MAIN_TRAY_MENU_ITEMS in
+    // slice order to build the `tauri::menu::Menu`. If this slice
+    // is empty, the menu has no items, and the right-click
+    // affordance is broken. This is the load-bearing assertion
+    // for the §9.2 visibility contract.
+    assert!(
+        !trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS.is_empty(),
+        "MAIN_TRAY_MENU_ITEMS must have at least one item — the tray menu is the only way to interact with the menu-bar app on macOS"
+    );
+
+    // Every item must have a non-empty id (the on_menu_event
+    // closure matches on it) and a non-empty label (the menu
+    // builder renders it).
+    for item in trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS {
+        assert!(
+            !item.id.is_empty(),
+            "tray menu item id must not be empty: {:?}",
+            item
+        );
+        assert!(
+            !item.label.is_empty(),
+            "tray menu item label must not be empty: {:?}",
+            item
+        );
+    }
+
+    // The "show" id is the entry point — the user clicks it to
+    // surface the main window. Without it, the menu-bar app has
+    // no path to the main shell.
+    assert!(
+        trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS
+            .iter()
+            .any(|item| item.id == "show" && item.label == "Show Trail"),
+        "MAIN_TRAY_MENU_ITEMS must include a 'show' / 'Show Trail' entry — that's the user-visible entry point to the main window"
+    );
+
+    // The "quit" id is the exit affordance. Without it, the
+    // user has no way to terminate the menu-bar app from the UI
+    // (Cmd+Q would still work, but menu-bar apps are typically
+    // killed via the tray menu, not the macOS app menu).
+    assert!(
+        trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS
+            .iter()
+            .any(|item| item.id == "quit" && item.label == "Quit Trail"),
+        "MAIN_TRAY_MENU_ITEMS must include a 'quit' / 'Quit Trail' entry — the menu-bar app has no other visible Quit affordance on macOS"
+    );
+
+    // Render order = slice order; "show" must come before "quit"
+    // (macOS menu-bar convention is action items first, then a
+    // separator, then Quit at the bottom).
+    let show_pos = trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS
+        .iter()
+        .position(|item| item.id == "show")
+        .expect("'show' item is asserted above");
+    let quit_pos = trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS
+        .iter()
+        .position(|item| item.id == "quit")
+        .expect("'quit' item is asserted above");
+    assert!(
+        show_pos < quit_pos,
+        "'show' must render before 'quit' in the tray menu (show_pos={}, quit_pos={})",
+        show_pos,
+        quit_pos
+    );
+
+    // Unique ids (the on_menu_event closure's match arm would
+    // silently swallow the second occurrence of a duplicate).
+    let mut seen = std::collections::HashSet::new();
+    for item in trail_lib::window_bridge::MAIN_TRAY_MENU_ITEMS {
+        assert!(
+            seen.insert(item.id),
+            "duplicate tray menu item id: {:?}",
+            item.id
+        );
+    }
 }
