@@ -1,13 +1,13 @@
 # release-drafter configuration
 #
-# Trail's new release pipeline (Phase 8 §8.2): release-drafter reads
-# merged PR titles and decides the next version + drafts the changelog
-# body. The next version is computed as a single cumulative bump
-# from the latest published release (not a per-PR bump). The draft
-# accumulates PRs in its body until the user merges the
+# Trail's release pipeline (Phase 8 §8.2): release-drafter reads merged
+# PR titles and decides the next version + drafts the changelog body.
+# The next version is computed as a single cumulative bump from the
+# latest published release (not a per-PR bump). The draft accumulates
+# PRs in its body until the user merges the
 # `chore(release): bump version to vX.Y.Z` PR that version-bump.yml
-# opens. promote.yml then builds prod binaries, attaches them to
-# the (still draft) release, and flips the draft → published.
+# opens. promote.yml then builds prod binaries, attaches them to the
+# (still draft) release, and flips the draft → published.
 #
 # release-drafter emits ONE draft release per push to main. The
 # tag prefix is `trail-v` (src-tauri is the primary component). The
@@ -16,11 +16,10 @@
 # follow the same versions for now"), so a single `trail-vX.Y.Z`
 # release covers both.
 #
-# Version-resolver (no labels — PR title prefix is the source of truth):
-#   feat!:/fix!:/refactor!:/chore!:/ci!:/build!:/perf!:/style!:/docs!:/test!:
-#     → major
-#   feat: → minor
-#   fix:  → patch
+# Version-resolver (PR title prefix is the source of truth):
+#   feat!:/fix!:/refactor!: → major
+#   feat:                    → minor
+#   fix:                     → patch
 #   chore:/docs:/ci:/test:/build:/refactor:/perf:/style: → no bump
 #
 # Categorization (Keep a Changelog section names):
@@ -28,47 +27,53 @@
 #   feat!:/refactor!: → "Changed"
 #   fix:              → "Fixed"
 #   chore:/docs:/ci:/test:/build:/perf:/style: → omit (not user-facing)
+#
+# Implementation note (v6 schema):
+# We use the v6 `when: conventional:` filter shape (see
+# https://github.com/release-drafter/release-drafter/blob/master/.github/release-drafter.yml)
+# instead of the legacy `keywords:` + `version-resolver` blocks. v6
+# requires every named category to have a `when:` filter (an empty
+# category with no `when:` and no `label:` is rejected at config
+# validation with "Multiple categories detected with no labels").
+# The `exclusive: true` flag means a PR matching this category's
+# conventional prefix is bucketed here and not re-evaluated against
+# later categories — so `feat!:` doesn't accidentally also match
+# `feat:`.
+#
+# v0.3.55 history: the original config (Phase 8 §8.2 #102) used the
+# legacy `keywords:` shape and shipped an empty `category-defaults`
+# block as a "drop uncategorized PRs" fallback. That tripped the v6
+# schema validator ("Only one category with no labels is supported
+# for uncategorized pull requests") and the workflow failed at parse
+# time. The smoke test on #103 caught this — release-drafter run
+# 30880664416 failed with `Error: Invalid config file`. Fixed by
+# porting to the v6 `when: conventional:` shape and dropping the
+# category-defaults (v6 drops uncategorized PRs by default when no
+# `category-defaults` is defined, which is what we want for the
+# chore:/docs:/ci:/test:/build:/perf:/style: prefixes).
 
-tag-prefix: "trail-v"
-
-version-resolver:
-  major:
-    labels: []
-    keywords:
-      - "feat!:"
-      - "fix!:"
-      - "refactor!:"
-      - "chore!:"
-      - "ci!:"
-      - "build!:"
-      - "perf!:"
-      - "style!:"
-      - "docs!:"
-      - "test!:"
-  minor:
-    labels: []
-    keywords:
-      - "feat:"
-  patch:
-    labels: []
-    keywords:
-      - "fix:"
-  default: patch
+name-template: "trail-v$RESOLVED_VERSION"
+tag-template: "trail-v$RESOLVED_VERSION"
 
 categories:
-  - title: "Added"
-    labels: []
-    keywords:
-      - "feat:"
   - title: "Changed"
-    labels: []
-    keywords:
-      - "feat!:"
-      - "refactor!:"
+    semver-increment: "major"
+    exclusive: true
+    when:
+      conventional:
+        breaking: true
+  - title: "Added"
+    semver-increment: "minor"
+    exclusive: true
+    when:
+      conventional:
+        type: "feat"
   - title: "Fixed"
-    labels: []
-    keywords:
-      - "fix:"
+    semver-increment: "patch"
+    exclusive: true
+    when:
+      conventional:
+        type: "fix"
 
 change-template: "- $TITLE (#$NUMBER) — `$COMMIT_SHA`"
 no-changes-template: "- No changes"
@@ -83,12 +88,3 @@ template: |
 exclude-labels:
   - "skip-changelog"
   - "autorelease: pending"
-
-# PRs whose title prefix doesn't match a category (chore:, docs:,
-# ci:, test:, build:, perf:, style:) are silently dropped from the
-# changelog body. release-drafter v6 requires either an explicit
-# category or a "default" category; we give it an empty-title
-# default that produces no output.
-category-defaults:
-  - title: ""
-    labels: []
