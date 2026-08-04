@@ -35,3 +35,9 @@ src-tauri/resources/day-summary.schema.json
 src-tauri/resources/github.schema.json
 src-tauri/resources/claude_sessions.schema.json
 src-tauri/resources/calendar.schema.json
+
+# Phase 9 §9.3 — cargo test scratch dir created by the
+# `headless_launch_*` integration tests (the `tempfile::tempdir`
+# helper in Tauri 2's test framework writes here, not to the
+# system tempdir, on some platforms). Per §5b D8, never commit.
+src-tauri/.local/
