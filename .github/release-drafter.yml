@@ -82,7 +82,7 @@ version-resolver:
       - "type: style"
   default: patch
 
-change-template: "- $TITLE (#$NUMBER) — `$COMMIT_SHA`"
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
 no-changes-template: "- No changes"
 
 template: |
