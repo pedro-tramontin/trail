@@ -162,12 +162,17 @@ jobs:
           # this is effectively a no-op except for documenting intent.
           releaseDraft: true
           prerelease: false
-          # Mirror promote.yml's prod args exactly, with --debug
-          # prepended. `--bundles` controls Tauri 2's output bundle
-          # types; the same names (deb, appimage) → same filenames
-          # (Trail_X.Y.Z_amd64.deb, .AppImage) → tauri-action's
-          # upload-by-name replaces the existing assets.
-          args: --debug --bundles deb,appimage
+          # Mirror promote.yml's prod args exactly. `--bundles`
+          # controls Tauri 2's output bundle types; the same names
+          # (deb, appimage) → same filenames (Trail_X.Y.Z_amd64.deb,
+          # .AppImage) → tauri-action's upload-by-name replaces the
+          # existing assets.
+          # NB: do NOT add `--debug` here — tauri-action's
+          # `includeDebug: true` below already injects it. Passing
+          # both produces a duplicated `--debug` flag that clap
+          # rejects with "the argument '--debug' cannot be used
+          # multiple times."
+          args: --bundles deb,appimage
           # tauri-action defaults `includeRelease: true, includeDebug:
           # false`, so without these overrides it scans `release/`
           # for artifacts and finds nothing (the `--debug` build
@@ -215,10 +220,12 @@ jobs:
           releaseBody: "**Pre-release debug build (macOS ad-hoc signed with '$DEVELOPER_NAME').** See CHANGELOG.md for change log; right-click → Open to bypass Gatekeeper on first launch (unsigned Developer-ID limit)."
           releaseDraft: true
           prerelease: false
-          # Mirror promote.yml's macOS prod args + --debug. `--target
+          # Mirror promote.yml's macOS prod args. `--target
           # aarch64-apple-darwin` produces .dmg + .app.tar.gz (the 2
           # binaries we saw on trail-v0.2.0's release).
-          args: --debug --target aarch64-apple-darwin
+          # NB: do NOT add `--debug` here — `includeDebug: true`
+          # below already injects it (clap rejects duplicates).
+          args: --target aarch64-apple-darwin
           # tauri-action defaults `includeRelease: true, includeDebug:
           # false`, so without these overrides it scans `release/`
           # for artifacts and finds nothing (the `--debug` build
@@ -295,8 +302,10 @@ jobs:
           releaseBody: "**Pre-release debug build (Windows).** See CHANGELOG.md for change log."
           releaseDraft: true
           prerelease: false
-          # Mirror promote.yml's Windows prod args + --debug.
-          args: --debug --target x86_64-pc-windows-msvc --bundles nsis,msi
+          # Mirror promote.yml's Windows prod args.
+          # NB: do NOT add `--debug` here — `includeDebug: true`
+          # below already injects it (clap rejects duplicates).
+          args: --target x86_64-pc-windows-msvc --bundles nsis,msi
           # tauri-action defaults `includeRelease: true, includeDebug:
           # false`, so without these overrides it scans `release/`
           # for artifacts and finds nothing (the `--debug` build
