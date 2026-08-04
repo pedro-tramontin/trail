@@ -32,6 +32,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to promote (e.g. trail-v0.1.1). If blank, derive from the most recent version-bump commit.'
+        required: false
+        type: string
 
 permissions:
   contents: write
