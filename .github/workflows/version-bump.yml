@@ -327,7 +327,20 @@ jobs:
                   src-tauri/CHANGELOG.md \
                   crates/trail-collector/CHANGELOG.md
           git commit -m "chore(release): bump version to $VERSION"
-          git push -u origin "$BRANCH"
+          # Use --force-with-lease so a stale orphan branch from a
+          # previous failed run (e.g. version-bump.yml's `gh pr
+          # create` failed after pushing the branch, leaving a
+          # non-fast-forward tip) doesn't block the new push.
+          # --force-with-lease only fails if the remote tip is NOT
+          # the expected one (i.e. someone else pushed in
+          # between), which is the correct safety check. Bare
+          # `--force` would silently overwrite legitimate
+          # concurrent pushes; `--force-with-lease` is the
+          # consensus-safe variant. Rationale: failed runs leave
+          # orphans at the exact tip we want to update; legitimate
+          # concurrent pushes would advance the tip in a way
+          # --force-with-lease detects and refuses.
+          git push --force-with-lease -u origin "$BRANCH"
 
           # Open PR. auto-merge is intentionally NOT enabled —
           # the user reviews + merges manually per the Phase 8
