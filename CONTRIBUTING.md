@@ -57,14 +57,16 @@ leave a one-line `// reason:` comment. Reviewers push back on blanket suppressio
    the maintainer's agent) uses `feat/<n>-<slug>` and `fix/<n>-<slug>`.
 2. Commit messages follow the [Conventional Commits](https://www.conventionalcommits.org/)
    spec — `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `build:`,
-   `ci:`. The `feat:` and `fix:` prefixes trigger a release-please PR on the next
-   push to `main`.
+   `ci:`. The `feat:` and `fix:` prefixes are picked up by release-drafter on
+   the next push to `main` (a `feat:` becomes a minor bump, a `fix:` a patch bump,
+   and `feat!:`/`fix!:` a major bump). The breaking-change `!` suffix is the
+   source of truth — release-drafter ignores labels and reads the title prefix.
 3. The PR description should explain **what** changed and **why** (not just the
    diff). If the change is a deviation from a documented plan, call that out in
    the PR body.
-4. All CI jobs must be green: `release-please`, `draft-build`, `release`. If a
-   CI job is failing for an unrelated reason, fix the unrelated thing or wait for
-   it to recover — don't merge with a red check.
+4. All CI jobs must be green: `release-drafter`, `draft-build`, `version-bump`,
+   `release`, `promote`. If a CI job is failing for an unrelated reason, fix the
+   unrelated thing or wait for it to recover — don't merge with a red check.
 5. **Do not push directly to `main`.** Always go through a PR. Direct pushes
    bypass the 5-gate check.
 6. The maintainer merges PRs. For trusted contributors' PRs, the maintainer may
@@ -91,21 +93,33 @@ yes, write it.
 
 ## Release process
 
-Trail uses [release-please](https://github.com/googleapis/release-please) for
-releases. You do not need to cut a release manually — every `feat:` or `fix:` PR
-that lands on `main` triggers a release-please PR, which the maintainer merges
-when ready. The release is cut by the tag push, and the `release.yml` workflow
-builds the binaries (macOS only in v1).
+Trail uses [release-drafter](https://github.com/release-drafter/release-drafter)
+for releases. On every push to `main`, `release-drafter.yml` updates a single
+open **draft** release whose tag is `trail-vX.Y.Z` — the next version is
+computed from the PR title prefix (`feat:` → minor, `fix:` → patch,
+`feat!:`/`fix!:` → major) and the draft body accumulates PR titles grouped
+into Keep a Changelog sections ("Added", "Changed", "Fixed").
 
-If a release-please PR fails to build, the `release.yml` workflow has detailed
-logs in the Actions tab. The common culprits are:
+When the draft is ready, `version-bump.yml` opens a PR that updates the four
+version files (`src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
+`package.json`, `crates/trail-collector/Cargo.toml`) and pre-populates
+`src-tauri/CHANGELOG.md` + `crates/trail-collector/CHANGELOG.md`. The
+maintainer reviews and **merges that PR manually** — merging it triggers
+`promote.yml`, which builds the prod binaries (macOS only in v1), attaches
+them to the draft release, and flips the draft to published.
+
+Contributors don't cut releases manually — just land your PR with the right
+`feat:` / `fix:` / `chore:` prefix and it shows up in the next draft.
+
+If a release workflow fails, the Actions tab has detailed logs. The common
+culprits are:
 
 - A new GitHub Action reference that's not SHA-pinned (the supply-chain policy
   requires pinning).
 - A new `cargo` dependency that pulls in a transitive advisory (the
   `cargo deny` check is the gate).
-- A `pnpm` advisory at moderate severity or above (the `pnpm audit` check is the
-  gate).
+- A `pnpm` advisory at moderate severity or above (the `pnpm audit` check is
+  the gate).
 
 ## Security
 
