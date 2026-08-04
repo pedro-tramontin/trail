@@ -95,6 +95,30 @@ jobs:
           echo "::notice::No draft to bump; exiting cleanly."
           exit 0
 
+      - name: Skip if main already at draft version
+        if: steps.draft.outputs.has_draft == 'true'
+        env:
+          VERSION: ${{ steps.draft.outputs.version }}
+        run: |
+          # If a previous version-bump run already landed the
+          # bump on main, the next push-to-main will find a
+          # stale draft for the same version. Without this
+          # guard, the workflow tries to push a new
+          # `infra/8-2-bump-X.Y.Z` branch to origin where one
+          # already exists, fails with `fetch first` (non-
+          # fast-forward), and leaves the run red.
+          #
+          # Detect this by checking if main's version files
+          # already match the draft's VERSION. If so, the bump
+          # is already done; exit cleanly.
+          CURRENT=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' \
+            src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "::notice::Main is already at version $VERSION (draft version); nothing to bump. Exiting."
+            exit 0
+          fi
+          echo "Main is at $CURRENT, draft is $VERSION — proceeding with bump."
+
       - name: Update 4 version files
         if: steps.draft.outputs.has_draft == 'true'
         env:
