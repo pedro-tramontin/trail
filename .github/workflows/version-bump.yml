@@ -35,8 +35,24 @@
 #   - The PR is opened with auto-merge disabled; the user reviews
 #     the changelog + version files, then merges.
 #
-# Token: GITHUB_TOKEN (not RELEASE_PLEASE_TOKEN), per the v0.3.55+
-# convention.
+# Token: RELEASE_PLEASE_TOKEN (a PAT), not GITHUB_TOKEN. Switched
+# from GITHUB_TOKEN on 2026-08-04 because the repo's "Allow GitHub
+# Actions to create and approve pull requests" setting is OFF (the
+# GitHub Feb 2023 security default), and GITHUB_TOKEN is blocked from
+# opening PRs when that setting is OFF. RELEASE_PLEASE_TOKEN is a PAT
+# with repo scope, which bypasses the restriction because it acts
+# on behalf of a user, not the github-actions[bot]. Note that this
+# re-introduces secret-management overhead (rotation + scope audit),
+# but it's the only path to making this workflow auto-create PRs
+# without flipping the repo setting (which is a repo-wide policy
+# decision that affects all workflows, not just this one).
+#
+# The PR created by this workflow is opened with auto-merge DISABLED
+# per the Phase 8 §8.2 design — the user reviews + merges manually.
+# `permissions: contents: write` (above) is still needed for the
+# `git push` step; `pull-requests: write` is intentionally NOT set
+# because RELEASE_PLEASE_TOKEN doesn't need it (PAT bypasses the
+# workflow-level restriction).
 
 name: version-bump
 
@@ -61,7 +77,7 @@ jobs:
       - name: Find open draft release
         id: draft
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: |
           # Find the single open draft release. release-drafter
           # maintains exactly one draft at a time, so the .[0]
@@ -171,7 +187,7 @@ jobs:
         if: steps.already_at.outputs.should_bump == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: |
           set -euo pipefail
           TODAY=$(date -u +%Y-%m-%d)
@@ -294,7 +310,7 @@ jobs:
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           TAG: ${{ steps.draft.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: |
           set -euo pipefail
           # Branch name: infra/8-2-bump-X.Y.Z
