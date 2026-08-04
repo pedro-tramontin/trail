@@ -138,13 +138,21 @@ jobs:
       - name: Validate title -> label mapping
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # Pure-Python validation - no API calls. Reads
-          # .github/label-rules.py, computes what label the
-          # title SHOULD have, then compares to /tmp/pr_labels.txt.
-          # Exits non-zero with a clear error if any check fails.
+          # Race-aware validation. labeler.yml (a `pull_request_target`
+          # workflow) and this `pull_request` check fire at the same
+          # instant on PR open. labeler takes ~10-15s to apply the
+          # `type:` label; this check runs in <1s and previously
+          # failed with "no labels" before labeler could write. The
+          # fix: poll the PR's labels for up to 15s before declaring
+          # them missing, so the race absorbs itself without manual
+          # rerun. If after 15s the label still isn't there, fall
+          # back to the prior "check the labeler workflow" error
+          # so the failure remains debuggable.
           python3 - <<'PY'
-          import sys, os, importlib.util
+          import sys, os, importlib.util, json, subprocess, time
           from pathlib import Path
           # Load label_rules via importlib because .github/ has no
           # __init__.py and isn't a package; the standard
@@ -158,12 +166,39 @@ jobs:
           label_rules = mod
 
           title = os.environ['PR_TITLE']
-          current_labels = [
-              line.strip() for line in Path('/tmp/pr_labels.txt').read_text().splitlines()
-              if line.strip()
-          ]
+          pr_number = os.environ['PR_NUMBER']
 
-          type_labels = [l for l in current_labels if l.startswith('type: ')]
+          def fetch_labels():
+              """Re-query the PR's labels via `gh pr view --json labels`.
+              Returns a sorted list of label name strings. Re-fetched
+              on every retry so we see fresh state from labeler.yml.
+              Uses the workflow's GITHUB_TOKEN from the env (passed
+              explicitly because the `subprocess` doesn't inherit
+              `env=` automatically when launched from a heredoc with
+              the shell `<<'PY'` form)."""
+              result = subprocess.run(
+                  ['gh', 'pr', 'view', pr_number, '--json', 'labels'],
+                  capture_output=True, text=True,
+                  env={**os.environ, 'GH_TOKEN': os.environ['GH_TOKEN']},
+                  check=True,
+              )
+              data = json.loads(result.stdout)
+              return sorted(l['name'] for l in data.get('labels', []))
+
+          # Retry loop: absorb the 10-15s labeler.yml race window.
+          # 5 retries * 3s sleep = ~15s total (labeler typically
+          # finishes in 5-12s on a fresh PR).
+          type_labels = []
+          for attempt in range(5):
+              current_labels = fetch_labels()
+              type_labels = [l for l in current_labels if l.startswith('type: ')]
+              if type_labels:
+                  break
+              if attempt < 4:
+                  print(f"::notice::PR #{pr_number} has no `type:` label yet "
+                        f"(attempt {attempt+1}/5); waiting 3s for labeler.yml...")
+                  time.sleep(3)
+
           expected = label_rules.match(title)
 
           errors = []
@@ -181,9 +216,14 @@ jobs:
               if not type_labels:
                   errors.append(
                       f"PR title matched expected label '{expected}', "
-                      f"but the PR has NO `type: *` label applied.\n"
+                      f"but the PR has NO `type: *` label applied "
+                      f"after a 15s wait.\n"
                       f"labeler.yml should have added it on PR open; "
-                      f"check the labeler workflow run for errors."
+                      f"check the labeler workflow run for errors.\n"
+                      f"(Note: this check now polls for 15s to absorb "
+                      f"the pull_request / pull_request_target race; "
+                      f"if you see this error, labeler is genuinely "
+                      f"broken or slow, not just racing.)"
                   )
               elif len(type_labels) > 1:
                   errors.append(
