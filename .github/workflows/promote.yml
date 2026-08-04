@@ -192,6 +192,34 @@ jobs:
           prerelease: false
           args: --target aarch64-apple-darwin
 
+      # Phase 9 §9.4 — ad-hoc codesign the .app bundle so Gatekeeper
+      # stops blocking the binary with "corrupted, move to trash."
+      # No Apple Developer Program enrollment (Decision 3) — ad-hoc
+      # signing with `codesign --force --deep --sign "$DEVELOPER_NAME"`
+      # is sufficient for the user's own machine. The DEVELOPER_NAME
+      # env is set inline (not a GitHub secret) because ad-hoc
+      # identities are public info. The `[ -n "${DEVELOPER_NAME:-}" ]`
+      # guard inside `run:` is per the talon PR #62 pitfall
+      # (`if:` at job level resolves before secrets are exposed).
+      # The step is no-op on non-macOS runners via the if: guard.
+      - name: Ad-hoc codesign .app bundle
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_NAME: "Pedro Tramontin"
+        run: |
+          if [ -n "${DEVELOPER_NAME:-}" ]; then
+            APP_PATH=$(find src-tauri/target -name "*.app" -type d | head -n 1)
+            if [ -z "$APP_PATH" ]; then
+              echo "::warning::No .app bundle found; skipping codesign."
+              exit 0
+            fi
+            echo "Ad-hoc codesigning $APP_PATH with identity '$DEVELOPER_NAME'"
+            codesign --force --deep --sign "$DEVELOPER_NAME" "$APP_PATH"
+            codesign --verify --deep --strict "$APP_PATH"
+          else
+            echo "::notice::DEVELOPER_NAME not set; skipping ad-hoc codesign."
+          fi
+
   # ----- Windows build (.msi + .exe) -----
   build-windows:
     needs: gate
