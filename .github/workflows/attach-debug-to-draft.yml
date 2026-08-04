@@ -75,7 +75,14 @@ jobs:
           # process exits, which can be milliseconds before the final
           # API response is committed.
           sleep 5
-          DRAFT_TAG=$(gh release list --draft \
+          # NOTE: do NOT pass `--draft` to `gh release list` — that
+          # flag doesn't exist on the cli/cli v2.x that ships on
+          # GitHub-hosted runners (`gh release list --help` exposes
+          # `--exclude-drafts` to filter drafts OUT, but no
+          # `--draft` flag to filter drafts IN). Filter via jq on
+          # the `isDraft` JSON field instead — the [0].tagName //
+          # "" handles the empty-array case cleanly.
+          DRAFT_TAG=$(gh release list \
             --json tagName,isDraft,createdAt \
             --jq '[.[] | select(.isDraft)] | sort_by(.createdAt) | reverse | .[0].tagName // ""')
           if [ -z "$DRAFT_TAG" ]; then
