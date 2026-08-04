@@ -200,15 +200,29 @@ jobs:
             # handles the title-edit case: if the author renames
             # `fix:` -> `feat:` after a review, the `type: bug`
             # label needs to be removed.
+            #
+            # BUGFIX 2026-08-04: previously used
+            # `for stale in $CURRENT_TYPE_LABELS` which is
+            # word-split on whitespace - so a label named
+            # `type: chore` gets split into two iterations:
+            # `type:` (which doesn't exist) and `chore` (which
+            # also doesn't exist as a label). The `type:`
+            # remove attempt failed with "label not found"
+            # and failed the whole step, even though the
+            # intended `add-label` had already succeeded.
+            # Switched to `while IFS= read -r` so each
+            # newline-separated label is one iteration, no
+            # word-splitting.
             CURRENT_TYPE_LABELS=$(gh pr view "$PR_NUMBER" \
               --json labels --jq '.labels[].name' \
               | grep '^type: ' || true)
-            for stale in $CURRENT_TYPE_LABELS; do
+            while IFS= read -r stale; do
+              [ -z "$stale" ] && continue  # skip empty lines
               if [ "$stale" != "$MATCHED_LABEL" ]; then
                 echo "Removing stale label: $stale"
                 gh pr edit "$PR_NUMBER" --remove-label "$stale"
               fi
-            done
+            done <<< "$CURRENT_TYPE_LABELS"
           else
             echo "::notice::Title '$PR_TITLE' didn't match any rule in label-rules.py."
             echo "::notice::pr-label-check in draft-build.yml will fail this PR."
