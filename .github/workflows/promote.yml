@@ -266,6 +266,43 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # Phase 10: attach-debug-to-draft.yml uploads 6 debug binaries
+      # to the draft release on every push to main (skipped when a
+      # version-bump PR is open). By the time promote.yml fires, the
+      # draft release already has those 6 debug assets attached from
+      # the most recent attach-debug run. We explicitly delete them
+      # here before the prod build's tauri-action upload, so the
+      # release ends with EXACTLY the 6 prod binaries and no leftover
+      # .deb/.dmg/.msi debug artifacts.
+      #
+      # tauri-action's same-filename upload does replace by default
+      # (verified by inspecting tauri-action@v0 source: it uses
+      # octokit's uploadReleaseAsset with the existing asset's id,
+      # which the GitHub API treats as overwrite). But explicit delete
+      # is defensive: it surfaces any filename-shape mismatch (e.g.
+      # macOS .app.tar.gz vs .app.tar.gz-dsym vs .app.tar.gz-debug)
+      # as a clean log line instead of a silent duplicate-asset.
+      - name: Delete existing assets (debug binary replacement)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSET_IDS=$(gh release view "$TAG" --json assets --jq '.assets[].id')
+          if [ -z "$ASSET_IDS" ]; then
+            echo "No existing assets on draft $TAG — skipping delete step."
+          else
+            COUNT=$(echo "$ASSET_IDS" | wc -l)
+            echo "Deleting $COUNT existing assets from draft $TAG..."
+            echo "$ASSET_IDS" | while read -r id; do
+              [ -z "$id" ] && continue
+              gh api -X DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${{ github.repository }}/releases/assets/$id"
+              echo "  Deleted asset id=$id"
+            done
+            echo "All $COUNT existing assets deleted."
+          fi
       - name: Flip draft → published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

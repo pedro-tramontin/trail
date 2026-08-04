@@ -1,0 +1,283 @@
+# Attach debug binaries to draft release
+#
+# Runs after release-drafter.yml completes on a push to main. Builds
+# debug binaries for all 3 platforms (matching the prod build's bundle
+# shape so the same filenames can be uploaded) and attaches them to the
+# current draft release via tauri-action@v0's `releaseDraft: true`
+# upsert behavior. promote.yml replaces these with prod binaries when
+# the version-bump PR merges; until then, the draft release is
+# "smoke-testable" by anyone with the URL — same as Talon's pre-release
+# pattern.
+#
+# Why a separate workflow (vs a `jobs:` block in draft-build.yml):
+#   * draft-build.yml is PR-triggered (per-PR artifacts in the Actions
+#     run summary). attach-debug is post-merge (assets on the GitHub
+#     Release draft page). Different triggers, different upload
+#     destinations — different files.
+#   * Single-purpose: one workflow = one trigger + one job graph.
+#     Easy to disable, debug, or re-run independently.
+#
+# Why `workflow_run` (vs `needs:` or polling):
+#   * GitHub doesn't support cross-workflow `needs:` — needs can only
+#     reference jobs in the same workflow.
+#   * workflow_run fires when the upstream workflow's run completes
+#     (regardless of success). We guard on `conclusion == 'success'`
+#     so we don't attach binaries if release-drafter wrote garbage.
+#   * The 5s sleep inside gives release-drafter's last API call (which
+#     happens AFTER the workflow_run event fires) a moment to settle.
+#
+# Why skip when a version-bump PR is already open:
+#   * If the user has been actively merging version-bump PRs (the
+#     normal release cycle), the draft is about to be promoted within
+#     minutes. Building fresh debug binaries only to have them
+#     replaced by promote's prod builds is 5-10 min of wasted CI per
+#     push. We skip and trust the prod build to come first.
+#
+# Cache bucket naming: `trail-draft-attach-{platform}` is distinct
+# from `trail-draft-*` (draft-build.yml) and `trail-promote-*`
+# (promote.yml). Three cache buckets, one per role:
+#   * trail-draft-*        — per-PR review artifacts
+#   * trail-draft-attach-* — post-merge draft-release attaches
+#   * trail-promote-*      — production release builds
+#
+# Token: GITHUB_TOKEN. tauri-action's tag-driven draft attach works
+# fine with the auto-provisioned GITHUB_TOKEN (it doesn't need a PAT
+# because release-drafter creates the draft itself, and we're just
+# uploading assets, not creating new releases on our own).
+
+name: Attach debug to draft
+
+on:
+  workflow_run:
+    workflows: ["release-drafter"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  # ----- Gate: find current draft + check for open version-bump PR -----
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+      should_attach: ${{ steps.skip_check.outputs.should_attach }}
+    steps:
+      - name: Find current draft release
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 5s buffer to let release-drafter's last `gh release edit`
+          # API call settle. workflow_run fires as soon as the workflow
+          # process exits, which can be milliseconds before the final
+          # API response is committed.
+          sleep 5
+          DRAFT_TAG=$(gh release list --draft \
+            --json tagName,isDraft,createdAt \
+            --jq '[.[] | select(.isDraft)] | sort_by(.createdAt) | reverse | .[0].tagName // ""')
+          if [ -z "$DRAFT_TAG" ]; then
+            echo "::notice::No open draft release found; skipping debug attach."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found draft release: $DRAFT_TAG"
+          echo "tag=$DRAFT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether to skip (version-bump PR already open?)
+        id: skip_check
+        if: steps.find.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.find.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#trail-v}"
+          # Search for an OPEN version-bump PR for this version.
+          # gh pr list --search does a free-text search; the title
+          # pattern is 'chore(release): bump version to X.Y.Z' per
+          # version-bump.yml's commit template. We intentionally
+          # grep the title rather than the body (so user-merged
+          # PRs with similar body text don't false-positive).
+          OPEN_BUMP=$(gh pr list --state open --search "bump version to $VERSION in:title" \
+            --json number --jq 'length')
+          if [ "$OPEN_BUMP" -gt 0 ]; then
+            echo "::notice::Version-bump PR for $VERSION is open; skipping debug attach."
+            echo "should_attach=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_attach=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ----- 3 platform builds in parallel, each mirrors promote.yml -----
+  # ----- exactly with --debug prepended so same filenames overwrite ----
+  build-linux:
+    needs: gate
+    if: needs.gate.outputs.should_attach == 'true'
+    name: Build (Linux, debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps (Tauri 2 prereqs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache bucket from `trail-draft-*` (PR review
+          # artifacts) and `trail-promote-linux` (prod builds).
+          shared-key: trail-draft-attach-linux
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Linux, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Use the discovered draft tag so tauri-action attaches
+          # to the existing draft release (same name as promote.yml
+          # will eventually use).
+          tagName: ${{ needs.gate.outputs.tag }}
+          releaseName: "Trail ${{ needs.gate.outputs.tag }} (debug)"
+          releaseBody: "**Pre-release debug build.** Latest commit on main has these debug binaries attached for smoke-testing. Prod binaries (and the draft→published flip) happen when the version-bump PR merges — see [CHANGELOG.md](https://github.com/pedro-tramontin/trail/blob/${{ needs.gate.outputs.tag }}/CHANGELOG.md) for the change log."
+          # `releaseDraft: true` = create draft if not exists, attach
+          # to existing draft if it does. We're always attaching to
+          # an existing draft (the gate job verified it exists), so
+          # this is effectively a no-op except for documenting intent.
+          releaseDraft: true
+          prerelease: false
+          # Mirror promote.yml's prod args exactly, with --debug
+          # prepended. `--bundles` controls Tauri 2's output bundle
+          # types; the same names (deb, appimage) → same filenames
+          # (Trail_X.Y.Z_amd64.deb, .AppImage) → tauri-action's
+          # upload-by-name replaces the existing assets.
+          args: --debug --bundles deb,appimage
+
+  build-macos:
+    needs: gate
+    if: needs.gate.outputs.should_attach == 'true'
+    name: Build (macOS, debug)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same target as promote.yml's macOS job (aarch64 only — the
+      # aarch64 GitHub-hosted runner is what produce.yml uses; debug
+      # builds skip the universal-apple-darwin cross-compile to halve
+      # build time; same x86_64 fallback is via Rosetta on M1 hosts).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-attach-mac
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # Phase 9 §9.4: ad-hoc codesign the .app bundle so Gatekeeper
+      # doesn't block with "corrupted, move to trash" on first
+      # launch. Uses the 'Pedro Tramontin' personal identity (an
+      # ad-hoc cert, not Developer-ID-signed). Same pattern as
+      # promote.yml's macOS job.
+      - name: Ad-hoc codesign .app bundle
+        env:
+          DEVELOPER_NAME: "Pedro Tramontin"
+        run: |
+          set -euo pipefail
+          if [ -z "${DEVELOPER_NAME:-}" ]; then
+            echo "::error::DEVELOPER_NAME is required for macOS ad-hoc codesign."
+            exit 1
+          fi
+          APP_PATH=$(find target/aarch64-apple-darwin/debug/bundle/macos -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle found in target/aarch64-apple-darwin/debug/bundle/macos/"
+            exit 1
+          fi
+          echo "Codesigning $APP_PATH with identity '$DEVELOPER_NAME'..."
+          codesign --force --deep --sign "$DEVELOPER_NAME" "$APP_PATH"
+          echo "Codesign OK."
+
+      - name: Build Tauri bundle (macOS aarch64, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.gate.outputs.tag }}
+          releaseName: "Trail ${{ needs.gate.outputs.tag }} (debug)"
+          releaseBody: "**Pre-release debug build (macOS ad-hoc signed with '$DEVELOPER_NAME').** See CHANGELOG.md for change log; right-click → Open to bypass Gatekeeper on first launch (unsigned Developer-ID limit)."
+          releaseDraft: true
+          prerelease: false
+          # Mirror promote.yml's macOS prod args + --debug. `--target
+          # aarch64-apple-darwin` produces .dmg + .app.tar.gz (the 2
+          # binaries we saw on trail-v0.2.0's release).
+          args: --debug --target aarch64-apple-darwin
+
+  build-windows:
+    needs: gate
+    if: needs.gate.outputs.should_attach == 'true'
+    name: Build (Windows, debug)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: trail-draft-attach-windows
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        shell: bash
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Windows, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.gate.outputs.tag }}
+          releaseName: "Trail ${{ needs.gate.outputs.tag }} (debug)"
+          releaseBody: "**Pre-release debug build (Windows).** See CHANGELOG.md for change log."
+          releaseDraft: true
+          prerelease: false
+          # Mirror promote.yml's Windows prod args + --debug.
+          args: --debug --target x86_64-pc-windows-msvc --bundles nsis,msi
