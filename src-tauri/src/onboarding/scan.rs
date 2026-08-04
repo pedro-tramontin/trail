@@ -98,8 +98,21 @@ pub enum EvidenceKind {
 /// Detected host OS. `Other` exists so a future Windows or BSD scan
 /// doesn't break the JSON shape — we just round-trip the
 /// `cfg(target_os = "...")` string back to the caller.
+///
+/// Serde representation: externally tagged (the default). Note we do
+/// NOT use `#[serde(tag = "os")]` (internally tagged) because that
+/// representation explicitly forbids newtype variants (see
+/// https://serde.rs/enum-representations.html — "internally tagged"
+/// requires every variant to be unit or struct, never tuple/newtype).
+/// On non-MacOS / non-Linux builds, `detect_platform()` returns
+/// `Platform::Other(os_string)` — a newtype variant — so internally
+/// tagged serialization would fail with "cannot serialize tagged
+/// newtype variant Platform::Other containing a string" (the exact
+/// error that surfaced on Windows during Phase 9 §9.3 onboarding
+/// smoke testing). The matching TS type in
+/// `src/lib/onboarding/types.ts` mirrors the externally tagged
+/// shape: `{ macos: null }` / `{ linux: null }` / `{ other: string }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "os", rename_all = "snake_case")]
 pub enum Platform {
     Macos,
     Linux,

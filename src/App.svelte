@@ -188,3 +188,32 @@
     <Greet />
   {/if}
 </main>
+
+<style>
+  /* Phase 9 §9.3 — onboarding window center-anchoring.
+   *
+   * The `<main>` element wraps both the wizard and the regular
+   * Settings shell. The wizard card is 640px max-width, so on any
+   * window wider than that there will be horizontal whitespace
+   * that needs to be distributed evenly on both sides — done by
+   * the body flex reset in index.html, which translates into
+   * even left/right gutter for <main>.
+   *
+   * Vertical spacing: `width: 100%` + `display: flex` +
+   * `align-items: center` + `justify-content: center` on the body
+   * (set in index.html) centers <main> too. No additional flex
+   * on <main> is needed for that — the body's flex handles it.
+   *
+   * We only style the wizard margin-top to make sure it doesn't
+   * crowd the title (when the Settings branch is rendered, the
+   * <h1>Trail</h1> needs ~24px above it). The wizard handles its
+   * own internal padding via `.step { padding: 1.5rem }` so we
+   * don't add more here.
+   */
+  main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+  }
+</style>
