@@ -57,6 +57,7 @@ jobs:
         id: extract
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           # GitHub merges PRs with a "merge commit" whose subject
@@ -68,14 +69,36 @@ jobs:
           #    (no `v`). The `v` prefix was a release-please
           #    relic; we strip it if present and re-add it
           #    when computing TAG.
-          # 2. Trailing `(#NNN)` suffix from GitHub's merge
-          #    commit. The regex allows ` *(#NNN)?$` so both
-          #    the literal version-bump commit (no suffix) and
-          #    the merge commit (with PR number suffix) match.
+          # 2. Trailing `(#NNN)` suffix from GitHub's
+          #    merge commit. The regex allows ` *(#NNN)?$` so
+          #    both the literal version-bump commit (no suffix)
+          #    and the merge commit (with PR number suffix)
+          #    match.
           #
           # Also handle the case where the head_commit.message
           # is multi-line (PR body appended after a blank
           # line). Use only the first line.
+          #
+          # Manual recovery via workflow_dispatch: if the
+          # caller passed `tag` (e.g. `trail-v0.1.1`), use that
+          # directly. This handles the case where the promote
+          # gate missed on a previous push (e.g. before the
+          # regex fix in #112) and we need to retroactively
+          # build+attach binaries to an existing draft.
+          if [ -n "$DISPATCH_TAG" ]; then
+            if [[ ! "$DISPATCH_TAG" =~ ^trail-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::Invalid tag '$DISPATCH_TAG' (expected trail-vX.Y.Z)"
+              exit 1
+            fi
+            VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+            TAG="$DISPATCH_TAG"
+            echo "Manual dispatch: tag=$TAG version=$VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "should_promote=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           COMMIT_MSG=$(printf '%s' "$COMMIT_MSG" | head -1)
           if [[ "$COMMIT_MSG" =~ ^chore\(release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]*(\(#[0-9]+\))?$ ]]; then
             VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
