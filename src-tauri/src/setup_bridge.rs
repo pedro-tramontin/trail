@@ -37,6 +37,6 @@ pub fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("loading config from {}: {e}", config_path.display()))?;
     app.manage(orch);
     app.manage(Arc::new(sched_task));
-    app.manage(crate::ConfigState::Ready(cfg));
+    app.manage(crate::ConfigState::Ready(Box::new(cfg)));
     Ok(())
 }

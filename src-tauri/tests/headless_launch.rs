@@ -58,7 +58,7 @@ fn test_setup_logic(
             // Re-read so the state carries the parsed config (the
             // type's invariant is `Ready(Config)` not `Ready(())`).
             match trail_lib::config::load_config(config_path) {
-                Ok(cfg) => trail_lib::ConfigState::Ready(cfg),
+                Ok(cfg) => trail_lib::ConfigState::Ready(Box::new(cfg)),
                 Err(e) => panic!("config vanished between checks: {e}"),
             }
         }
@@ -108,8 +108,7 @@ fn headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write()
         config_path.display()
     );
 
-    let state_slot: std::sync::Mutex<Option<trail_lib::ConfigState>> =
-        std::sync::Mutex::new(None);
+    let state_slot: std::sync::Mutex<Option<trail_lib::ConfigState>> = std::sync::Mutex::new(None);
 
     // === Step 1: boot (no config present) ===
     // Mirrors the `run()` setup closure's first action: try to
@@ -155,9 +154,9 @@ fn headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write()
         trail_lib::start_collectors_inner(&config_path).expect("start_collectors_inner ok");
 
     // === Step 4: state should now be Ready ===
-    let cfg = trail_lib::config::load_config(&config_path)
-        .expect("config loads after the test wrote it");
-    let ready_state = trail_lib::ConfigState::Ready(cfg);
+    let cfg =
+        trail_lib::config::load_config(&config_path).expect("config loads after the test wrote it");
+    let ready_state = trail_lib::ConfigState::Ready(Box::new(cfg));
     *state_slot.lock().expect("state_slot mutex") = Some(ready_state.clone());
     assert!(
         matches!(ready_state, trail_lib::ConfigState::Ready(_)),

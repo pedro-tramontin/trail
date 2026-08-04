@@ -104,7 +104,13 @@ pub enum ConfigState {
     /// Config on disk + collectors running. Carries the parsed config
     /// so future IPC commands can read fields without re-loading the
     /// file.
-    Ready(crate::config::Config),
+    /// Real config has been written to disk AND the orchestrator +
+    /// scheduler are running. The `Config` is boxed to keep the
+    /// enum small (clippy::large_enum_variant; Config is ~600
+    /// bytes, vs. AwaitingOnboarding's 0 bytes — without
+    /// `Box`, every match on `ConfigState` would carry a
+    /// 600-byte discriminant that lives on the stack).
+    Ready(Box<crate::config::Config>),
     /// No config on disk yet. The wizard will write one, then call
     /// `start_collectors` to flip into `Ready`.
     AwaitingOnboarding,
@@ -126,7 +132,13 @@ pub enum ConfigState {
 /// boundary.
 pub fn start_collectors_inner(
     config_path: &Path,
-) -> Result<(Arc<collectors::CollectorOrchestrator>, tokio::task::JoinHandle<()>), String> {
+) -> Result<
+    (
+        Arc<collectors::CollectorOrchestrator>,
+        tokio::task::JoinHandle<()>,
+    ),
+    String,
+> {
     let cfg = config::load_config(config_path)
         .map_err(|e| format!("loading config from {}: {e}", config_path.display()))?;
     let collector_bin = if let Ok(p) = std::env::var("COLLECTOR_BIN") {
@@ -177,10 +189,6 @@ pub fn start_collectors_inner(
 fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
     setup_bridge::start_collectors(app)
 }
-
-/// Stub: do NOT put another `#[tauri::command]` here — the
-/// definition lives in `setup_bridge::start_collectors`. This
-/// proxy is what `generate_handler!` lists.
 
 /// Phase 7 §7.2 — Tauri command: env-var self-test for the macOS
 /// code-signing + notarization pipeline. Returns a sorted
@@ -478,7 +486,7 @@ pub fn run() {
                     let (orch, sched_task) = start_collectors_inner(&config_path)?;
                     app.manage(orch);
                     app.manage(Arc::new(sched_task));
-                    ConfigState::Ready(cfg)
+                    ConfigState::Ready(Box::new(cfg))
                 }
                 Err(config::ConfigError::NotFound(_)) => {
                     // First-launch path: register a sentinel. The frontend's
@@ -495,11 +503,9 @@ pub fn run() {
                     // Surface it so the user sees a clear panic dialog
                     // instead of the silent-exit + `Ok` state we used to
                     // hit on `NotFound`.
-                    return Err(format!(
-                        "loading config from {}: {e}",
-                        config_path.display()
-                    )
-                    .into());
+                    return Err(
+                        format!("loading config from {}: {e}", config_path.display()).into(),
+                    );
                 }
             };
             app.manage(config_state);

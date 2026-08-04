@@ -77,11 +77,9 @@ impl WhisperContext {
             // `WhisperContextParameters` value. The defaults match
             // what the old `new(path)` call did (no GPU, no flash
             // attention, no DTW).
-            let ctx = Wctx::new_with_params(
-                path_str,
-                whisper_rs::WhisperContextParameters::default(),
-            )
-            .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
+            let ctx =
+                Wctx::new_with_params(path_str, whisper_rs::WhisperContextParameters::default())
+                    .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
             Ok(Self {
                 model_path: path.to_path_buf(),
                 _ctx: Box::new(ctx),
