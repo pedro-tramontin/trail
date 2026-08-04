@@ -295,3 +295,117 @@ fn headless_launch_tray_icon_is_built() {
         );
     }
 }
+
+/// Phase 9 §9.3 — the setup closure opens the right window for
+/// each `ConfigState`.
+///
+/// Direct-call test pattern (same as §9.1's
+/// `headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write`
+/// and §9.2's `headless_launch_tray_icon_is_built`):
+/// `tauri::test::mock_builder().build()` does NOT run the setup
+/// closure synchronously in Tauri 2.11.5 — see the file-level
+/// doc above for the full rationale. The actual `WebviewWindowBuilder`
+/// call needs a live `AppHandle` + a registered `tauri.conf.json`
+/// `windows` entry (the §9.3 fallback), so we instead assert
+/// the pure helper `setup_bridge::window_descriptor_for` that
+/// the builder call delegates to. The integration between
+/// `ConfigState` → `WebviewWindowBuilder` config is verified by
+/// `cargo build` (if the `WebviewWindowBuilder::new` call site
+/// mismatches the descriptor, the code doesn't compile).
+///
+/// What this test catches:
+/// - A regression that opens the main shell on first launch
+///   (the user would see a blank Tauri webview with no path
+///   to the wizard).
+/// - A regression that opens the wizard when a config already
+///   exists (the user would be re-onboarded every cold restart).
+/// - A regression that drops the `?wizard=1` query param
+///   (the frontend's auto-mount logic in the cold-restart
+///   branch depends on it).
+/// - A regression that hides both windows (the user would see
+///   nothing — the only visible affordance is the tray icon,
+///   which on macOS menu-bar apps is the only signal that the
+///   binary is running).
+#[test]
+fn headless_launch_opens_onboarding_window_when_no_config() {
+    use trail_lib::setup_bridge::{window_descriptor_for, InitialWindowDescriptor};
+    use trail_lib::ConfigState;
+
+    // === Path 1: no config on disk (AwaitingOnboarding) ===
+    // The first-launch case. The setup closure must open the
+    // `onboarding` wizard window, not the main shell.
+    let awaiting_descriptor = window_descriptor_for(&ConfigState::AwaitingOnboarding);
+    assert_eq!(
+        awaiting_descriptor.label, "onboarding",
+        "AwaitingOnboarding must open the 'onboarding' wizard — opening the main shell on first launch would show a blank webview with no path to the wizard"
+    );
+    assert!(
+        awaiting_descriptor.url.contains("wizard=1"),
+        "wizard window URL must include ?wizard=1 so the frontend's cold-restart branch auto-mounts Onboarding.svelte; got {}",
+        awaiting_descriptor.url
+    );
+    assert!(
+        awaiting_descriptor.visible,
+        "wizard window must start visible after the setup closure decides to show it"
+    );
+
+    // === Path 2: config on disk (Ready) ===
+    // The cold-restart / first-launch-after-onboarding case.
+    // The setup closure must open the main shell at index.html
+    // (no wizard query), not the onboarding window.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg_path = tmp.path().join("config.json");
+    let minimal_config = r#"{
+        "claude_sessions_paths": [],
+        "github": {"mode": "gh_cli", "host": "github.com"},
+        "calendar_ics": "/nonexistent.ics",
+        "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
+        "review_time": "18:00",
+        "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},
+        "transport": {"type": "ssh", "host": "vm.example.com", "port": 22, "user": "trail", "auth": {"auth": "public_key", "path": "/tmp/trail-test-key"}, "remote_path": "/tmp/trail-remote"},
+        "raw_retention_days": 7,
+        "pending_installs": []
+    }"#;
+    std::fs::write(&cfg_path, minimal_config).expect("write minimal config");
+    let cfg = trail_lib::config::load_config(&cfg_path).expect("load minimal config");
+    let ready_descriptor = window_descriptor_for(&ConfigState::Ready(Box::new(cfg)));
+    assert_eq!(
+        ready_descriptor.label, "main",
+        "Ready config must open the 'main' shell — opening the wizard when a config already exists would re-onboard the user every cold restart"
+    );
+    assert_eq!(
+        ready_descriptor.url, "index.html",
+        "main shell must load index.html (no wizard query)"
+    );
+    assert!(
+        !ready_descriptor.url.contains("wizard=1"),
+        "main shell URL must NOT include the wizard query (would force-mount the wizard over the regular shell); got {}",
+        ready_descriptor.url
+    );
+    assert!(
+        ready_descriptor.visible,
+        "main shell must start visible after the setup closure decides to show it"
+    );
+
+    // === Cross-check: the two descriptors must differ on `label` ===
+    // (defensive — catches a regression that returns the same
+    // descriptor for both arms).
+    assert_ne!(
+        awaiting_descriptor, ready_descriptor,
+        "AwaitingOnboarding and Ready must produce DIFFERENT window descriptors — opening the same window for both states is a regression"
+    );
+
+    // === Cross-check: InitialWindowDescriptor Debug impl works ===
+    // (defensive — the production setup closure's
+    // `tracing::info!` interpolates the descriptor fields, so
+    // a non-Debug-able type would silently fail to log at
+    // runtime).
+    let _ = format!(
+        "{:?}",
+        InitialWindowDescriptor {
+            label: "main",
+            url: "index.html",
+            visible: true,
+        }
+    );
+}

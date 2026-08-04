@@ -14,7 +14,14 @@ mod commands;
 // Tauri command. Kept separate from the crate root so tauri's
 // macro_export re-export on `pub` commands doesn't collide at
 // `__cmd__start_collectors` (see src/setup_bridge.rs doc comment).
-mod setup_bridge;
+// `pub` since Phase 9 §9.3 so the §9.3 integration test in
+// `tests/headless_launch.rs` can call
+// `setup_bridge::window_descriptor_for` and
+// `setup_bridge::build_initial_window` to verify the
+// `ConfigState` → window-label logic without a live Tauri runtime
+// (Tauri 2.11.5's `mock_builder().build()` shim does NOT run the
+// setup closure synchronously — see §9.1 D2 in state.md).
+pub mod setup_bridge;
 // Phase 9 §9.2 — bridge module that hosts the `show_main_window`
 // Tauri command (used by the tray-icon "Show Trail" menu item +
 // the future wizard "Open settings" button). Same
@@ -541,6 +548,47 @@ pub fn run() {
             // resolves it fresh from the `AppHandle`. `_collector_bin`
             // is dropped automatically at the closure's end (it was
             // only ever a let-binding here).
+
+            // Phase 9 §9.3 — open the initial webview window
+            // imperatively. When a config already exists on disk
+            // (the `Ready` arm ran), open the `main` shell; when
+            // there's no config yet (the `AwaitingOnboarding` arm
+            // ran), open the `onboarding` wizard. This is the
+            // counterpart to the `tauri.conf.json` `"windows":
+            // [{ "label": "main", "visible": false }]` fallback —
+            // the fallback registers the window with the Tauri
+            // runtime so `WebviewWindowBuilder::new` doesn't
+            // panic on a duplicate label, and `visible: false`
+            // keeps the empty default window from flashing before
+            // the setup closure runs. The setup closure then
+            // shows the appropriate window per the `ConfigState`.
+            //
+            // Placed BEFORE the §9.2 tray-icon build so the main
+            // window exists when the tray-icon left-click handler
+            // fires (otherwise the "show main" handler would be
+            // a no-op for the first half-second after launch).
+            //
+            // The actual builder call lives in `setup_bridge::build_initial_window`
+            // so the §9.3 integration test
+            // (`tests/headless_launch.rs::headless_launch_opens_onboarding_window_when_no_config`)
+            // can assert the `ConfigState` → `WindowDescriptor`
+            // logic via the `window_descriptor_for` helper
+            // without dragging in the Tauri 2.11.5 runtime (whose
+            // `mock_builder().build()` shim does NOT run the
+            // setup closure synchronously — see the §9.1 D2 / §9.2
+            // lessons in state.md).
+            {
+                let state = app.state::<ConfigState>();
+                // The setup closure receives `&mut tauri::App`;
+                // `setup_bridge::build_initial_window` takes
+                // `&tauri::AppHandle<R>` (the trait the
+                // `WebviewWindowBuilder::new` constructor wants).
+                // `App::handle()` returns the `&AppHandle`
+                // directly (same pattern `resolve_paths` uses
+                // a few lines up — see line 488).
+                setup_bridge::build_initial_window(app.handle(), &state)?;
+            }
+            tracing::info!("initial webview window built");
 
             // Phase 9 §9.2 — build the tray icon imperatively. The
             // Tauri 2 way: a `tauri::menu::Menu` of "Show Trail" +
