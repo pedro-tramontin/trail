@@ -159,7 +159,7 @@ jobs:
           # the window, we still write the section header so the
           # CHANGELOG is well-formed.
           PRS_JSON=$(gh pr list --state merged --base main \
-            --json title,number,mergeCommitSHA,labels \
+            --json title,number,labels,mergeCommit \
             --limit 100)
 
           python3 - "$VERSION" "$TODAY" <<'PY' > /tmp/changelog_src.md
@@ -174,7 +174,7 @@ jobs:
           for pr in prs:
               title = pr.get('title', '')
               num = pr.get('number', 0)
-              sha = (pr.get('mergeCommitSHA') or '')[:7]
+              sha = ((pr.get('mergeCommit') or {}).get('oid') or '')[:7]
               entry = f"- {title} (#{num}) — `{sha}`"
               if re.match(r'^feat!:', title) or re.match(r'^refactor!:', title):
                   changed.append(entry)
