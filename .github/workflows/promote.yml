@@ -53,9 +53,25 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
-          COMMIT_MSG="$COMMIT_MSG"
-          # Match: chore(release): bump version to vX.Y.Z
-          if [[ "$COMMIT_MSG" =~ ^chore\(release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+          # GitHub merges PRs with a "merge commit" whose subject
+          # line is the PR title. For PR #107 the subject was:
+          #   chore(release): bump version to 0.1.1 (#107)
+          # Two differences from the original regex:
+          # 1. No `v` prefix on the version. version-bump.yml
+          #    produces `chore(release): bump version to 0.1.1`
+          #    (no `v`). The `v` prefix was a release-please
+          #    relic; we strip it if present and re-add it
+          #    when computing TAG.
+          # 2. Trailing `(#NNN)` suffix from GitHub's merge
+          #    commit. The regex allows ` *(#NNN)?$` so both
+          #    the literal version-bump commit (no suffix) and
+          #    the merge commit (with PR number suffix) match.
+          #
+          # Also handle the case where the head_commit.message
+          # is multi-line (PR body appended after a blank
+          # line). Use only the first line.
+          COMMIT_MSG=$(printf '%s' "$COMMIT_MSG" | head -1)
+          if [[ "$COMMIT_MSG" =~ ^chore\(release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]*(\(#[0-9]+\))?$ ]]; then
             VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
             TAG="trail-v$VERSION"
             echo "Matched version-bump commit: $COMMIT_MSG"
