@@ -45,9 +45,16 @@
   // src-tauri/src/onboarding/config_writer.rs).
   let ssh_key_generated = $state(false);
 
-  /** Emitted when the wizard finishes writing the config. */
-  let { oncomplete }: { oncomplete?: (config_path: string) => void } =
-    $props();
+  /** Emitted when the wizard finishes writing the config. The
+   * callback may be async (Phase 9 §9.3 — `App.svelte` awaits
+   * the `start_collectors` IPC before flipping `config_exists`),
+   * so the return type is `void | Promise<void>` to accept
+   * both sync and async handlers. The wizard itself doesn't
+   * await the return value — it just fires the callback after
+   * `write_onboarding_config` resolves. */
+  let { oncomplete }: {
+    oncomplete?: (config_path: string) => void | Promise<void>;
+  } = $props();
 
   function advance(): void {
     if (current_step < 5) current_step += 1;

@@ -34,12 +34,35 @@
    * every window reads this prop; the Settings shell also reads
    * it to render the read-only "Demo mode" placeholder instead
    * of the real "Re-run onboarding" button.
+   *
+   * Phase 9 §9.3 — `start_collectors_error` holds the error
+   * message from the last failed `start_collectors` IPC. The
+   * wizard's `StepFinish` reads it via the `oncomplete` payload
+   * so a failed start (e.g. an SSH key the keychain can't
+   * unlock, a port the firewall blocks) surfaces inline in the
+   * wizard instead of being silently swallowed — the user can
+   * then click "Back" and fix the offending step before
+   * retrying. The `handle_onboarding_complete` callback awaits
+   * the IPC; only on `Ok` does it flip `config_exists` to `true`
+   * and unmount the wizard.
+   *
+   * The `onMount` cold-restart probe: if `config_exists` was
+   * already `true` on the first probe (cold restart after the
+   * wizard finished but the app crashed before the next start),
+   * the orchestrator isn't running yet — the Tauri setup
+   * closure only brings it up for the `Ready(_)` arm; the
+   * `AwaitingOnboarding` arm defers the orchestrator to
+   * `start_collectors` IPC. We re-invoke it here so the
+   * orchestrator is alive after a restart too. The IPC is
+   * idempotent on the Rust side (calling it twice just
+   * re-spawns the scheduler task — see §9.1 D1 in state.md).
    */
 
   let config_exists = $state(false);
   let loaded = $state(false);
   let mount_wizard = $state(false);
   let is_demo = $state(false);
+  let start_collectors_error = $state<string | null>(null);
 
   async function probe(): Promise<void> {
     try {
@@ -64,9 +87,52 @@
       console.error("demo_status probe failed", err);
       is_demo = false;
     }
+    // Phase 9 §9.3 — cold-restart probe. If the config is
+    // already on disk, the Tauri setup closure's
+    // `AwaitingOnboarding` arm didn't run (we're in the
+    // `Ready` arm), so the orchestrator IS already up — we
+    // don't need to re-invoke. But if we somehow landed in
+    // `AwaitingOnboarding` AND the config exists (a race the
+    // §9.3 integration test exercises — the wizard wrote the
+    // config but the Svelte side never got the `Ready` signal
+    // before the page reload), we need to bring the
+    // orchestrator up ourselves.
+    if (config_exists) {
+      try {
+        await invoke("start_collectors");
+      } catch (err) {
+        // Non-fatal — the orchestrator might already be up
+        // (the Tauri side returns a "already managed" error
+        // if a second start fires). Log and move on.
+        console.warn("start_collectors probe failed (likely already up)", err);
+      }
+    }
   }
 
-  function handle_onboarding_complete(_path: string): void {
+  /**
+   * Phase 9 §9.3 — wizard completion callback. Awaits the
+   * `start_collectors` IPC (which builds the orchestrator +
+   * scheduler on the Rust side) BEFORE flipping
+   * `config_exists` to `true`. On failure, stores the error
+   * message in `start_collectors_error` so the wizard can
+   * surface it inline; the user can then click "Back" and
+   * retry the offending step rather than getting a blank
+   * shell with no collectors running.
+   */
+  async function handle_onboarding_complete(_path: string): Promise<void> {
+    start_collectors_error = null;
+    try {
+      await invoke("start_collectors");
+    } catch (err) {
+      // Render the error in the wizard so the user can retry.
+      // Don't flip `config_exists` — the wizard needs the
+      // orchestrator up before unmounting (otherwise the
+      // collector settings page would 500 on first render).
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("start_collectors failed after wizard completion", err);
+      start_collectors_error = msg;
+      return;
+    }
     config_exists = true;
     mount_wizard = false;
   }
