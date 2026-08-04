@@ -71,10 +71,10 @@ jobs:
       # directory on the runner — without a cwd-anchored git repo,
       # `gh` aborts with `failed to run git: fatal: not a git
       # repository` before even reaching the GitHub API. The
-      # `persist-credentials: false` setting keeps GH_TOKEN out of
+      # `persist-credentials: false` setting keeps GITHUB_TOKEN out of
       # the git config (so a malicious `gh api` call from a sub-
       # step can't extract it via `git config --get`); we pass
-      # GH_TOKEN explicitly via env in each step that needs it.
+      # GITHUB_TOKEN explicitly via env in each step that needs it.
       - name: Checkout (provides cwd + git context for `gh`)
         uses: actions/checkout@v4
         with:
@@ -82,7 +82,7 @@ jobs:
       - name: Find current draft release
         id: find
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # 5s buffer to let release-drafter's last `gh release edit`
@@ -148,7 +148,7 @@ jobs:
       - name: Build Tauri bundle (Linux, debug)
         uses: tauri-apps/tauri-action@v0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # Use the discovered draft tag so tauri-action attaches
           # to the existing draft release (same name as promote.yml
@@ -213,7 +213,7 @@ jobs:
       - name: Build Tauri bundle (macOS aarch64, debug)
         uses: tauri-apps/tauri-action@v0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ needs.gate.outputs.tag }}
           releaseName: "Trail ${{ needs.gate.outputs.tag }} (debug)"
@@ -295,7 +295,7 @@ jobs:
       - name: Build Tauri bundle (Windows, debug)
         uses: tauri-apps/tauri-action@v0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ needs.gate.outputs.tag }}
           releaseName: "Trail ${{ needs.gate.outputs.tag }} (debug)"
