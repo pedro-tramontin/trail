@@ -250,10 +250,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${DEVELOPER_NAME:-}" ]; then
-            # Catch-all path so this survives future target additions
-            # (x86_64-apple-darwin, universal-apple-darwin, etc.).
-            # Mirrors promote.yml's pattern.
-            APP_PATH=$(find src-tauri/target -name "*.app" -type d | head -n 1)
+            # Catch-all `target` so this works on every runner
+            # type. GitHub-hosted runners check out the repo at the
+            # root (`/Users/runner/work/trail/trail/target/...`)
+            # not at `src-tauri/`, so the previous
+            # `find src-tauri/target` failed with "No such file
+            # or directory" even when the .app bundle existed.
+            APP_PATH=$(find target -name "*.app" -type d | head -n 1)
             if [ -z "$APP_PATH" ]; then
               echo "::warning::No .app bundle found; skipping codesign."
               exit 0
