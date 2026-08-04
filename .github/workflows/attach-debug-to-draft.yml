@@ -64,6 +64,18 @@ jobs:
       tag: ${{ steps.find.outputs.tag }}
       should_attach: ${{ steps.skip_check.outputs.should_attach }}
     steps:
+      # Checkout is required so `gh release list` has a git working
+      # directory on the runner — without a cwd-anchored git repo,
+      # `gh` aborts with `failed to run git: fatal: not a git
+      # repository` before even reaching the GitHub API. The
+      # `persist-credentials: false` setting keeps GH_TOKEN out of
+      # the git config (so a malicious `gh api` call from a sub-
+      # step can't extract it via `git config --get`); we pass
+      # GH_TOKEN explicitly via env in each step that needs it.
+      - name: Checkout (provides cwd + git context for `gh`)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Find current draft release
         id: find
         env:
