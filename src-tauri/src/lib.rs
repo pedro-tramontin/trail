@@ -15,6 +15,15 @@ mod commands;
 // macro_export re-export on `pub` commands doesn't collide at
 // `__cmd__start_collectors` (see src/setup_bridge.rs doc comment).
 mod setup_bridge;
+// Phase 9 §9.2 — bridge module that hosts the `show_main_window`
+// Tauri command (used by the tray-icon "Show Trail" menu item +
+// the future wizard "Open settings" button). Same
+// macro_export-collision rationale as `setup_bridge` above — see
+// src/window_bridge.rs doc comment. `pub` so the §9.2 integration
+// test in `tests/headless_launch.rs` can assert the menu
+// descriptor content (`MAIN_TRAY_MENU_ITEMS`) without a live
+// Tauri runtime.
+pub mod window_bridge;
 // Phase 7 §7.5 — demo mode first-run experience. The
 // `activate_if_requested` function decides whether to boot with
 // fixture data + a yellow banner, gated on (--demo flag) AND
@@ -80,11 +89,15 @@ pub mod logs;
 // file). Audio capture (5-2), transcription (5-3), hotkey (5-4), and
 // IPC (5-5) land in later items as siblings alongside `model_manager`.
 pub mod voice;
-// Phase 5 §5.7 — tray menu filter. Pure-function logic — `tray::MenuEntry`
-// is the enum the future tray-icon builder consumes, and
-// `tray::filtered_items` is the rule set that decides which entries are
-// visible at each permission/recording/conflict state.
-mod tray;
+// Phase 9 §9.2 — tray icon + menu builder (replaces the §5.7
+// dead-code scaffold). The Phase 5.7 `tray::MenuEntry` enum +
+// `filtered_items` rule set were never wired into a live
+// `TrayIconBuilder` call — §5.9 was deferred past Phase 5, so the
+// items sat behind `#[allow(dead_code)]` until §9.2 deleted the
+// whole module. The "Show Trail" + "Quit Trail" items the binary
+// actually surfaces now are built imperatively via
+// `tauri::menu::Menu` + `tauri::tray::TrayIconBuilder` in the
+// `run()` setup closure, which is the Tauri 2 way.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -188,6 +201,18 @@ pub fn start_collectors_inner(
 /// `setup_bridge::start_collectors`).
 fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
     setup_bridge::start_collectors(app)
+}
+
+/// Phase 9 §9.2 — Tauri command proxy at the crate root.
+///
+/// Same pattern as `start_collectors` above: the real
+/// `#[tauri::command]` lives in `window_bridge` to keep the
+/// macro_export re-export out of the crate root. The
+/// tray-icon "Show Trail" menu item and the future wizard
+/// "Open settings" button both invoke `show_main_window` over
+/// the IPC channel.
+fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    window_bridge::show_main_window(app)
 }
 
 /// Phase 7 §7.2 — Tauri command: env-var self-test for the macOS
@@ -516,6 +541,106 @@ pub fn run() {
             // resolves it fresh from the `AppHandle`. `_collector_bin`
             // is dropped automatically at the closure's end (it was
             // only ever a let-binding here).
+
+            // Phase 9 §9.2 — build the tray icon imperatively. The
+            // Tauri 2 way: a `tauri::menu::Menu` of "Show Trail" +
+            // "Quit Trail" items + a `tauri::tray::TrayIconBuilder`
+            // registered as `"main-tray"`. The menu and click
+            // handlers live here in the setup closure (the binary
+            // is a menu-bar app, so this is the only "main" UI on
+            // macOS).
+            //
+            // Why imperative (not just the `tauri.conf.json`
+            // `trayIcon` declarative block — which IS still there
+            // as the Tauri-runtime-level default): the spec
+            // requires (a) the menu items as a typed `Menu` and
+            // (b) the left-click + right-click handlers wired in
+            // the same closure that owns the rest of the app's
+            // setup. The declarative block can't host closures;
+            // the imperative builder can.
+            //
+            // The menu items are sourced from the
+            // `MAIN_TRAY_MENU_ITEMS` static in `window_bridge` so
+            // the `main_tray_menu_*` unit tests can assert the
+            // menu content without a live Tauri runtime (see
+            // `src/window_bridge.rs` for the rationale).
+            //
+            // Threading note: the setup closure runs on the main
+            // thread *before* the event loop starts pumping user
+            // messages. Tauri 2's `TrayIconBuilder::build` calls
+            // `app_handle.run_on_main_thread(...)` internally and
+            // then blocks on a `mpsc::channel().recv()` for the
+            // result. `tauri-runtime-wry`'s `send_user_message`
+            // short-circuits to inline execution when called from
+            // the main thread (see
+            // `tauri-runtime-wry-2.11.4/src/lib.rs:230-247`), so
+            // the channel send happens synchronously and the
+            // `recv` succeeds immediately. No deadlock.
+            use tauri::menu::Menu;
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder};
+            // Build the `MenuItem` handles from the static
+            // descriptor (keeps the unit-testable surface in
+            // `window_bridge` rather than re-declared here).
+            let menu_items: Vec<tauri::menu::MenuItem<tauri::Wry>> =
+                window_bridge::MAIN_TRAY_MENU_ITEMS
+                    .iter()
+                    .map(|entry| {
+                        tauri::menu::MenuItem::with_id(
+                            app,
+                            entry.id,
+                            entry.label,
+                            true,
+                            None::<&str>,
+                        )
+                    })
+                    .collect::<tauri::Result<Vec<_>>>()?;
+            let menu_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = menu_items
+                .iter()
+                .map(|m| m as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+                .collect();
+            let tray_menu = Menu::with_items(app, &menu_refs)?;
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .ok_or("default window icon missing")?,
+                )
+                .icon_as_template(true) // macOS menu-bar tinting (per tauri.conf.json)
+                .tooltip("Trail — passive workday capture")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false) // left click → show main window (macOS-native)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Left-click on the tray icon shows the main
+                    // window (matches macOS-native menu-bar app
+                    // behavior). Other click types are ignored
+                    // (right-click is the menu).
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            tracing::info!("tray icon built (id=main-tray)");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -588,6 +713,13 @@ pub fn run() {
             // If called before the wizard finishes, returns a clean
             // Err ("config not found") instead of a runtime crash.
             start_collectors,
+            // Phase 9 §9.2 — show the main window. Invoked by the
+            // tray-icon "Show Trail" menu item (via the
+            // `on_menu_event` closure in the setup above) and the
+            // future wizard "Open settings" button. No-op if no
+            // webview window labeled "main" exists yet (very early
+            // boot, before §9.3 wires the main window).
+            show_main_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
