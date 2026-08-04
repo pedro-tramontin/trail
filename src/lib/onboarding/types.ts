@@ -30,11 +30,24 @@ export type EvidenceKind =
   | { kind: "command_exists"; binary: string; path: string }
   | { kind: "macos_app_bundle"; path: string; bundle_id: string };
 
-/** Tagged enum mirroring `Platform` (tag = "os", snake_case variants). */
+/** Externally tagged enum mirroring `Platform`
+ * (the Rust type in src-tauri/src/onboarding/scan.rs).
+ *
+ * Note: we use the externally tagged representation (the JSON is
+ * `{ "macos": null }` etc., not `{ "os": "macos" }`) because the
+ * Rust side has a `Platform::Other(String)` newtype variant that
+ * serde's internally-tagged representation (`#[serde(tag = "...")]`)
+ * cannot serialize — internally tagged enums forbid newtype variants.
+ * See the comment on the Rust `Platform` enum for the long version.
+ *
+ * The TS shape mirrors the Rust default serde behavior: the variant
+ * name is the key, and the variant's payload is the value (null for
+ * unit variants, the inner string for `Other`).
+ */
 export type Platform =
-  | { os: "macos" }
-  | { os: "linux" }
-  | { os: "other"; os_name: string };
+  | { macos: null }
+  | { linux: null }
+  | { other: string };
 
 /** One candidate collector. `confidence` is `f32` in Rust; JS number is fine. */
 export interface CollectorCandidate {
@@ -197,7 +210,7 @@ export type InstallOption = "auto" | "show_script" | "skip";
 
 export const MOCK_SCAN_REPORT: ScanReport = {
   generated_at: "2026-08-02T12:00:00Z",
-  platform: { os: "macos" },
+  platform: { macos: null },
   candidates: [
     {
       collector_id: "github",
