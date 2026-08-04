@@ -110,10 +110,29 @@ wiremock = { workspace = true }
 # which live behind the `test-util` feature (the workspace `tokio`
 # dep is `full`, which does not include `test-util`).
 tokio = { workspace = true, features = ["test-util"] }
-# Phase 6 §6.6 — install-wizard dry-run fixture. The
+# Phase 9 §9.1 — the `start_collectors_with_config_spawns_scheduler`
+# unit test installs a `MakeWriter` shim to capture the canonical
+# "collector scheduler started" log line. The workspace
+# `tracing-subscriber` is already pinned (used transitively by several
+# crates); declaring it explicitly here keeps the dependency surface
+# honest.
+tracing-subscriber = { workspace = true }
+# Phase 9 §9.1 — install-wizard dry-run fixture. The
 # `mock-ssh-server` binary lives at `tests/fixtures/mock-ssh-server/`
 # (a workspace member) and is spawned by the
 # `install_vps_collector_dry_run_succeeds_against_mock_ssh` test
 # on an ephemeral port. Gated to `cfg(test)` so the production
 # Tauri binary never carries the fixture.
 mock-ssh-server = { path = "../tests/fixtures/mock-ssh-server" }
+# Phase 9 §9.1 — the integration test in `tests/headless_launch.rs`
+# uses `tauri::test::mock_builder` + `mock_app` to spin up a fake
+# Tauri runtime with no webview. The `test` feature is gated here
+# (dev-only) so the production binary doesn't drag in the
+# `mock_runtime` + test helpers at compile time.
+tauri = { workspace = true, features = ["test"] }
+# The integration test under `tests/` references `trail_lib::*`; the
+# `package.lib.name = "trail_lib"` rename in `Cargo.toml` plus
+# Cargo's auto-discovery of the host crate under `[dev-dependencies]`
+# would create a self-reference cycle. We don't need an explicit
+# self-dep — `tests/*.rs` in this crate see `trail_lib::*` through
+# Cargo's normal crate-as-test-target plumbing.

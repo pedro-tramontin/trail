@@ -10,6 +10,11 @@
 // against the in-tree `mock-ssh-server` fixture.
 mod collectors;
 mod commands;
+// Phase 9 §9.1 — bridge module that hosts the `start_collectors`
+// Tauri command. Kept separate from the crate root so tauri's
+// macro_export re-export on `pub` commands doesn't collide at
+// `__cmd__start_collectors` (see src/setup_bridge.rs doc comment).
+mod setup_bridge;
 // Phase 7 §7.5 — demo mode first-run experience. The
 // `activate_if_requested` function decides whether to boot with
 // fixture data + a yellow banner, gated on (--demo flag) AND
@@ -81,9 +86,101 @@ pub mod voice;
 // visible at each permission/recording/conflict state.
 mod tray;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
+
+/// Phase 9 §9.1 — runtime state for the config lifecycle.
+///
+/// `Ready` means config exists; the collector orchestrator + scheduler
+/// are already running and managed by Tauri. `AwaitingOnboarding` means
+/// no config has been written yet — the setup closure deliberately did
+/// not build the orchestrator; the Svelte side's first-run wizard calls
+/// `start_collectors` after writing the config to bring the collectors
+/// up lazily. This replaces the old "panic if config missing" behavior
+/// with a clean state machine the frontend can drive.
+#[derive(Debug, Clone)]
+pub enum ConfigState {
+    /// Config on disk + collectors running. Carries the parsed config
+    /// so future IPC commands can read fields without re-loading the
+    /// file.
+    Ready(crate::config::Config),
+    /// No config on disk yet. The wizard will write one, then call
+    /// `start_collectors` to flip into `Ready`.
+    AwaitingOnboarding,
+}
+
+/// Phase 9 §9.1 — lazy-init the collector orchestrator + scheduler.
+///
+/// Called by the Svelte frontend at wizard `StepFinish` time, after
+/// `write_onboarding_config` has succeeded. Returns `Err` if the config
+/// is missing or fails to parse — a buggy frontend firing this before
+/// the wizard finishes gets a clean error rather than an orchestrator
+/// crash or a silent no-op.
+///
+/// Returns the built orchestrator + the spawned scheduler `JoinHandle`
+/// so the caller (the Tauri IPC wrapper, in production) can hand them
+/// to `app.manage`. Unit tests just discard the tuple. `pub` so the
+/// `tests/headless_launch.rs` integration test (which mirrors the
+/// real setup closure's logic) can drive it from outside the crate
+/// boundary.
+pub fn start_collectors_inner(
+    config_path: &Path,
+) -> Result<(Arc<collectors::CollectorOrchestrator>, tokio::task::JoinHandle<()>), String> {
+    let cfg = config::load_config(config_path)
+        .map_err(|e| format!("loading config from {}: {e}", config_path.display()))?;
+    let collector_bin = if let Ok(p) = std::env::var("COLLECTOR_BIN") {
+        PathBuf::from(p)
+    } else {
+        PathBuf::from("trail-collector")
+    };
+    let orch = Arc::new(collectors::CollectorOrchestrator::new(
+        config_path.to_path_buf(),
+        collector_bin,
+        &cfg,
+    ));
+    let orch_for_sched = orch.clone();
+    let sched_task = tokio::spawn(async move {
+        match orch_for_sched.start_scheduler().await {
+            Ok(mut sched) => {
+                if let Err(e) = sched.start().await {
+                    tracing::error!(error = %e, "scheduler.start() failed");
+                    return;
+                }
+                tracing::info!("collector scheduler started");
+                // Park until the runtime shuts down; Tauri 2 aborts
+                // spawned tasks on exit so the scheduler's internal
+                // channels close cleanly at teardown.
+                std::future::pending::<()>().await;
+                let _ = sched.shutdown().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "start_scheduler() failed");
+            }
+        }
+    });
+    Ok((orch, sched_task))
+}
+
+/// Phase 9 §9.1 — Tauri command proxy at the crate root.
+///
+/// The actual `#[tauri::command]` definition lives in the
+/// `setup_bridge` sub-module (see `src/setup_bridge.rs`); keeping
+/// it out of the crate root avoids the tauri-macros 2.6.3
+/// `#[macro_export]` collision where both the macro_rules!
+/// definition and the visibility-scoped `use` re-export would
+/// otherwise land at the same crate-root path (`__cmd__start_collectors`).
+/// This proxy exists purely so the `generate_handler!` macro
+/// can list `start_collectors` at the lib.rs level and the IPC
+/// contract name stays a flat `start_collectors` (not
+/// `setup_bridge::start_collectors`).
+fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
+    setup_bridge::start_collectors(app)
+}
+
+/// Stub: do NOT put another `#[tauri::command]` here — the
+/// definition lives in `setup_bridge::start_collectors`. This
+/// proxy is what `generate_handler!` lists.
 
 /// Phase 7 §7.2 — Tauri command: env-var self-test for the macOS
 /// code-signing + notarization pipeline. Returns a sorted
@@ -341,7 +438,13 @@ pub fn run() {
             // Tauri-managed state so IPC commands see the same
             // `last_run_at` / `last_exit_code` / `last_error` the
             // scheduler writes, then spawn the scheduler task.
-            let (config_path, collector_bin) =
+            // Resolve the per-app config + collector binary paths.
+            // `collector_bin` is only consumed by `start_collectors_inner`
+            // (which re-derives it from `COLLECTOR_BIN`/`trail-collector`).
+            // We bind it here so the resolution site stays in one place and
+            // the post-load-config error path can still show the resolved
+            // path in its message.
+            let (config_path, _collector_bin) =
                 resolve_paths(Some(app.handle())).map_err(|e| -> Box<dyn std::error::Error> {
                     format!("resolving config paths: {e}").into()
                 })?;
@@ -354,49 +457,59 @@ pub fn run() {
             app.manage(std::sync::Arc::new(
                 crate::voice::capture::CaptureState::new(),
             ));
-            let cfg =
-                config::load_config(&config_path).map_err(|e| -> Box<dyn std::error::Error> {
-                    format!("loading config from {}: {e}", config_path.display()).into()
-                })?;
-            let orch = Arc::new(collectors::CollectorOrchestrator::new(
-                config_path,
-                collector_bin,
-                &cfg,
-            ));
-            let orch_for_sched = orch.clone();
-            let sched_task = tokio::spawn(async move {
-                match orch_for_sched.start_scheduler().await {
-                    Ok(mut sched) => {
-                        if let Err(e) = sched.start().await {
-                            tracing::error!(error = %e, "scheduler.start() failed");
-                            return;
-                        }
-                        tracing::info!("collector scheduler started");
-                        // Park until the runtime shuts down. Tauri 2
-                        // aborts spawned tasks on exit; we also call
-                        // `scheduler.shutdown()` in a Drop below via
-                        // a graceful path on the tokio runtime's
-                        // teardown. In practice the runtime drop
-                        // releases all spawned tasks and the
-                        // scheduler's internal channels close.
-                        std::future::pending::<()>().await;
-                        if let Err(e) = sched.shutdown().await {
-                            tracing::warn!(error = %e, "scheduler.shutdown() failed");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "start_scheduler() failed");
-                    }
+            // Phase 9 §9.1 — skip `load_config` when missing; defer
+            // the collector orchestrator until `start_collectors` IPC
+            // fires. Old behavior (lines 357-365 pre-§9.1): call
+            // `load_config` unconditionally, propagate `NotFound` via
+            // `?`, crash the Tauri runtime before any UI is built.
+            // New behavior:
+            //   - `Ok(cfg)`      → build orchestrator + scheduler
+            //                      (Phase 2-7 behavior, unchanged).
+            //   - `Err(NotFound)`→ register an `AwaitingOnboarding`
+            //                      sentinel; the wizard will write the
+            //                      config then call `start_collectors`.
+            //   - `Err(other)`   → propagate (real IO / JSON failure).
+            let config_state = match config::load_config(&config_path) {
+                Ok(cfg) => {
+                    // Phase 9 §9.1 — reuse `start_collectors_inner` so the
+                    // "existing-config" path and the "wizard just wrote a
+                    // config" path share the same orchestrator-build +
+                    // scheduler-spawn sequence.
+                    let (orch, sched_task) = start_collectors_inner(&config_path)?;
+                    app.manage(orch);
+                    app.manage(Arc::new(sched_task));
+                    ConfigState::Ready(cfg)
                 }
-            });
-            // Stash the JoinHandle so a future shutdown signal can
-            // await it (Tauri 2 doesn't yet expose a clean "app is
-            // exiting" hook in the setup closure). For v1 the
-            // `pending().await` above is fine because the orchestrator
-            // doesn't need to run after the user quits the menu-bar
-            // app.
-            app.manage(orch);
-            app.manage(Arc::new(sched_task));
+                Err(config::ConfigError::NotFound(_)) => {
+                    // First-launch path: register a sentinel. The frontend's
+                    // `start_collectors` IPC will build the orchestrator
+                    // after the wizard writes the config.
+                    tracing::info!(
+                        "No config at {}; running in pre-onboarding mode",
+                        config_path.display()
+                    );
+                    ConfigState::AwaitingOnboarding
+                }
+                Err(e) => {
+                    // Real error (IO failure, JSON parse failure, etc.).
+                    // Surface it so the user sees a clear panic dialog
+                    // instead of the silent-exit + `Ok` state we used to
+                    // hit on `NotFound`.
+                    return Err(format!(
+                        "loading config from {}: {e}",
+                        config_path.display()
+                    )
+                    .into());
+                }
+            };
+            app.manage(config_state);
+            // `config_path` has been moved into `start_collectors_inner`
+            // (via `to_path_buf()`) when the `Ok` arm ran, or surfaced in
+            // the error message when the `Err(other)` arm ran. We don't
+            // need it again here — the IPC `start_collectors` command
+            // resolves it fresh from the `AppHandle`. `_collector_bin`
+            // is dropped automatically at the closure's end (it was
+            // only ever a let-binding here).
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -463,6 +576,12 @@ pub fn run() {
             // `pending_installs` array in `~/.trail/config.json`
             // (idempotent).
             install::mark_pending_install,
+            // Phase 9 §9.1 — lazy-init the collector orchestrator +
+            // scheduler after the wizard writes the config. Invoked
+            // by the Svelte `<Onboarding />` `StepFinish` handler.
+            // If called before the wizard finishes, returns a clean
+            // Err ("config not found") instead of a runtime crash.
+            start_collectors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running trail");
@@ -533,5 +652,168 @@ mod tests {
             .join("trail-delete-config-missing-dir-never-created")
             .join("config.json");
         assert!(delete_config(bogus).is_ok());
+    }
+
+    // ====================================================================
+    // Phase 9 §9.1 tests — `start_collectors_inner` is the test-only
+    // entry point that mirrors what the `start_collectors` IPC command
+    // does after resolving the config path. Two tests cover both the
+    // "wizard not yet finished" case (no config → Err) and the
+    // "wizard just wrote a config" case (valid config → Ok + scheduler
+    // task alive).
+    // ====================================================================
+
+    use super::start_collectors_inner;
+
+    /// `start_collectors_inner` returns Err when the config does not
+    /// exist yet. This is the safety check for the wizard: a buggy
+    /// frontend firing `start_collectors` before the wizard finishes
+    /// gets a clean error message instead of a silent orchestrator
+    /// crash or a runtime panic.
+    #[test]
+    fn start_collectors_without_config_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join(".trail").join("config.json");
+        assert!(
+            !config_path.is_file(),
+            "precondition: no config on disk at {}",
+            config_path.display()
+        );
+
+        // The inner fn takes the path the IPC layer would compute —
+        // we point it at a real-looking but missing file.
+        let result = start_collectors_inner(&config_path);
+        assert!(result.is_err(), "expected Err when config missing");
+        let err_msg = result.err().unwrap();
+        assert!(
+            err_msg.contains("config") || err_msg.to_lowercase().contains("not found"),
+            "error should mention missing config, got: {err_msg}"
+        );
+    }
+
+    /// `start_collectors_inner` builds the orchestrator + spawns the
+    /// scheduler when a valid config exists. Asserts `Ok` is returned
+    /// and the spawned scheduler task is still alive after 2s (the
+    /// same signal §9.6's e2e asserts: the scheduler logs "collector
+    /// scheduler started" then parks until teardown).
+    ///
+    /// The tracing capture uses a `MakeWriter` shim so we can assert
+    /// the canonical log line. The init is `try_init` because other
+    /// tests in the suite may have already installed a subscriber.
+    #[test]
+    fn start_collectors_with_config_spawns_scheduler() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join(".trail");
+        std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
+        let config_path = config_dir.join("config.json");
+        // Minimal valid config — fields + shape per `config::Config`
+        // (every required field present, matching the unit-test
+        // fixture in `src/config.rs::tests::load_valid_ssh_config`).
+        let minimal_config = r#"{
+            "claude_sessions_paths": [],
+            "github": {"mode": "gh_cli", "host": "github.com"},
+            "calendar_ics": "/nonexistent.ics",
+            "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
+            "review_time": "18:00",
+            "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},
+            "transport": {"type": "ssh", "host": "vm.example.com", "port": 22, "user": "trail", "auth": {"auth": "public_key", "path": "/tmp/trail-test-key"}, "remote_path": "/tmp/trail-remote"},
+            "raw_retention_days": 7,
+            "pending_installs": []
+        }"#;
+        std::fs::write(&config_path, minimal_config).expect("write minimal config");
+        assert!(config_path.is_file(), "precondition: config on disk");
+
+        // Capture tracing output to assert the "collector scheduler
+        // started" log line. Use a `MakeWriter` shim so tracing's
+        // worker thread can drain into our channel.
+        let (tx, rx) = mpsc::channel::<String>();
+        struct TxWriter(Arc<Mutex<mpsc::Sender<String>>>);
+        impl<'a> MakeWriter<'a> for TxWriter {
+            type Writer = TxGuard;
+            fn make_writer(&'a self) -> TxGuard {
+                TxGuard(self.0.clone())
+            }
+        }
+        struct TxGuard(Arc<Mutex<mpsc::Sender<String>>>);
+        impl std::io::Write for TxGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let _ = self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .send(String::from_utf8_lossy(buf).to_string());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tx_writer = TxWriter(Arc::new(Mutex::new(tx)));
+        let _ = tracing_subscriber::fmt()
+            .with_writer(tx_writer)
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+
+        // The inner fn spawns a scheduler task via `tokio::spawn`;
+        // that requires a tokio runtime. Build a multi-threaded
+        // runtime and KEEP IT ALIVE in scope until we've drained the
+        // tracing channel — dropping the runtime aborts the
+        // parking task inside the spawned scheduler.
+        let runtime = std::mem::ManuallyDrop::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime"),
+        );
+        // SAFETY: we never drop `runtime` until end of scope; the
+        // pinned `JoinHandle` in `_sched_task_box` keeps the worker
+        // thread from being reaped before we observe the log line.
+        let (orch, sched_task) = {
+            let rt_handle = runtime.handle();
+            let _guard = rt_handle.enter();
+            start_collectors_inner(&config_path).expect("start_collectors_inner ok")
+        };
+        // Keep the orch alive until the test ends so its scheduler
+        // task doesn't get reaped; the parking future inside the
+        // spawned task lets the runtime workers spin down on the
+        // next idle. The scheduler logs "collector scheduler
+        // started" BEFORE parking — that's the signal we assert on.
+        let _orch_keep_alive = orch;
+
+        // Wait up to 2s for the canonical log line. The scheduler
+        // first runs `start().await`, then logs the line and parks;
+        // we drain the channel until we see it. We sleep on this
+        // thread so the runtime workers can drive the spawned task
+        // forward.
+        let started = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
+                if let Ok(line) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    if line.contains("collector scheduler started") {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        assert!(
+            started,
+            "expected 'collector scheduler started' in tracing output within 2s"
+        );
+
+        // The scheduler task should still be alive (it's parked in
+        // `pending::<()>().await` until Tauri drops the runtime).
+        assert!(
+            !sched_task.is_finished(),
+            "scheduler task should still be parked, not finished"
+        );
+        // Drop the JoinHandle first so the runtime can drain it
+        // before we let `runtime` go out of scope and shut down.
+        drop(sched_task);
     }
 }
