@@ -74,6 +74,141 @@ permissions:
 
 jobs:
   # ===================================================================
+  # PR label check (Conventional Commits title -> type: label)
+  # ===================================================================
+  pr-label-check:
+    # Read-only check: no PR mutation. This is the gate that
+    # ensures every PR has the right `type: <name>` label before
+    # merge, so release-drafter v6 (which is labels-only) can do
+    # its categorization + version bump. Without this check, a PR
+    # with a bad title (no Conventional Commits prefix) would slip
+    # through labeler.yml's "no match" notice and merge without a
+    # label, leaving release-drafter nothing to bucket.
+    #
+    # Why in draft-build.yml and not a separate workflow:
+    #   - Already has `on: pull_request:` + `contents: read`, which
+    #     is exactly what this job needs. No new permissions to
+    #     grant, no new trigger to manage.
+    #   - Runs first (declared before draft-linux/-macos/-windows)
+    #     so a label-check failure fails the PR in seconds, not
+    #     after a 3-4 min Tauri build.
+    #
+    # What it checks:
+    #   1. PR title matches at least one rule in
+    #      .github/label-rules.json (i.e. starts with a known
+    #      Conventional Commits prefix).
+    #   2. The PR has exactly one `type: *` label.
+    #   3. The single `type: *` label is the one the title would
+    #      produce (i.e. the human/labeller didn't apply a wrong
+    #      label).
+    #
+    # Source of truth: .github/label-rules.py - same module
+    # labeler.yml uses. Both MUST stay in lockstep; if you add a
+    # rule to one, add it to the other.
+    #
+    # Fork PRs are skipped: forks don't have access to the
+    # upstream repo's labels via the default GITHUB_TOKEN. A
+    # maintainer can apply the label manually on fork PRs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch PR labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Read all labels on the PR. We use `gh pr view --json
+          # labels` rather than the REST API directly so the
+          # output is pre-parsed JSON and we don't have to deal
+          # with the `connection: close` quirks of the REST API
+          # in actions/checkout runners.
+          gh pr view "$PR_NUMBER" \
+            --json labels \
+            --jq '.labels | map(.name) | .[]' \
+            > /tmp/pr_labels.txt
+          echo "Labels on PR #$PR_NUMBER:"
+          sed 's/^/  - /' /tmp/pr_labels.txt
+
+      - name: Validate title -> label mapping
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Pure-Python validation - no API calls. Reads
+          # .github/label-rules.json, computes what label the
+          # title SHOULD have, then compares to /tmp/pr_labels.txt.
+          # Exits non-zero with a clear error if any check fails.
+          python3 - <<'PY'
+          import sys, os, importlib.util
+          from pathlib import Path
+          # Load label_rules via importlib because .github/ has no
+          # __init__.py and isn't a package; the standard
+          # `sys.path.insert + import` pattern fails with
+          # ModuleNotFoundError on ubuntu-latest runners even when
+          # the file is present. importlib bypasses the package
+          # machinery.
+          spec = importlib.util.spec_from_file_location('label_rules', '.github/label-rules.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          label_rules = mod
+
+          title = os.environ['PR_TITLE']
+          current_labels = [
+              line.strip() for line in Path('/tmp/pr_labels.txt').read_text().splitlines()
+              if line.strip()
+          ]
+
+          type_labels = [l for l in current_labels if l.startswith('type: ')]
+          expected = label_rules.match(title)
+
+          errors = []
+          if expected is None:
+              errors.append(
+                  f"PR title '{title}' doesn't match any rule in "
+                  f".github/label-rules.py.\n"
+                  f"Expected one of these prefixes (with optional "
+                  f"scope and `!` for breaking):\n"
+                  f"  {', '.join(label_rules.all_prefixes())}\n"
+                  f"See https://www.conventionalcommits.org/ for "
+                  f"the full spec."
+              )
+          else:
+              if not type_labels:
+                  errors.append(
+                      f"PR title matched expected label '{expected}', "
+                      f"but the PR has NO `type: *` label applied.\n"
+                      f"labeler.yml should have added it on PR open; "
+                      f"check the labeler workflow run for errors."
+                  )
+              elif len(type_labels) > 1:
+                  errors.append(
+                      f"PR has multiple `type: *` labels: "
+                      f"{type_labels}.\nExpected exactly one: {expected}."
+                  )
+              elif type_labels[0] != expected:
+                  errors.append(
+                      f"PR label '{type_labels[0]}' doesn't match "
+                      f"what the title would produce.\n"
+                      f"Title: '{title}'\n"
+                      f"Expected: {expected}\n"
+                      f"Got: {type_labels[0]}\n"
+                      f"Either fix the title or remove the wrong label."
+                  )
+
+          if errors:
+              for e in errors:
+                  print(f"::error title=PR label check failed::{e}\n")
+              sys.exit(1)
+
+          print(f"OK: title '{title}' -> label '{expected}' (present on PR)")
+          PY
+
+  # ===================================================================
   # Linux draft build (.deb + AppImage + raw binary)
   # ===================================================================
   draft-linux:
