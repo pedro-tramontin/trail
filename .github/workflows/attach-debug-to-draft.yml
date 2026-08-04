@@ -56,13 +56,23 @@ permissions:
   contents: write
 
 jobs:
-  # ----- Gate: find current draft + check for open version-bump PR -----
+  # ----- Gate: find current draft release -----
+  # The earlier version of this workflow also checked whether a
+  # version-bump PR was open and skipped debug builds if so. That
+  # was a flawed optimization: the user can leave the version-bump
+  # PR open for hours or days while reviewing PRs, which meant the
+  # draft sat empty the entire time — defeating attach-debug's
+  # whole purpose. promote.yml's cleanup step (added in PR #124)
+  # already deletes existing draft assets before uploading prod
+  # binaries, so even if attach-debug builds debug binaries right
+  # before promote fires, the worst case is a 5-10 min CI run that
+  # gets immediately overwritten by promote's prod build. That's a
+  # cheap price for keeping the draft smoke-testable.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
       tag: ${{ steps.find.outputs.tag }}
-      should_attach: ${{ steps.skip_check.outputs.should_attach }}
     steps:
       # Checkout is required so `gh release list` has a git working
       # directory on the runner — without a cwd-anchored git repo,
@@ -105,35 +115,10 @@ jobs:
           echo "Found draft release: $DRAFT_TAG"
           echo "tag=$DRAFT_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether to skip (version-bump PR already open?)
-        id: skip_check
-        if: steps.find.outputs.tag != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.find.outputs.tag }}
-        run: |
-          set -euo pipefail
-          VERSION="${TAG#trail-v}"
-          # Search for an OPEN version-bump PR for this version.
-          # gh pr list --search does a free-text search; the title
-          # pattern is 'chore(release): bump version to X.Y.Z' per
-          # version-bump.yml's commit template. We intentionally
-          # grep the title rather than the body (so user-merged
-          # PRs with similar body text don't false-positive).
-          OPEN_BUMP=$(gh pr list --state open --search "bump version to $VERSION in:title" \
-            --json number --jq 'length')
-          if [ "$OPEN_BUMP" -gt 0 ]; then
-            echo "::notice::Version-bump PR for $VERSION is open; skipping debug attach."
-            echo "should_attach=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_attach=true" >> "$GITHUB_OUTPUT"
-          fi
-
   # ----- 3 platform builds in parallel, each mirrors promote.yml -----
   # ----- exactly with --debug prepended so same filenames overwrite ----
   build-linux:
     needs: gate
-    if: needs.gate.outputs.should_attach == 'true'
     name: Build (Linux, debug)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -193,7 +178,6 @@ jobs:
 
   build-macos:
     needs: gate
-    if: needs.gate.outputs.should_attach == 'true'
     name: Build (macOS, debug)
     runs-on: macos-latest
     timeout-minutes: 25
@@ -262,7 +246,6 @@ jobs:
 
   build-windows:
     needs: gate
-    if: needs.gate.outputs.should_attach == 'true'
     name: Build (Windows, debug)
     runs-on: windows-latest
     timeout-minutes: 15
