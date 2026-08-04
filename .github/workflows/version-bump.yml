@@ -96,6 +96,7 @@ jobs:
           exit 0
 
       - name: Skip if main already at draft version
+        id: already_at
         if: steps.draft.outputs.has_draft == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
@@ -109,18 +110,22 @@ jobs:
           # fast-forward), and leaves the run red.
           #
           # Detect this by checking if main's version files
-          # already match the draft's VERSION. If so, the bump
-          # is already done; exit cleanly.
+          # already match the draft's VERSION. If so, set
+          # should_bump=false so all subsequent steps are
+          # skipped by their `if:` guard. If not, set
+          # should_bump=true and proceed.
           CURRENT=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' \
             src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
           if [ "$CURRENT" = "$VERSION" ]; then
-            echo "::notice::Main is already at version $VERSION (draft version); nothing to bump. Exiting."
+            echo "::notice::Main is already at version $VERSION (draft version); nothing to bump. Skipping."
+            echo "should_bump=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Main is at $CURRENT, draft is $VERSION — proceeding with bump."
+          echo "should_bump=true" >> "$GITHUB_OUTPUT"
 
       - name: Update 4 version files
-        if: steps.draft.outputs.has_draft == 'true'
+        if: steps.already_at.outputs.should_bump == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
         run: |
@@ -163,7 +168,7 @@ jobs:
             package.json crates/trail-collector/Cargo.toml
 
       - name: Pre-populate CHANGELOGs (Keep a Changelog format)
-        if: steps.draft.outputs.has_draft == 'true'
+        if: steps.already_at.outputs.should_bump == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -285,7 +290,7 @@ jobs:
           echo "Updated both CHANGELOGs for version $VERSION"
 
       - name: Open version-bump PR
-        if: steps.draft.outputs.has_draft == 'true'
+        if: steps.already_at.outputs.should_bump == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           TAG: ${{ steps.draft.outputs.tag }}
