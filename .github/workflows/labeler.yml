@@ -67,15 +67,25 @@ jobs:
       - name: Read label rules
         id: rules
         run: |
-          # .github/label-rules.json is the single source of truth
+          # .github/label-rules.py is the single source of truth
           # for the title->label mapping. The pr-label-check job in
-          # draft-build.yml reads the same file - both jobs MUST
+          # draft-build.yml reads the same module - both jobs MUST
           # stay in lockstep or the check will disagree with the
           # labeler. If you add a rule here, the pr-label-check
           # job picks it up automatically.
-          echo "rules_file=.github/label-rules.json" >> "$GITHUB_OUTPUT"
-          RULES_COUNT=$(python3 -c "import json; print(len(json.load(open('.github/label-rules.json'))))")
-          echo "Loaded $RULES_COUNT label rules from label-rules.json"
+          #
+          # Why .py not .json: Conventional Commits scopes use
+          # parens, which JSON requires escaping. The .py form
+          # lets the regex read naturally and gives us a `match()`
+          # helper to share.
+          RULES_COUNT=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.github')
+          import label_rules
+          print(len(label_rules.RULES))
+          ")
+          echo "rules_module=.github/label-rules.py" >> "$GITHUB_OUTPUT"
+          echo "Loaded $RULES_COUNT label rules from label-rules.py"
 
       - name: Ensure labels exist on the repo
         env:
@@ -91,8 +101,9 @@ jobs:
           # config's convention: red for breaking, blue for
           # features, green for docs, etc.
           python3 -c "
-          import json
-          rules = json.load(open('.github/label-rules.json'))
+          import sys
+          sys.path.insert(0, '.github')
+          import label_rules
           # Reasonable default colors + descriptions for the
           # common Conventional Commits types. Anything not in this
           # map gets a neutral grey + the bare label name.
@@ -109,8 +120,7 @@ jobs:
             'type: build':    ('5319e7', 'Build system or external dependency change'),
             'type: style':    ('ededed', 'Formatting / whitespace only'),
           }
-          for r in rules:
-              label = r['label']
+          for label, _pattern in label_rules.RULES:
               color, desc = palette.get(label, ('ededed', label))
               print(f'{label}|{color}|{desc}')
           " | while IFS='|' read -r label color desc; do
@@ -139,14 +149,10 @@ jobs:
           #    job in draft-build.yml will fail the PR with a
           #    helpful "title doesn't match any known prefix" error.
           MATCHED_LABEL=$(python3 -c "
-          import json, re, sys
-          rules = json.load(open('.github/label-rules.json'))
-          title = sys.argv[1]
-          for r in rules:
-              if re.match(r['title_regex'], title):
-                  print(r['label'])
-                  sys.exit(0)
-          sys.exit(1)
+          import sys
+          sys.path.insert(0, '.github')
+          import label_rules
+          print(label_rules.match(sys.argv[1]) or '')
           " "$PR_TITLE" 2>/dev/null || true)
 
           if [ -n "$MATCHED_LABEL" ]; then

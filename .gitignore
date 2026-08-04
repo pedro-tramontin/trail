@@ -20,6 +20,10 @@ src-tauri/gen/
 .vscode/
 *.swp
 
+# Python (label-rules.py compiles to .pyc on import in CI)
+__pycache__/
+*.pyc
+
 # Local config (never commit)
 .trail/
 
