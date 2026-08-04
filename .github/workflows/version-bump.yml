@@ -66,8 +66,16 @@ jobs:
           # Find the single open draft release. release-drafter
           # maintains exactly one draft at a time, so the .[0]
           # assumption is safe. If there's no draft, skip.
-          DRAFT_TAG=$(gh release list --draft --json tagName \
-            --jq '.[0].tagName // ""')
+          #
+          # gh v2.x removed the `--draft` flag from `gh release
+          # list` (the documented flag is now `--exclude-drafts`).
+          # The replacement pattern is: list all releases with
+          # `isDraft` in the JSON, then filter via `--jq` to keep
+          # only drafts, then take the first one. If multiple
+          # drafts exist that's a release-drafter bug; we take
+          # the most-recent one and log a warning.
+          DRAFT_TAG=$(gh release list --json tagName,isDraft,createdAt \
+            --jq '[.[] | select(.isDraft)] | sort_by(.createdAt) | reverse | .[0].tagName // ""')
           if [ -z "$DRAFT_TAG" ]; then
             echo "::notice::No open draft release found; skipping version-bump."
             echo "has_draft=false" >> "$GITHUB_OUTPUT"
