@@ -7,7 +7,7 @@
 # PRs in its body until the user merges the
 # `chore(release): bump version to vX.Y.Z` PR that version-bump.yml
 # opens. promote.yml then builds prod binaries, attaches them to the
-# (still draft) release, and flips the draft → published.
+# (still draft) release, and flips the draft -> published.
 #
 # release-drafter emits ONE draft release per push to main. The
 # tag prefix is `trail-v` (src-tauri is the primary component). The
@@ -16,64 +16,71 @@
 # follow the same versions for now"), so a single `trail-vX.Y.Z`
 # release covers both.
 #
-# Version-resolver (PR title prefix is the source of truth):
-#   feat!:/fix!:/refactor!: → major
-#   feat:                    → minor
-#   fix:                     → patch
-#   chore:/docs:/ci:/test:/build:/refactor:/perf:/style: → no bump
+# Version-resolver (PR labels, applied by labeler.yml from title
+# prefix; the title itself remains the source of truth for humans):
+#   type: breaking -> major
+#   type: feature  -> minor
+#   type: bug, type: refactor, type: perf, type: docs, type: chore,
+#   type: ci, type: test, type: build, type: style -> patch
+#   (a label is required; the pr-label-check job in draft-build.yml
+#   enforces this)
 #
 # Categorization (Keep a Changelog section names):
-#   feat:             → "Added"
-#   feat!:/refactor!: → "Changed"
-#   fix:              → "Fixed"
-#   chore:/docs:/ci:/test:/build:/perf:/style: → omit (not user-facing)
+#   type: feature  -> "Added"
+#   type: breaking -> "Changed"
+#   type: bug      -> "Fixed"
+#   everything else (refactor, perf, docs, chore, ci, test, build,
+#   style) -> not user-facing, dropped from the changelog body
 #
-# Implementation note (v6 schema):
-# We use the v6 `when: conventional:` filter shape (see
-# https://github.com/release-drafter/release-drafter/blob/master/.github/release-drafter.yml)
-# instead of the legacy `keywords:` + `version-resolver` blocks. v6
-# requires every named category to have a `when:` filter (an empty
-# category with no `when:` and no `label:` is rejected at config
-# validation with "Multiple categories detected with no labels").
-# The `exclusive: true` flag means a PR matching this category's
-# conventional prefix is bucketed here and not re-evaluated against
-# later categories — so `feat!:` doesn't accidentally also match
-# `feat:`.
+# v0.3.56 history: release-drafter v6 is label-based only. The v0.3.55
+# config used title-prefix `keywords:` + a custom `version-resolver`
+# block, which v6 silently dropped (the Joi schema for `category` is
+# `{title, label(s), collapse-after}` only -- no `keywords`, no
+# `when:`, no `semver-increment`). The v0.3.55 config tripped the v6
+# schema validator with "Multiple categories detected with no labels"
+# because every category had `labels: []` and v6 only allows one such
+# no-label category. Fixed in #105 by porting to the v6 label-based
+# shape, with the labels supplied by the new `labeler.yml` workflow
+# that maps Conventional Commits title prefixes to `type: <name>`
+# labels at PR-open time.
 #
-# v0.3.55 history: the original config (Phase 8 §8.2 #102) used the
-# legacy `keywords:` shape and shipped an empty `category-defaults`
-# block as a "drop uncategorized PRs" fallback. That tripped the v6
-# schema validator ("Only one category with no labels is supported
-# for uncategorized pull requests") and the workflow failed at parse
-# time. The smoke test on #103 caught this — release-drafter run
-# 30880664416 failed with `Error: Invalid config file`. Fixed by
-# porting to the v6 `when: conventional:` shape and dropping the
-# category-defaults (v6 drops uncategorized PRs by default when no
-# `category-defaults` is defined, which is what we want for the
-# chore:/docs:/ci:/test:/build:/perf:/style: prefixes).
+# Implementation note: each category has exactly one label, the
+# `version-resolver` keys on the same labels, and labels are
+# auto-applied (never manually assigned) by labeler.yml from
+# .github/label-rules.json. The label taxonomy is the contract
+# between this file, labeler.yml, and the pr-label-check job in
+# draft-build.yml.
 
 name-template: "trail-v$RESOLVED_VERSION"
 tag-template: "trail-v$RESOLVED_VERSION"
 
 categories:
   - title: "Changed"
-    semver-increment: "major"
-    exclusive: true
-    when:
-      conventional:
-        breaking: true
+    label: "type: breaking"
   - title: "Added"
-    semver-increment: "minor"
-    exclusive: true
-    when:
-      conventional:
-        type: "feat"
+    label: "type: feature"
   - title: "Fixed"
-    semver-increment: "patch"
-    exclusive: true
-    when:
-      conventional:
-        type: "fix"
+    label: "type: bug"
+
+version-resolver:
+  major:
+    labels:
+      - "type: breaking"
+  minor:
+    labels:
+      - "type: feature"
+  patch:
+    labels:
+      - "type: bug"
+      - "type: refactor"
+      - "type: perf"
+      - "type: docs"
+      - "type: chore"
+      - "type: ci"
+      - "type: test"
+      - "type: build"
+      - "type: style"
+  default: patch
 
 change-template: "- $TITLE (#$NUMBER) — `$COMMIT_SHA`"
 no-changes-template: "- No changes"

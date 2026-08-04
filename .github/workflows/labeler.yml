@@ -1,0 +1,177 @@
+# labeler workflow
+#
+# Auto-applies a `type: <name>` label to every PR based on the
+# Conventional Commits prefix in the PR title. This bridges the
+# title-prefix-as-source-of-truth rule (PR titles drive versioning)
+# to release-drafter v6, which is labels-only.
+#
+# Flow:
+#   1. PR opened / edited / reopened / synchronized
+#   2. labeler.yml reads .github/label-rules.json (the single
+#      source of truth for title->label mapping)
+#   3. Each rule's `title_regex` is tested against the PR title;
+#      the first match wins (rules are ordered most-specific first,
+#      so `feat!:` matches `type: breaking` before `feat:` could
+#      match `type: feature`).
+#   4. The matched label is created on the repo if missing (one-
+#      time bootstrap, idempotent) and added to the PR.
+#   5. Any previous `type: *` label is removed (the PR has
+#      exactly one `type:` label, always matching the current
+#      title - title edits re-trigger this workflow).
+#
+# Companion to the `pr-label-check` job in draft-build.yml, which
+# fails the PR check if this workflow hasn't applied the expected
+# label yet (race window between PR open and labeler.yml run).
+#
+# Fork PRs are skipped: forks don't have access to the repo's
+# labels via the default GITHUB_TOKEN (the API call would 404).
+# A maintainer can apply the label manually on fork PRs.
+#
+# Why a separate workflow from release-drafter.yml:
+#   - release-drafter.yml runs on `push: main` only. By the time
+#     it fires the PR is already merged and the title-based label
+#     never gets applied (autolabeler inside release-drafter needs
+#     `pull_request_target` to fire on open/sync).
+#   - Splitting them keeps each workflow's trigger + permission set
+#     minimal: labeler.yml is on PR events with label-write perms;
+#     release-drafter.yml is on push with release-write perms.
+
+name: labeler
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+  workflow_dispatch:
+
+# Fork guard at the workflow level is not supported by the GH
+# Actions schema - applied per-job below.
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    # Skip fork PRs (default GITHUB_TOKEN has no access to the
+    # upstream repo's labels for fork PRs). Maintainers can apply
+    # labels manually on fork PRs.
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read label rules
+        id: rules
+        run: |
+          # .github/label-rules.json is the single source of truth
+          # for the title->label mapping. The pr-label-check job in
+          # draft-build.yml reads the same file - both jobs MUST
+          # stay in lockstep or the check will disagree with the
+          # labeler. If you add a rule here, the pr-label-check
+          # job picks it up automatically.
+          echo "rules_file=.github/label-rules.json" >> "$GITHUB_OUTPUT"
+          RULES_COUNT=$(python3 -c "import json; print(len(json.load(open('.github/label-rules.json'))))")
+          echo "Loaded $RULES_COUNT label rules from label-rules.json"
+
+      - name: Ensure labels exist on the repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # release-drafter's autolabeler would do this implicitly,
+          # but since we run as a separate workflow the label must
+          # exist on the repo before `issues.addLabels` can apply
+          # it. `gh label create` is idempotent if you pass
+          # `--force`; we use `create` + ignore-errors so the
+          # step doesn't fail on a race with a concurrent label
+          # creation. Colors are picked from the v6 reference
+          # config's convention: red for breaking, blue for
+          # features, green for docs, etc.
+          python3 -c "
+          import json
+          rules = json.load(open('.github/label-rules.json'))
+          # Reasonable default colors + descriptions for the
+          # common Conventional Commits types. Anything not in this
+          # map gets a neutral grey + the bare label name.
+          palette = {
+            'type: breaking': ('b60205', 'Breaking change (semver major)'),
+            'type: feature':  ('0e8a16', 'New user-facing feature (semver minor)'),
+            'type: bug':      ('d73a4a', 'Bug fix (semver patch)'),
+            'type: refactor': ('1d76db', 'Code change that neither fixes a bug nor adds a feature'),
+            'type: perf':     ('fbca04', 'Performance improvement'),
+            'type: docs':     ('0075ca', 'Documentation only change'),
+            'type: chore':    ('cfd3d7', 'Build / tooling / non-user-facing change'),
+            'type: ci':       ('bfd4f2', 'CI / workflow change'),
+            'type: test':     ('bfdadc', 'Test addition or correction'),
+            'type: build':    ('5319e7', 'Build system or external dependency change'),
+            'type: style':    ('ededed', 'Formatting / whitespace only'),
+          }
+          for r in rules:
+              label = r['label']
+              color, desc = palette.get(label, ('ededed', label))
+              print(f'{label}|{color}|{desc}')
+          " | while IFS='|' read -r label color desc; do
+            gh label create "$label" \
+              --color "$color" \
+              --description "$desc" \
+              --force 2>&1 | sed "s/^/  labeler: /" || true
+          done
+
+      - name: "Apply matching label, remove stale type: labels"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # 1. Read label-rules.json
+          # 2. Test each rule's title_regex against $PR_TITLE in
+          #    declared order (first match wins - rules.json is
+          #    ordered most-specific first so `feat!:` matches
+          #    `type: breaking` before `feat:` matches
+          #    `type: feature`).
+          # 3. If a match: add that label, remove any other `type:`
+          #    labels currently on the PR (the PR has exactly one
+          #    `type:` label, always matching the current title).
+          # 4. If no match: don't add anything; the pr-label-check
+          #    job in draft-build.yml will fail the PR with a
+          #    helpful "title doesn't match any known prefix" error.
+          MATCHED_LABEL=$(python3 -c "
+          import json, re, sys
+          rules = json.load(open('.github/label-rules.json'))
+          title = sys.argv[1]
+          for r in rules:
+              if re.match(r['title_regex'], title):
+                  print(r['label'])
+                  sys.exit(0)
+          sys.exit(1)
+          " "$PR_TITLE" 2>/dev/null || true)
+
+          if [ -n "$MATCHED_LABEL" ]; then
+            echo "Title '$PR_TITLE' matched label: $MATCHED_LABEL"
+
+            # Add the matched label (idempotent; gh silently
+            # no-ops if it's already on the PR)
+            gh pr edit "$PR_NUMBER" --add-label "$MATCHED_LABEL"
+
+            # Remove any other `type: *` labels currently on the
+            # PR so the PR has exactly one `type:` label. This
+            # handles the title-edit case: if the author renames
+            # `fix:` -> `feat:` after a review, the `type: bug`
+            # label needs to be removed.
+            CURRENT_TYPE_LABELS=$(gh pr view "$PR_NUMBER" \
+              --json labels --jq '.labels[].name' \
+              | grep '^type: ' || true)
+            for stale in $CURRENT_TYPE_LABELS; do
+              if [ "$stale" != "$MATCHED_LABEL" ]; then
+                echo "Removing stale label: $stale"
+                gh pr edit "$PR_NUMBER" --remove-label "$stale"
+              fi
+            done
+          else
+            echo "::notice::Title '$PR_TITLE' didn't match any rule in label-rules.json."
+            echo "::notice::pr-label-check in draft-build.yml will fail this PR."
+            echo "::notice::Expected: feat: | fix: | feat!: | chore: | docs: | etc."
+          fi
