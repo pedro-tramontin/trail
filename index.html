@@ -4,6 +4,51 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trail</title>
+    <style>
+      /* Phase 9 §9.3 — onboarding window size/spacing.
+       *
+       * Without this reset the wizard sits at the top of the Tauri
+       * Webview2 window with 8px browser-default body margin and no
+       * vertical centering — the empty bottom half of the window made
+       * the wizard feel top-heavy (the welcome screen's "Get started"
+       * button was visible but the bottom edge of the wizard card was
+       * way above the window's bottom edge).
+       *
+       * Center both axes. The wizard is `max-width: 640px` so it
+       * doesn't stretch full-width; this reset makes the unused
+       * horizontal space split evenly on the left and right.
+       *
+       * `min-height: 100vh` (combined with `display: flex` +
+       * `align-items: center` + `justify-content: center`) centers
+       * the wizard vertically too. Tauri Webview2 honors `vh` units
+       * just like a normal browser viewport (the whole window is the
+       * viewport).
+       *
+       * `overflow: auto` on the body is the safety net: if the
+       * wizard content grows past the window height (e.g. StepScan's
+       * long candidate list on a small window) the body scrolls
+       * instead of clipping the content.
+       */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        overflow: auto;
+      }
+      #app {
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+        width: 100%;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
