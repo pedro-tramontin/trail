@@ -47,7 +47,7 @@
 # Implementation note: each category has exactly one label, the
 # `version-resolver` keys on the same labels, and labels are
 # auto-applied (never manually assigned) by labeler.yml from
-# .github/label-rules.json. The label taxonomy is the contract
+# .github/label-rules.py. The label taxonomy is the contract
 # between this file, labeler.yml, and the pr-label-check job in
 # draft-build.yml.
 
