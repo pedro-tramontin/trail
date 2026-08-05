@@ -13,7 +13,7 @@
     "format": "prettier --check ."
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^4.0.4",
     "@tauri-apps/cli": "^2.0",
     "@testing-library/svelte": "^5.2.0",
     "@testing-library/jest-dom": "^6.4.0",
