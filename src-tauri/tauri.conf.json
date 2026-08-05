@@ -52,6 +52,10 @@
     "category": "Productivity",
     "shortDescription": "Passive workday capture and VPS push",
     "longDescription": "Captures GitHub PRs, Claude sessions, calendar events, and voice notes. Summarizes locally with ollama. SSH-pushes approved summaries to your VPS.",
-    "macOS": {}
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "11.0"
+    }
   }
 }
