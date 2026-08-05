@@ -1,0 +1,148 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "baseBranches": [
+    "main"
+  ],
+  "dependencyDashboard": true,
+  "automerge": false,
+  "reviewers": [
+    "pedro-tramontin"
+  ],
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 10,
+  "rangeStrategy": "bump",
+  "rebaseWhen": "conflicted",
+  "labels": [
+    "dependencies"
+  ],
+  "rust": {
+    "enabled": true
+  },
+  "github-actions": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Bundle vite + vitest + @sveltejs/vite-plugin-svelte + @vitejs/plugin-react — they ship in lockstep and a half-updated toolchain breaks the dev server.",
+      "matchPackagePatterns": [
+        "^vite$",
+        "^vitest$",
+        "^@sveltejs/vite-plugin-svelte$",
+        "^@vitejs/"
+      ],
+      "groupName": "vite-stack"
+    },
+    {
+      "description": "Bundle svelte + svelte-check + eslint-plugin-svelte + prettier-plugin-svelte + @testing-library/svelte — the Svelte 4 → 5 migration was the highest-touch bump in this project, and these packages all track Svelte's major version.",
+      "matchPackagePatterns": [
+        "^svelte$",
+        "^svelte-check$",
+        "^eslint-plugin-svelte$",
+        "^prettier-plugin-svelte$",
+        "^@testing-library/svelte$"
+      ],
+      "groupName": "svelte-stack"
+    },
+    {
+      "description": "Bundle eslint + @typescript-eslint — the flat-config migration (eslint 8 → 9, typescript-eslint 7 → 8) is the last known noisy transition.",
+      "matchPackagePatterns": [
+        "^eslint$",
+        "^@typescript-eslint/"
+      ],
+      "groupName": "eslint-stack"
+    },
+    {
+      "description": "Bundle @tauri-apps/api + @tauri-apps/cli + @tauri-apps/plugin-os — the JS-side Tauri surface. The Rust-side tauri + tauri-build is grouped separately below.",
+      "matchPackagePatterns": [
+        "^@tauri-apps/"
+      ],
+      "groupName": "tauri-apps-js-stack"
+    },
+    {
+      "description": "Bundle tauri + tauri-build + tauri-plugin-os (Rust-side) — these move together on every Tauri minor. A split PR would not compile.",
+      "matchPackagePatterns": [
+        "^tauri$",
+        "^tauri-"
+      ],
+      "groupName": "tauri-stack"
+    },
+    {
+      "description": "Bundle tokio + tokio-util + tokio-cron-scheduler + ssh2 + ssh-key + async-trait — the async + transport stack is one logical unit; a partial bump is a compile error.",
+      "matchPackagePatterns": [
+        "^tokio$",
+        "^tokio-",
+        "^ssh2$",
+        "^ssh-key$",
+        "^async-trait$"
+      ],
+      "groupName": "async-stack"
+    },
+    {
+      "description": "Bundle serde + serde_json + thiserror + anyhow + tracing + tracing-subscriber — versioning is tightly coupled across the workspace.",
+      "matchPackagePatterns": [
+        "^serde$",
+        "^serde_",
+        "^thiserror$",
+        "^anyhow$",
+        "^tracing$",
+        "^tracing-subscriber$"
+      ],
+      "groupName": "serde-stack"
+    },
+    {
+      "description": "Bundle cpal + rubato + hound + whisper-rs — the Phase 5 §5.1–5.2 audio capture + resampling + ASR stack. hound (WAV decoder) is paired with cpal (capture) and rubato (resample); whisper-rs consumes the resampled output.",
+      "matchPackagePatterns": [
+        "^cpal$",
+        "^rubato$",
+        "^hound$",
+        "^whisper-rs$"
+      ],
+      "groupName": "audio-stack"
+    },
+    {
+      "description": "vite majors are driven manually (vite 5 → 6 required a vite-plugin-svelte compat check).",
+      "matchPackageNames": [
+        "vite"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "vitest majors are driven manually (vitest 2 → 3 required API changes in the api-mocking layer under tests/).",
+      "matchPackageNames": [
+        "vitest"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "svelte majors are driven manually (svelte 4 → 5 was a runes rewrite; future major transitions need the same explicit drive).",
+      "matchPackageNames": [
+        "svelte"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "tauri majors are driven manually (tauri 1 → 2 was a full API rewrite). Until trail is on a stable major, do not propose the next major.",
+      "matchPackageNames": [
+        "tauri",
+        "@tauri-apps/api",
+        "@tauri-apps/cli"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
+  ]
+}
