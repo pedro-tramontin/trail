@@ -315,55 +315,84 @@ jobs:
           PY
           PRS_JSON="$PRS_JSON" python3 - "$VERSION" "$TODAY" > /tmp/changelog_src.md
 
-          # src-tauri/CHANGELOG.md — full repo
-          cat > src-tauri/CHANGELOG.md <<EOF
-          # Changelog — Trail (src-tauri)
+          # Helper: prepend a new version section to a CHANGELOG
+          # file while preserving the file's existing version
+          # sections. Keep a Changelog's canonical layout is
+          # [preamble] + [newest version] + [older versions], so
+          # each release adds a section at the top.
           #
-          # All notable changes to the Trail desktop app (src-tauri)
-          # are documented in this file.
+          # The previous version of this step used
+          # `cat > CHANGELOG.md <<EOF ... EOF` which OVERWROTE
+          # the entire file, destroying all prior version
+          # sections. Bug first observed after v0.1.1: the
+          # in-repo CHANGELOG went from `[0.1.0] + [0.1.1]` after
+          # the v0.1.1 hand-write, to just `[0.2.0]` after the
+          # v0.2.0 version-bump run, dropping both prior
+          # versions. The fix below prepends a new section while
+          # preserving any existing `## [VERSION] - DATE`
+          # sections in reverse-chronological order.
           #
-          # The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-          # and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+          # Edge cases:
+          # - File doesn't exist yet: write preamble + new section.
+          # - File has no `## [` lines (e.g. only preamble):
+          #   write preamble + new section (preamble is regenerated
+          #   identically so the diff stays small).
+          # - File has malformed lines: we keep everything from the
+          #   first `## [` line onward verbatim, so later bumps
+          #   sort them out.
+          PRS_JSON="$PRS_JSON" python3 - /tmp/changelog_src.md \
+            src-tauri/CHANGELOG.md \
+            crates/trail-collector/CHANGELOG.md \
+            "$VERSION" "$TODAY" <<'PY'
+          import sys
+          new_section_path, src_tauri_path, collector_path, version, today = sys.argv[1:6]
+          with open(new_section_path) as f:
+              new_section = f.read()
+          preambles = {
+              src_tauri_path: (
+                  "# Changelog — Trail (src-tauri)\n"
+                  "#\n"
+                  "# All notable changes to the Trail desktop app (src-tauri)\n"
+                  "# are documented in this file.\n"
+                  "#\n"
+                  "# The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),\n"
+                  "# and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)."
+              ),
+              collector_path: (
+                  "# Changelog — trail-collector\n"
+                  "#\n"
+                  "# All notable changes to the trail-collector binary\n"
+                  "# (the VPS-side collector) are documented in this file.\n"
+                  "# The version is bumped in lockstep with src-tauri per\n"
+                  "# the project's standing rule.\n"
+                  "#\n"
+                  "# The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),\n"
+                  "# and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)."
+              ),
+          }
+          for path, preamble in preambles.items():
+              tail = ""
+              try:
+                  with open(path) as f:
+                      existing = f.read()
+                  # Keep everything from the first `## [` line onward.
+                  # If none, tail stays empty and the new file is
+                  # just preamble + new section.
+                  for i, line in enumerate(existing.splitlines(keepends=True)):
+                      if line.startswith("## ["):
+                          tail = "".join(existing.splitlines(keepends=True)[i:])
+                          break
+              except FileNotFoundError:
+                  pass
+              with open(path, "w") as f:
+                  f.write(preamble + "\n\n")
+                  f.write(new_section)
+                  if tail:
+                      f.write("\n" + tail)
+              print(f"  Prepended [{version}] to {path} (tail: {len(tail.splitlines())} lines preserved)")
+          PY
 
-          EOF
-          cat /tmp/changelog_src.md >> src-tauri/CHANGELOG.md
-
-          # crates/trail-collector/CHANGELOG.md — collector only.
-          # Filter PRs that touch crates/trail-collector/. If no
-          # PRs touch collector, write a "No collector-specific
-          # changes" section.
-          PRS_COLLECTOR=$(echo "$PRS_JSON" | python3 -c "
-          import json, sys
-          prs = json.load(sys.stdin)
-          # release-drafter doesn't have a per-package PR filter,
-          # so we approximate by re-fetching the files-changed
-          # for each PR. For a small repo this is fine; for a
-          # large repo, batch the call.
-          # NOTE: this filter runs INSIDE the runner; we don't
-          # have a JSON of file changes, so we just include the
-          # same PRs in the collector CHANGELOG and let the
-          # release notes be a superset. The user's standing rule
-          # is that collector follows src-tauri in lockstep, so
-          # any user-facing change to src-tauri is implicitly a
-          # change to collector too.
-          print(json.dumps(prs))
-          ")
-          cat > crates/trail-collector/CHANGELOG.md <<EOF
-          # Changelog — trail-collector
-          #
-          # All notable changes to the trail-collector binary
-          # (the VPS-side collector) are documented in this file.
-          # The version is bumped in lockstep with src-tauri per
-          # the project's standing rule.
-          #
-          # The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-          # and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-          EOF
-          # Same content as src-tauri (lockstep versions)
-          cat /tmp/changelog_src.md >> crates/trail-collector/CHANGELOG.md
-
-          echo "Updated both CHANGELOGs for version $VERSION"
+          echo "Prepended [$VERSION] section to both CHANGELOGs (prior sections preserved)"
 
       - name: Open version-bump PR
         if: steps.already_at.outputs.should_bump == 'true'
