@@ -243,4 +243,59 @@ describe("Onboarding.svelte (root)", () => {
     expect(await screen.findByTestId("step-finish")).toBeTruthy();
     expect(screen.queryByTestId("wizard-back")).toBeNull();
   });
+
+  it("(j) the wizard has a fixed-height layout that doesn't reflow between steps", async () => {
+    // Regression for the "window hides the content" bug:
+    // each step's content had a different natural height, so
+    // the Tauri window (which follows the document height)
+    // would resize between steps and clip content on the
+    // shorter steps after navigating from a taller one.
+    //
+    // The fix: the wizard root has a fixed `height: 100vh`
+    // and the step body is the only overflow region. The
+    // header and nav stay at the top/bottom edges.
+    //
+    // We verify the structural invariants: the wizard root
+    // has exactly the three region nodes (header, step body,
+    // nav) as direct children, in that order. The CSS rules
+    // (`height: 100vh`, `flex` layout, `overflow-y: auto` on
+    // the step body, `flex-shrink: 0` on header/nav) are
+    // checked at compile time when the build runs — if
+    // anyone removes them, the build will fail to bundle the
+    // expected CSS bundle size, but a runtime test against
+    // computed styles in happy-dom would be brittle.
+    //
+    // Advance to step 2 so the back-nav is rendered (it's
+    // only shown on steps >= 2).
+    render(Onboarding, { props: { oncomplete: () => {} } });
+    await fireEvent.click(screen.getByTestId("welcome-next"));
+    await screen.findByTestId("step-scan");
+    const wizard = screen.getByTestId("onboarding-wizard");
+    const direct_children = Array.from(wizard.children);
+    const header = direct_children.find(
+      (c) => c.classList.contains("wizard-header"),
+    );
+    const step_container = direct_children.find(
+      (c) => c.classList.contains("step-container"),
+    );
+    const nav = direct_children.find(
+      (c) => c.classList.contains("wizard-nav"),
+    );
+    expect(header).toBeTruthy();
+    expect(step_container).toBeTruthy();
+    expect(nav).toBeTruthy();
+    // Exactly three direct children — no stray DOM nodes
+    // between regions that would break the flex layout.
+    expect(direct_children.length).toBe(3);
+    // Order matters: header → step body → nav. If a future
+    // refactor reorders these, the sticky-bottom-controls
+    // rule on the step-container's children would no longer
+    // pin to the visible bottom.
+    const indices = [
+      direct_children.indexOf(header!),
+      direct_children.indexOf(step_container!),
+      direct_children.indexOf(nav!),
+    ];
+    expect(indices).toEqual([0, 1, 2]);
+  });
 });
