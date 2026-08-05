@@ -380,6 +380,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
+          # Fetch the orphan branch tip from origin BEFORE the push
+          # so `--force-with-lease` has a ref to lease against.
+          # actions/checkout@v4 defaults to fetch-depth:1 (the
+          # current branch only), so the runner's local repo has
+          # no ref for `infra/8-2-bump-X.Y.Z` on the first push
+          # of a new version. `--force-with-lease` then fails with
+          # "stale info" because it has nothing to lease against.
+          # The `|| true` swallows the expected failure on the
+          # first push (no remote tip yet); on subsequent pushes
+          # the fetch returns the existing tip and
+          # `--force-with-lease` works as designed.
+          #
+          # First observed in trail run 30982501307 (2026-08-05,
+          # the post-merge run for the close-superseded-PRs fix
+          # in #136). The reference's "Bug C's sibling" section
+          # flagged this on 2026-08-04 as "planned, not yet
+          # landed" — this is the landing.
+          git fetch origin "$BRANCH" || true
           git add src-tauri/Cargo.toml \
                   src-tauri/tauri.conf.json \
                   package.json \
@@ -400,6 +418,11 @@ jobs:
           # orphans at the exact tip we want to update; legitimate
           # concurrent pushes would advance the tip in a way
           # --force-with-lease detects and refuses.
+          #
+          # Requires the `git fetch origin $BRANCH || true` line
+          # above — without it, --force-with-lease fails with
+          # "stale info" because the runner has no remote ref to
+          # lease against on the first push.
           git push --force-with-lease -u origin "$BRANCH"
 
           # Open PR. auto-merge is intentionally NOT enabled —
