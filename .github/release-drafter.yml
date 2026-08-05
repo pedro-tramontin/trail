@@ -90,7 +90,7 @@ template: |
 
   $CHANGES
 
-  **Full Changelog**: https://github.com/pedro-tramontin/trail/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+  **Full Changelog**: https://github.com/pedro-tramontin/trail/compare/$PREVIOUS_TAG...trail-v$RESOLVED_VERSION
 
 exclude-labels:
   - "skip-changelog"
