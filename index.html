@@ -40,7 +40,35 @@
         align-items: center;
         justify-content: center;
         min-height: 100vh;
-        overflow: auto;
+        /*
+         * Overflow: hidden — never let the body itself scroll.
+         *
+         * The body USED to have `overflow: auto` as a safety net
+         * (per Phase 9 §9.3): "if the wizard's content grows
+         * past the window height, the body scrolls instead of
+         * clipping the content". That safety net had a real
+         * cost — Tauri's WKWebView reports `100dvh` and `100vh`
+         * as different values when the window chrome
+         * (titlebar, menubar) is discounted differently. The
+         * wizard declares `height: 100dvh` (with `min-height:
+         * 100vh` as a fallback) and the body declares
+         * `min-height: 100vh` — when `100dvh` is even a pixel
+         * larger than `100vh`, the wizard overflowed the body
+         * by 1-2px and the body's `overflow: auto` rendered a
+         * window-level scrollbar even on the shortest step
+         * (StepWelcome). The user's intent — and Pattern 4 of
+         * the wizard-ux-patterns skill — is that the WIZARD'S
+         * internal `.step-container` scrollbar is the ONLY
+         * scrollbar in the onboarding window.
+         *
+         * The wizard already has `overflow: hidden` so its
+         * own content is clipped; the step-container already
+         * has `overflow-y: auto; scrollbar-gutter: stable`
+         * so the intended content scroll behavior is
+         * preserved. Swapping body to `overflow: hidden` keeps
+         * the wizard locked to the viewport at all times.
+         */
+        overflow: hidden;
       }
       #app {
         display: flex;
