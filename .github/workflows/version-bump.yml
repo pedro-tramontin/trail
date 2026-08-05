@@ -425,6 +425,34 @@ jobs:
           # lease against on the first push.
           git push --force-with-lease -u origin "$BRANCH"
 
+          # If a PR for this branch already exists, the
+          # version-bump for this version is already in flight
+          # (waiting for manual review per the Phase 8 design).
+          # Don't try to open a duplicate — `gh pr create` will
+          # refuse with "a pull request for branch X into branch
+          # main already exists" and the whole workflow goes red
+          # (Bug C in
+          # references/release-pipeline-2026-08-attach-debug-real-run-failures.md,
+          # second instance after the orphan-PR fix in #136).
+          # Force-updating the branch tip above keeps the existing
+          # PR's diff in sync with the new version files / CHANGELOGs,
+          # which is the right behavior — the existing PR's review
+          # state and comments are preserved.
+          #
+          # First observed in trail run 30982899974 (post-merge run
+          # for the --force-with-lease fix in #137, 2026-08-05): the
+          # orphan branch `infra/8-2-bump-0.3.0` from PR #127 caused
+          # `gh pr create` to fail.
+          EXISTING_PR=$(gh pr list \
+            --state open \
+            --head "$BRANCH" \
+            --json number \
+            --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "::notice::PR #$EXISTING_PR already open for branch $BRANCH (version $VERSION); the force-updated branch tip is now reflected in the existing PR's diff. No new PR needed."
+            exit 0
+          fi
+
           # Open PR. auto-merge is intentionally NOT enabled —
           # the user reviews + merges manually per the Phase 8
           # design.
