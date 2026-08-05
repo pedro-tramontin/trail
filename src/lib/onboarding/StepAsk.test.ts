@@ -166,26 +166,33 @@ describe("StepAsk.svelte", () => {
     expect(screen.queryByTestId("review-time-value")).toBeNull();
   });
 
-  it("(i) typing in the HH:MM picker updates the local time and the UTC hint live", async () => {
-    const on_next = vi.fn();
+  it("(i) editing the local HH:MM picker keeps the tz label visible in edit mode", async () => {
+    // UX regression: the edit-mode hint USED to read
+    // "Stored as NN:MM UTC (Berlin)" — per Anti-pattern D of
+    // wizard-ux-patterns ("don't tell the user '18:00 UTC'"),
+    // we drop the UTC conversion from the user-visible text.
+    // The user picks their LOCAL time; we translate to UTC
+    // internally on Next (covered by test (i2) below). What
+    // remains visible in edit mode is just the city label so
+    // the user can confirm the auto-detected timezone is the
+    // one they're picking for.
+    //
+    // Specifically: there must NOT be a `review-time-utc`
+    // testid in edit mode (we removed that DOM node), and the
+    // existing `review-time-tz` testid must still render.
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next },
+      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
-    const input = screen.getByTestId(
-      "review-time-input",
-    ) as HTMLInputElement;
-    // <input type="time"> expects an HH:MM string.
-    await fireEvent.input(input, { target: { value: "07:30" } });
-    // Pre-Next, the summary is gone (editing=true), so the
-    // user-visible state is the "Stored as NN:MM UTC" hint.
-    const utc = screen.getByTestId("review-time-utc");
-    const offset_minutes = new Date().getTimezoneOffset();
-    const total_local = 7 * 60 + 30;
-    const total_utc = ((total_local - offset_minutes) + 1440) % 1440;
-    const expected_utc = `${String(Math.floor(total_utc / 60)).padStart(2, "0")}:${String(total_utc % 60).padStart(2, "0")}`;
-    expect(utc.textContent?.trim()).toBe(`${expected_utc} UTC`);
+    // No UTC hint element anywhere in the document. The
+    // picker takes the summary's slot; the hint is just the
+    // tz label.
+    expect(screen.queryByTestId("review-time-utc")).toBeNull();
+    // City label still present so the user can verify
+    // timezone detection.
+    const tz = screen.getByTestId("review-time-tz");
+    expect(tz.textContent?.trim().length).toBeGreaterThan(2);
   });
 
   it("(i2) editing the local HH:MM stores the converted hour on Next", async () => {

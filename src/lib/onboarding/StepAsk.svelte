@@ -83,8 +83,7 @@
   /*
    * Local review time, as an "HH:MM" string (24h) bound to a
    * <input type="time">. Default "18:00" to match the existing
-   * baseline. We split into hour/minute before converting to
-   * UTC so the user can pick minutes too — not just hours.
+   * baseline. We split into hour before converting to UTC.
    *
    * Note: the Rust scheduler parses `cfg.review_time` (in the
    * final config) as `%H:%M`, but the LLM answer object stores
@@ -98,7 +97,6 @@
    */
   let review_hhmm_local = $state("18:00");
   let review_hour_local = $derived(parseInt(review_hhmm_local.split(":")[0], 10) || 0);
-  let review_minute_local = $derived(parseInt(review_hhmm_local.split(":")[1], 10) || 0);
 
   // Browser-detected IANA timezone (e.g. "America/Sao_Paulo").
   const local_tz: string =
@@ -113,23 +111,22 @@
   }
 
   /**
-   * Translate "HH:MM" local time to a UTC "HH:MM" string.
+   * Translate the picked local hour to UTC for storage.
    * `new Date().getTimezoneOffset()` returns minutes-from-local-
    * TO-UTC (sign-flipped per ECMA: UTC-5 → 300), so a user in
-   * UTC-5 picking local "18:00" should see UTC stored as
-   * "23:00".
+   * UTC-5 picking local hour 18 should see UTC stored as
+   * hour 23. Used by `apply_local_review_time` to write
+   * `answers.review_time.hour_utc` before the parent's on_next
+   * callback — the Rust scheduler parses that field as `%H:%M`
+   * in UTC.
+   *
+   * Note: we deliberately do NOT render the converted UTC in
+   * the user-visible hint (per Anti-pattern D of
+   * wizard-ux-patterns — don't tell the user "18:00 UTC").
+   * The user picks their LOCAL time, the wizard translates
+   * internally on Next, and the only context the user sees
+   * is the city label (`Your time (Berlin)`).
    */
-  function local_hhmm_to_utc(local_hhmm: string): string {
-    const parts = local_hhmm.split(":");
-    const h = parseInt(parts[0] ?? "0", 10) || 0;
-    const m = parseInt(parts[1] ?? "0", 10) || 0;
-    const local_total = h * 60 + m;
-    const offset_min = new Date().getTimezoneOffset();
-    const utc_total = ((local_total - offset_min) + 1440) % 1440;
-    return `${String(Math.floor(utc_total / 60)).padStart(2, "0")}:${String(utc_total % 60).padStart(2, "0")}`;
-  }
-
-  /** Same conversion, integer hour only (for `hour_utc`). */
   function local_hour_to_utc(local_hour: number): number {
     const offset_minutes = new Date().getTimezoneOffset();
     const offset_hours = offset_minutes / 60;
@@ -378,9 +375,20 @@
               data-testid="review-time-input"
               aria-label="Review time (your local time, HH:MM)"
             />
+            <!--
+              Edit-mode hint. Per Pattern 2 (Store UTC, Show
+              Local Time) and Anti-pattern D of
+              wizard-ux-patterns (don't tell the user "Stored
+              as 20:00 UTC"), we deliberately omit the UTC
+              conversion. The user picks their local time; we
+              translate it to UTC internally on save. The only
+              context the user needs is "which timezone am I
+              picking for?" — the city label answers that.
+              Just dropping the "Stored as HH:MM UTC" line and
+              showing the tz label alone is enough.
+            -->
             <span class="hint">
-              Stored as
-              <strong data-testid="review-time-utc" class="utc">{local_hhmm_to_utc(review_hhmm_local)} UTC</strong>
+              Your time
               <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
             </span>
           {:else}
@@ -568,11 +576,6 @@
     font-size: 0.8rem;
     color: var(--muted, #666);
     line-height: 1.3;
-  }
-  .utc {
-    font-family: monospace;
-    font-weight: 600;
-    color: var(--fg, #111);
   }
   /**
    * Review-time row uses a flex layout in its value slot so
