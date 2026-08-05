@@ -5,62 +5,67 @@
   /**
    * Step 2 — Non-invasive laptop scan (item 6-1).
    *
-   * On mount, fires `scan_laptop_cmd` (the Tauri command name
-   * from src-tauri/src/onboarding/scan.rs). Shows a loading
-   * state while in flight, then renders the returned
-   * `ScanReport` as a per-collector findings list grouped by
-   * status (Available / Unavailable / AlreadyConfigured).
+   * On mount, fires `scan_laptop_cmd`. On success, shows a
+   * 10-second auto-advance countdown at the bottom of the step
+   * that the user can stop or skip. Two explicit controls —
+   * no surprise transitions:
    *
-   * Auto-advances to StepAsk once the scan resolves
-   * successfully, after a 10-second countdown so the user has
-   * time to read the findings. The countdown is visible at the
-   * bottom of the step ("Auto-advancing in N…") and is
-   * cancellable via the "Continue now" button, which advances
-   * immediately. The user can also click "← Back" to revisit
-   * this step (the wizard's nav button).
+   *   - "Stop countdown" — cancel the auto-advance; user stays
+   *     on this step until they click Continue now.
+   *   - "Continue now"   — skip the countdown and advance
+   *     immediately.
    *
-   * The 10s default replaces the previous 800ms implementation
-   * after feedback that the auto-advance felt jarring — users
-   * had to click back 3+ times to actually read the scan
-   * findings. The countdown gives them a clear time window
-   * to read + an explicit control to skip it.
+   * There is no Resume button: once the user pauses the
+   * countdown, the only way forward is "Continue now". This
+   * matches the rest of the wizard's "explicit confirmation,
+   * no implicit auto-progression" model and removes the
+   * double-control confusion that came from having both
+   * Resume and Continue-now alongside a paused countdown.
+   *
+   * The countdown state is exposed as three values via
+   * `countdown_state`: "ticking" | "stopped" | null. The
+   * control row renders the matching affordance. The user can
+   * also click the wizard's "← Back" to revisit this step at
+   * any time (no timer fighting that).
+   *
+   * 800ms was the original delay; user feedback said it felt
+   * like the step "scared" them and they had to click back 3+
+   * times to read the findings. 10s with explicit Stop is the
+   * replacement.
    */
 
   let { on_next }: { on_next: (report: ScanReport) => void } = $props();
 
-  /** Seconds the user gets to read the findings before
-   *  auto-advance. Tweakable for tests. */
   const AUTO_ADVANCE_SECONDS = 10;
 
   let report = $state<ScanReport | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  /** Remaining seconds on the auto-advance countdown. Starts
-   *  at `null` (no countdown running) and goes to
-   *  AUTO_ADVANCE_SECONDS when the scan resolves. */
+  /** Remaining seconds on the auto-advance countdown.
+   *  `null` = no countdown visible (loading or stopped).
+   *  number = ticking down to 0, then auto-advance. */
   let countdown = $state<number | null>(null);
+  /** "ticking" = countdown running; "stopped" = user paused it. */
+  let countdown_state = $state<"ticking" | "stopped" | null>(null);
   let interval_timer: ReturnType<typeof setInterval> | null = null;
-  let advance_timer: ReturnType<typeof setTimeout> | null = null;
 
   function clear_timers(): void {
     if (interval_timer !== null) {
       clearInterval(interval_timer);
       interval_timer = null;
     }
-    if (advance_timer !== null) {
-      clearTimeout(advance_timer);
-      advance_timer = null;
-    }
   }
 
   function start_countdown(): void {
     clear_timers();
     countdown = AUTO_ADVANCE_SECONDS;
+    countdown_state = "ticking";
     interval_timer = setInterval(() => {
       if (countdown === null) return;
       if (countdown <= 1) {
         clear_timers();
         countdown = null;
+        countdown_state = null;
         if (report) on_next(report);
       } else {
         countdown -= 1;
@@ -68,9 +73,16 @@
     }, 1000);
   }
 
+  function stop_countdown(): void {
+    clear_timers();
+    countdown_state = "stopped";
+    countdown = null;
+  }
+
   function continue_now(): void {
     clear_timers();
     countdown = null;
+    countdown_state = null;
     if (report) on_next(report);
   }
 
@@ -79,13 +91,12 @@
     error = null;
     report = null;
     countdown = null;
+    countdown_state = null;
     clear_timers();
     try {
       const result = await invoke<ScanReport>("scan_laptop_cmd");
       report = result;
       loading = false;
-      // Start the visible auto-advance countdown so the user
-      // can read the findings before we transition.
       start_countdown();
     } catch (err) {
       error = String(err);
@@ -158,21 +169,43 @@
     </ul>
 
     <div class="auto-advance" data-testid="scan-auto-advance">
-      <span class="countdown" data-testid="scan-countdown">
-        {#if countdown !== null}
+      {#if countdown_state === "ticking"}
+        <span class="countdown" data-testid="scan-countdown">
           Auto-advancing in {countdown}s…
-        {:else}
-          Auto-advancing to the next step…
-        {/if}
-      </span>
-      <button
-        type="button"
-        class="link"
-        data-testid="scan-continue-now"
-        onclick={continue_now}
-      >
-        Continue now
-      </button>
+        </span>
+        <div class="controls">
+          <button
+            type="button"
+            class="link"
+            data-testid="scan-stop-countdown"
+            onclick={stop_countdown}
+          >
+            Stop countdown
+          </button>
+          <button
+            type="button"
+            class="link"
+            data-testid="scan-continue-now"
+            onclick={continue_now}
+          >
+            Continue now
+          </button>
+        </div>
+      {:else if countdown_state === "stopped"}
+        <span class="countdown stopped" data-testid="scan-countdown">
+          Auto-advance paused
+        </span>
+        <div class="controls">
+          <button
+            type="button"
+            class="link"
+            data-testid="scan-continue-now"
+            onclick={continue_now}
+          >
+            Continue now
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 </section>

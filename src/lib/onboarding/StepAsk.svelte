@@ -1,6 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import type { OnboardingAnswers, ScanReport } from "./types";
+  import type {
+    OnboardingAnswers,
+    ScanReport,
+    QuestionLogEntry,
+  } from "./types";
 
   /**
    * Step 3 — LLM-driven Q&A (item 6-2).
@@ -14,6 +18,23 @@
    * github.repos) so the user can override without leaving
    * the wizard. Disabled until the IPC resolves.
    *
+   * Two UX features layered on top of the basic checklist:
+   *
+   *   1. Editable review time — clicking the review-time row
+   *      opens a 0–23 hour picker. The local hour the user
+   *      picks is translated back to UTC by
+   *      `apply_local_review_time` before being stored, so
+   *      the scheduler fires at the user's local time (see
+   *      the file's earlier commit message for the full
+   *      timezone handling rationale).
+   *   2. "Why disabled?" tooltips — every row that shows
+   *      "disabled" has a `?` icon next to the value. Hover
+   *      (or tap on touch) reveals the LLM's reasoning from
+   *      `question_log`, matched by `evidence_refs` against
+   *      the field name. If the LLM didn't log a reason, a
+   *      generic fallback is shown so the tooltip is never
+   *      empty.
+   *
    * On Next, calls the `on_next` prop with the (possibly
    * edited) `OnboardingAnswers` as the argument.
    *
@@ -25,30 +46,18 @@
    * "18:00" mean "18:00 in the user's local time", this step:
    *
    *   1. Detects the browser timezone via
-   *      `Intl.DateTimeFormat().resolvedOptions().timeZone`
-   *      (e.g. "America/Sao_Paulo").
-   *   2. Computes the timezone offset at the current moment
-   *      (`new Date().getTimezoneOffset()` returns minutes, sign
-   *      flipped per spec — UTC-5 → +300).
-   *   3. Renders the review-time row as a fixed "18:00 your
-   *      time (<tz>)" so the user sees the local hour they
-   *      care about. The Rust default `hour_utc: 18` is
-   *      interpreted as the local-hour default.
-   *   4. Before calling `on_next`, translates the local 18:00
+   *      `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+   *   2. Reads the offset at the current moment
+   *      (`new Date().getTimezoneOffset()`).
+   *   3. Defaults the local hour to 18. The user can override
+   *      via the picker on the review-time row.
+   *   4. Before calling `on_next`, translates the local hour
    *      back to UTC and writes that into
-   *      `answers.review_time.hour_utc` so the scheduler fires
-   *      at the correct UTC instant. UTC-5 user →
-   *      `hour_utc = 23`; UTC+5 user → `hour_utc = 13`.
+   *      `answers.review_time.hour_utc`.
    *
    * DST is handled imperfectly (we read the offset at the
-   * current moment, not at the next fire time). A future item
-   * can either store the IANA timezone string alongside
-   * `hour_utc` and resolve DST at fire time, or refresh the
-   * offset daily. For v1 this is good enough — DST transitions
-   * shift the local fire time by 1h for ~3 weeks a year.
-   *
-   * This whole conversion is local to the wizard; the Rust
-   * side stays unchanged. We never persist the timezone string.
+   * current moment, not at the next fire time). Documented
+   * in earlier commit; the user can refine in Settings later.
    */
 
   let {
@@ -68,46 +77,55 @@
   let edit_claude_paths = $state("");
   let edit_github_repos = $state("");
 
-  // The local hour we display to the user. v1 is read-only
-  // (the LLM picks "evening"; we just show that as 18:00 local
-  // time). A future item can add an hour-picker; for now this
-  // stays at 18 so the user's mental model is "evening review
-  // at 6 PM, my time".
-  const REVIEW_HOUR_LOCAL = 18;
+  // Local review hour (0–23). Defaults to 18. The user can
+  // override via the picker that appears when editing === true.
+  let review_hour_local = $state(18);
+  let editing_review_hour = $state(false);
 
-  // Browser-detected IANA timezone (e.g. "America/Sao_Paulo",
-  // "Europe/Lisbon", "UTC"). Computed once on mount; the value
-  // is shown to the user in the review-time row.
+  // Browser-detected IANA timezone (e.g. "America/Sao_Paulo").
   const local_tz: string =
     typeof Intl !== "undefined"
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : "UTC";
 
-  /**
-   * Translate a local-hour H into the UTC hour that, when
-   * stored, will fire the scheduler at H local-time. The
-   * returned value is normalised into [0, 23] (a 24h
-   * timezone offset wraps the day).
-   *
-   * Example: at UTC-5, getTimezoneOffset() returns 300
-   * (minutes east of UTC, sign-flipped per ECMA spec).
-   * local → UTC: utc = (local - offset_hours + 24) mod 24.
-   * For local=18, offset=5: utc = (18 - 5 + 24) mod 24 = 13.
-   */
   function local_hour_to_utc(local_hour: number): number {
-    // `getTimezoneOffset` returns the offset in minutes FROM
-    // local TO UTC (so UTC-5 → 300). Sign-flipped for the math.
     const offset_minutes = new Date().getTimezoneOffset();
     const offset_hours = offset_minutes / 60;
     return ((local_hour - offset_hours) + 24) % 24;
   }
 
-  /** Short timezone label for the review-time row. */
   function short_tz_label(tz: string): string {
     if (tz === "UTC") return "UTC";
-    // "America/Sao_Paulo" → "Sao_Paulo"; "America/Argentina/Buenos_Aires" → "Buenos_Aires".
     const parts = tz.split("/");
     return parts[parts.length - 1].replace(/_/g, " ");
+  }
+
+  /**
+   * Find the question_log entry that explains why a given
+   * field is in its current state (enabled or disabled).
+   * Matches by `evidence_refs` containing the field name.
+   * Returns null if no entry exists.
+   */
+  function find_reason(
+    field_id: string,
+    log: QuestionLogEntry[],
+  ): QuestionLogEntry | null {
+    return (
+      log.find((e) => e.evidence_refs.includes(field_id)) ?? null
+    );
+  }
+
+  /**
+   * Build the user-facing "why" string for a disabled field.
+   * Tries question_log first, falls back to a generic message.
+   */
+  function disabled_reason(
+    field_id: string,
+    log: QuestionLogEntry[],
+  ): string {
+    const entry = find_reason(field_id, log);
+    if (entry) return `${entry.question} → ${entry.reasoning}`;
+    return `This field is disabled. The LLM didn't log a reason for "${field_id}".`;
   }
 
   const can_advance = $derived(answers !== null && !loading);
@@ -117,12 +135,18 @@
     loading = true;
     error = null;
     try {
-      const result = await invoke<OnboardingAnswers>("ask_onboarding_cmd", {
-        scan,
-      });
+      const result = await invoke<OnboardingAnswers>(
+        "ask_onboarding_cmd",
+        { scan },
+      );
       answers = result;
+      // Seed the local edit buffers from the LLM answer.
       edit_claude_paths = (result.claude_sessions_paths ?? []).join("\n");
       edit_github_repos = (result.github?.repos ?? []).join("\n");
+      // Default the local review-hour picker to 18. The user
+      // can pick a different hour.
+      review_hour_local = 18;
+      editing_review_hour = false;
     } catch (err) {
       error = String(err);
     } finally {
@@ -132,7 +156,6 @@
 
   function toggle_edit(): void {
     if (!editing && answers) {
-      // Seed the local edit buffers from the LLM answer.
       edit_claude_paths = (answers.claude_sessions_paths ?? []).join("\n");
       edit_github_repos = (answers.github?.repos ?? []).join("\n");
     }
@@ -162,12 +185,9 @@
   }
 
   /**
-   * Before sending the answers to the parent (which calls
-   * `write_onboarding_config`), translate the LLM's UTC
-   * `hour_utc` into the UTC hour that represents 18:00 in the
-   * user's local timezone. The LLM returns whatever default
-   * the schema + Rust layer produced (e.g. 18); we override
-   * it so the scheduler actually fires at 18:00 local.
+   * Translate the user's local review-hour back to UTC and
+   * write it into `answers.review_time.hour_utc`. The LLM's
+   * `cadence` ("evening"/"morning"/"weekly") is preserved.
    */
   function apply_local_review_time(
     base: OnboardingAnswers,
@@ -176,11 +196,7 @@
       ...base,
       review_time: {
         ...base.review_time,
-        // The LLM's `cadence` ("evening"/"morning"/"weekly")
-        // is a coarse bucket — we keep it. The fine-grained
-        // `hour_utc` is what gets rewritten so the scheduler
-        // fires at REVIEW_HOUR_LOCAL in the user's tz.
-        hour_utc: local_hour_to_utc(REVIEW_HOUR_LOCAL),
+        hour_utc: local_hour_to_utc(review_hour_local),
       },
     };
   }
@@ -221,49 +237,122 @@
         <span class="value">
           {#if answers.claude_sessions_paths.length === 0}
             <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-claude_sessions"
+              aria-label="Why is Claude sessions disabled?"
+              title={disabled_reason("claude_sessions", answers.question_log)}
+            >?</button>
           {:else}
             {answers.claude_sessions_paths.length} path(s)
           {/if}
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">GitHub</span>
         <span class="value">
-          {answers.github?.enabled ? "enabled" : "disabled"}
-          {#if answers.github?.repos?.length}
-            — watching {answers.github.repos.length} repo(s)
+          {#if !answers.github?.enabled}
+            <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-github"
+              aria-label="Why is GitHub disabled?"
+              title={disabled_reason("github", answers.question_log)}
+            >?</button>
+          {:else}
+            enabled
+            {#if answers.github?.repos?.length}
+              — watching {answers.github.repos.length} repo(s)
+            {/if}
           {/if}
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">Calendar</span>
         <span class="value">
-          {answers.calendar_ics?.enabled ? "enabled" : "disabled"}
+          {#if !answers.calendar_ics?.enabled}
+            <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-calendar"
+              aria-label="Why is Calendar disabled?"
+              title={disabled_reason("calendar", answers.question_log)}
+            >?</button>
+          {:else}
+            enabled
+          {/if}
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">Voice capture</span>
         <span class="value">
-          {answers.voice?.enabled
-            ? `enabled (${answers.voice.model}, ${answers.voice.language})`
-            : "disabled"}
+          {#if !answers.voice?.enabled}
+            <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-voice"
+              aria-label="Why is Voice capture disabled?"
+              title={disabled_reason("voice", answers.question_log)}
+            >?</button>
+          {:else}
+            enabled ({answers.voice.model}, {answers.voice.language})
+          {/if}
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">Review time</span>
-        <span class="value" data-testid="review-time-value">
-          {answers.review_time.cadence} at
-          <strong>{String(REVIEW_HOUR_LOCAL).padStart(2, "0")}:00</strong>
-          your time
-          <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
+        <span class="value review-time" data-testid="review-time-value">
+          <span class="review-time-summary">
+            {answers.review_time.cadence} at
+            <strong data-testid="review-time-hour">{String(review_hour_local).padStart(2, "0")}:00</strong>
+            your time
+            <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
+          </span>
+          <button
+            type="button"
+            class="link"
+            data-testid="review-time-edit"
+            onclick={() => (editing_review_hour = !editing_review_hour)}
+          >
+            {editing_review_hour ? "Done" : "Change time"}
+          </button>
+          {#if editing_review_hour}
+            <div class="review-time-picker" data-testid="review-time-picker">
+              <label class="picker-label" for="review-hour-input">
+                Hour (0–23, your local time)
+              </label>
+              <input
+                id="review-hour-input"
+                type="number"
+                min="0"
+                max="23"
+                step="1"
+                bind:value={review_hour_local}
+                data-testid="review-hour-input"
+              />
+              <span class="picker-note">
+                Stored as <strong>{local_hour_to_utc(review_hour_local)}:00 UTC</strong>
+              </span>
+            </div>
+          {/if}
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">Summarizer</span>
         <span class="value">
           {answers.summarizer.backend} ({answers.summarizer.model})
         </span>
       </li>
+
       <li class="answer-row">
         <span class="label">Transport</span>
         <span class="value">{answers.transport.method}</span>
@@ -358,6 +447,64 @@
   .label {
     font-weight: 500;
   }
+  .why {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-left: 0.4rem;
+    border-radius: 50%;
+    border: 1px solid var(--muted, #888);
+    background: transparent;
+    color: var(--muted, #666);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: help;
+    padding: 0;
+    line-height: 1;
+  }
+  .why:hover,
+  .why:focus {
+    background: var(--muted, #666);
+    color: white;
+    outline: none;
+  }
+  .review-time {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .review-time-summary {
+    flex: 1;
+  }
+  .review-time-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: 100%;
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: var(--bg-soft, #f6f8fa);
+    border: 1px solid var(--border, #ccc);
+    border-radius: 4px;
+  }
+  .picker-label {
+    font-size: 0.85rem;
+    color: var(--muted, #666);
+  }
+  .picker-note {
+    font-size: 0.8rem;
+    color: var(--muted, #666);
+  }
+  .review-time-picker input {
+    width: 4rem;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.95rem;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 3px;
+  }
   .edits {
     display: flex;
     flex-direction: column;
@@ -409,6 +556,18 @@
   .secondary:hover {
     background: var(--primary, #2563eb);
     color: white;
+  }
+  .link {
+    background: transparent;
+    border: none;
+    color: var(--primary, #2563eb);
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .link:hover {
+    text-decoration: underline;
   }
   .spinner {
     display: inline-block;
