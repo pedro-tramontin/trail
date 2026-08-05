@@ -16,6 +16,39 @@
    *
    * On Next, calls the `on_next` prop with the (possibly
    * edited) `OnboardingAnswers` as the argument.
+   *
+   * ## Review time handling
+   *
+   * The Rust side stores `review_time.hour_utc` (UTC hour-of-day)
+   * because the scheduler (src-tauri/src/scheduler.rs) is
+   * UTC-only and parses the value as `%H:%M` in UTC. To make
+   * "18:00" mean "18:00 in the user's local time", this step:
+   *
+   *   1. Detects the browser timezone via
+   *      `Intl.DateTimeFormat().resolvedOptions().timeZone`
+   *      (e.g. "America/Sao_Paulo").
+   *   2. Computes the timezone offset at the current moment
+   *      (`new Date().getTimezoneOffset()` returns minutes, sign
+   *      flipped per spec — UTC-5 → +300).
+   *   3. Renders the review-time row as a fixed "18:00 your
+   *      time (<tz>)" so the user sees the local hour they
+   *      care about. The Rust default `hour_utc: 18` is
+   *      interpreted as the local-hour default.
+   *   4. Before calling `on_next`, translates the local 18:00
+   *      back to UTC and writes that into
+   *      `answers.review_time.hour_utc` so the scheduler fires
+   *      at the correct UTC instant. UTC-5 user →
+   *      `hour_utc = 23`; UTC+5 user → `hour_utc = 13`.
+   *
+   * DST is handled imperfectly (we read the offset at the
+   * current moment, not at the next fire time). A future item
+   * can either store the IANA timezone string alongside
+   * `hour_utc` and resolve DST at fire time, or refresh the
+   * offset daily. For v1 this is good enough — DST transitions
+   * shift the local fire time by 1h for ~3 weeks a year.
+   *
+   * This whole conversion is local to the wizard; the Rust
+   * side stays unchanged. We never persist the timezone string.
    */
 
   let {
@@ -34,6 +67,48 @@
   // Editable local copies (only used when `editing === true`).
   let edit_claude_paths = $state("");
   let edit_github_repos = $state("");
+
+  // The local hour we display to the user. v1 is read-only
+  // (the LLM picks "evening"; we just show that as 18:00 local
+  // time). A future item can add an hour-picker; for now this
+  // stays at 18 so the user's mental model is "evening review
+  // at 6 PM, my time".
+  const REVIEW_HOUR_LOCAL = 18;
+
+  // Browser-detected IANA timezone (e.g. "America/Sao_Paulo",
+  // "Europe/Lisbon", "UTC"). Computed once on mount; the value
+  // is shown to the user in the review-time row.
+  const local_tz: string =
+    typeof Intl !== "undefined"
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone
+      : "UTC";
+
+  /**
+   * Translate a local-hour H into the UTC hour that, when
+   * stored, will fire the scheduler at H local-time. The
+   * returned value is normalised into [0, 23] (a 24h
+   * timezone offset wraps the day).
+   *
+   * Example: at UTC-5, getTimezoneOffset() returns 300
+   * (minutes east of UTC, sign-flipped per ECMA spec).
+   * local → UTC: utc = (local - offset_hours + 24) mod 24.
+   * For local=18, offset=5: utc = (18 - 5 + 24) mod 24 = 13.
+   */
+  function local_hour_to_utc(local_hour: number): number {
+    // `getTimezoneOffset` returns the offset in minutes FROM
+    // local TO UTC (so UTC-5 → 300). Sign-flipped for the math.
+    const offset_minutes = new Date().getTimezoneOffset();
+    const offset_hours = offset_minutes / 60;
+    return ((local_hour - offset_hours) + 24) % 24;
+  }
+
+  /** Short timezone label for the review-time row. */
+  function short_tz_label(tz: string): string {
+    if (tz === "UTC") return "UTC";
+    // "America/Sao_Paulo" → "Sao_Paulo"; "America/Argentina/Buenos_Aires" → "Buenos_Aires".
+    const parts = tz.split("/");
+    return parts[parts.length - 1].replace(/_/g, " ");
+  }
 
   const can_advance = $derived(answers !== null && !loading);
 
@@ -86,9 +161,34 @@
     };
   }
 
+  /**
+   * Before sending the answers to the parent (which calls
+   * `write_onboarding_config`), translate the LLM's UTC
+   * `hour_utc` into the UTC hour that represents 18:00 in the
+   * user's local timezone. The LLM returns whatever default
+   * the schema + Rust layer produced (e.g. 18); we override
+   * it so the scheduler actually fires at 18:00 local.
+   */
+  function apply_local_review_time(
+    base: OnboardingAnswers,
+  ): OnboardingAnswers {
+    return {
+      ...base,
+      review_time: {
+        ...base.review_time,
+        // The LLM's `cadence` ("evening"/"morning"/"weekly")
+        // is a coarse bucket — we keep it. The fine-grained
+        // `hour_utc` is what gets rewritten so the scheduler
+        // fires at REVIEW_HOUR_LOCAL in the user's tz.
+        hour_utc: local_hour_to_utc(REVIEW_HOUR_LOCAL),
+      },
+    };
+  }
+
   function on_next_click(): void {
     if (!answers) return;
-    const final = editing ? build_edited_answers() : answers;
+    const edited = editing ? build_edited_answers() : answers;
+    const final = apply_local_review_time(edited);
     on_next(final);
   }
 
@@ -151,8 +251,11 @@
       </li>
       <li class="answer-row">
         <span class="label">Review time</span>
-        <span class="value">
-          {answers.review_time.cadence} at {answers.review_time.hour_utc}:00 UTC
+        <span class="value" data-testid="review-time-value">
+          {answers.review_time.cadence} at
+          <strong>{String(REVIEW_HOUR_LOCAL).padStart(2, "0")}:00</strong>
+          your time
+          <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
         </span>
       </li>
       <li class="answer-row">
@@ -229,6 +332,11 @@
   .muted {
     color: var(--muted, #666);
     font-size: 0.9rem;
+  }
+  .tz {
+    color: var(--muted, #666);
+    font-size: 0.85rem;
+    margin-left: 0.25rem;
   }
   .answers {
     list-style: none;

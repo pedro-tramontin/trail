@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import StepAsk from "./StepAsk.svelte";
 import { MOCK_SCAN_REPORT, MOCK_ANSWERS } from "./types";
+import type { OnboardingAnswers } from "./types";
 
 const { invoke_mock } = vi.hoisted(() => {
   return { invoke_mock: vi.fn() };
@@ -44,7 +45,17 @@ describe("StepAsk.svelte", () => {
     expect(screen.getAllByText(/disabled/).length).toBeGreaterThan(0);
   });
 
-  it("(c) Looks good button calls on_next with the LLM's answers", async () => {
+  it("(c) Looks good button calls on_next with the answers (hour_utc adjusted to local 18:00)", async () => {
+    // The wizard translates the LLM's `hour_utc` into the UTC
+    // hour that represents 18:00 in the user's local timezone
+    // before sending the answers on. This means the stored
+    // `hour_utc` depends on the test environment's timezone,
+    // not on the LLM's default. We compute the expected value
+    // the same way `local_hour_to_utc` does inside StepAsk.
+    const offset_minutes = new Date().getTimezoneOffset();
+    const offset_hours = offset_minutes / 60;
+    const expected_hour_utc = ((18 - offset_hours) + 24) % 24;
+
     const on_next = vi.fn();
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, on_next },
@@ -52,7 +63,33 @@ describe("StepAsk.svelte", () => {
     const next = await screen.findByTestId("ask-next");
     expect((next as HTMLButtonElement).disabled).toBe(false);
     await fireEvent.click(next);
-    expect(on_next).toHaveBeenCalledWith(MOCK_ANSWERS);
+
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.review_time.hour_utc).toBe(expected_hour_utc);
+    // The other fields pass through unchanged.
+    expect(called_with.claude_sessions_paths).toEqual(
+      MOCK_ANSWERS.claude_sessions_paths,
+    );
+    expect(called_with.github).toEqual(MOCK_ANSWERS.github);
+  });
+
+  it("(c2) renders the review-time row as '18:00 your time' with the IANA timezone", async () => {
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+    });
+    const value = await screen.findByTestId("review-time-value");
+    // The local hour is always 18:00 regardless of timezone.
+    expect(value.textContent).toMatch(/18:00/);
+    // The "your time" wording makes it clear this is local, not UTC.
+    expect(value.textContent).toMatch(/your time/);
+    // The IANA timezone abbreviation is shown so the user can
+    // sanity-check the auto-detection (e.g. "Sao Paulo",
+    // "Lisbon", "UTC").
+    const tz = screen.getByTestId("review-time-tz");
+    expect(tz).toBeTruthy();
+    // The tz label is non-empty (either "UTC" or a city name).
+    expect(tz.textContent?.trim().length).toBeGreaterThan(2);
   });
 
   it("(d) Edit toggle reveals the path-list textareas", async () => {

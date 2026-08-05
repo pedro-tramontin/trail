@@ -259,7 +259,7 @@ export const MOCK_ANSWERS: OnboardingAnswers = {
   github: { enabled: true, repos: [], include_private: false },
   calendar_ics: null,
   voice: null,
-  review_time: { cadence: "evening", hour_utc: 22 },
+  review_time: { cadence: "evening", hour_utc: 18 },
   summarizer: { backend: "stub", model: "stub" },
   transport: { method: "ssh", ssh_key_path: null },
   question_log: [
