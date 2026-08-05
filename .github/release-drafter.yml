@@ -85,13 +85,20 @@ version-resolver:
 change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
 no-changes-template: "- No changes"
 
+# The template intentionally omits a "Full Changelog" link to
+# `compare/$PREVIOUS_TAG...trail-v$RESOLVED_VERSION`. That link
+# would reference the draft's tag, which doesn't exist as a git
+# tag until promote.yml publishes the release — clicking it
+# during the draft phase 404s. Re-adding the link after publish
+# would require a second template or post-publish automation, and
+# the link is a "nice to have" that's not worth the complexity.
+# The per-PR entries (each containing the PR number) already let
+# readers drill into individual changes; the diff against the
+# previous release is reachable from any published release page.
 template: |
   ## Changes
 
   $CHANGES
-
-  **Full Changelog**: https://github.com/pedro-tramontin/trail/compare/$PREVIOUS_TAG...trail-v$RESOLVED_VERSION
-
 exclude-labels:
   - "skip-changelog"
   - "autorelease: pending"
