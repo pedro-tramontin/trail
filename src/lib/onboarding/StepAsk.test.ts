@@ -74,15 +74,28 @@ describe("StepAsk.svelte", () => {
     expect(tz.textContent?.trim().length).toBeGreaterThan(2);
   });
 
-  it("(d) Edit toggle reveals the path-list textareas", async () => {
+  it("(d) Edit toggle reveals the path-list textareas inline in their rows", async () => {
+    // UX regression for the "click Edit and the box resizes"
+    // bug: textareas used to appear in a separate `.edits`
+    // block below the answers list, which added new rows to
+    // the layout. Now the textareas live inline in their
+    // respective answer rows (right side, next to the label)
+    // so flipping the Edit toggle only swaps the value-slot
+    // content — never the row's outer dimensions.
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
     });
     const toggle = await screen.findByTestId("ask-toggle-edit");
     await fireEvent.click(toggle);
-    expect(screen.getByTestId("ask-edits")).toBeTruthy();
+    // The textareas now live inside the answer rows, not in
+    // a separate `.edits` block. They should still exist and
+    // be reachable via their testids.
     expect(screen.getByTestId("edit-claude-paths")).toBeTruthy();
     expect(screen.getByTestId("edit-github-repos")).toBeTruthy();
+    // The summary view also goes away when editing — the
+    // disabled-state summary text is replaced by the input.
+    expect(screen.queryByTestId("claude-sessions-summary")).toBeNull();
+    expect(screen.queryByTestId("github-summary")).toBeNull();
   });
 
   it("(e) shows the error state when ask_onboarding_cmd rejects", async () => {
@@ -128,62 +141,74 @@ describe("StepAsk.svelte", () => {
     expect(screen.queryByTestId("why-claude_sessions")).toBeNull();
   });
 
-  it("(h) 'Change time' opens an hour picker; user input updates the local hour", async () => {
+  it("(h) Edit toggle reveals an HH:MM time picker for the review-time row", async () => {
+    // UX regression: the review-time row used to have a
+    // standalone "Change time" button that expanded a
+    // picker block BELOW the summary text. The user wanted
+    // clicking the master Edit toggle to also make the
+    // review time editable, AND for the picker to take the
+    // exact spot of the summary text (not a block below it,
+    // which would push other rows down). Now the picker is
+    // an <input type="time"> that replaces the summary in
+    // the same row when `editing` is on.
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
-    const change_btn = screen.getByTestId("review-time-edit");
-    await fireEvent.click(change_btn);
-    expect(screen.getByTestId("review-time-picker")).toBeTruthy();
-    const input = screen.getByTestId(
-      "review-hour-input",
-    ) as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "9" } });
-    // The summary line reflects the new hour.
-    const hour = screen.getByTestId("review-time-hour");
-    expect(hour.textContent).toMatch(/09:00/);
+    // Pre-edit: summary is rendered, no input is present.
+    expect(screen.getByTestId("review-time-value")).toBeTruthy();
+    expect(screen.queryByTestId("review-time-input")).toBeNull();
+    // Toggle edit.
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
+    // The picker is now a single <input type="time"> in the
+    // row's value slot. Summary is gone.
+    expect(screen.getByTestId("review-time-input")).toBeTruthy();
+    expect(screen.queryByTestId("review-time-value")).toBeNull();
   });
 
-  it("(i) editing the local hour updates the stored hour_utc on Next", async () => {
+  it("(i) typing in the HH:MM picker updates the local time and the UTC hint live", async () => {
     const on_next = vi.fn();
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, on_next },
     });
     await screen.findByTestId("ask-answers");
-    await fireEvent.click(screen.getByTestId("review-time-edit"));
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
     const input = screen.getByTestId(
-      "review-hour-input",
+      "review-time-input",
     ) as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "9" } });
+    // <input type="time"> expects an HH:MM string.
+    await fireEvent.input(input, { target: { value: "07:30" } });
+    // Pre-Next, the summary is gone (editing=true), so the
+    // user-visible state is the "Stored as NN:MM UTC" hint.
+    const utc = screen.getByTestId("review-time-utc");
+    const offset_minutes = new Date().getTimezoneOffset();
+    const total_local = 7 * 60 + 30;
+    const total_utc = ((total_local - offset_minutes) + 1440) % 1440;
+    const expected_utc = `${String(Math.floor(total_utc / 60)).padStart(2, "0")}:${String(total_utc % 60).padStart(2, "0")}`;
+    expect(utc.textContent?.trim()).toBe(`${expected_utc} UTC`);
+  });
+
+  it("(i2) editing the local HH:MM stores the converted hour on Next", async () => {
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, on_next },
+    });
+    await screen.findByTestId("ask-answers");
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
+    const input = screen.getByTestId(
+      "review-time-input",
+    ) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "09:00" } });
+    // Untoggle edit so "Looks good" label is shown.
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
     const next = screen.getByTestId("ask-next");
     await fireEvent.click(next);
 
     expect(on_next).toHaveBeenCalledTimes(1);
     const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
-    // expected = (9 - offset_hours + 24) % 24
     const offset_minutes = new Date().getTimezoneOffset();
     const offset_hours = offset_minutes / 60;
     const expected = ((9 - offset_hours) + 24) % 24;
     expect(called_with.review_time.hour_utc).toBe(expected);
-  });
-
-  it("(j) the picker shows the current UTC equivalent live as the user types", async () => {
-    render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
-    });
-    await screen.findByTestId("ask-answers");
-    await fireEvent.click(screen.getByTestId("review-time-edit"));
-    const input = screen.getByTestId(
-      "review-hour-input",
-    ) as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "7" } });
-    const picker = screen.getByTestId("review-time-picker");
-    const offset_minutes = new Date().getTimezoneOffset();
-    const offset_hours = offset_minutes / 60;
-    const expected_utc = ((7 - offset_hours) + 24) % 24;
-    expect(picker.textContent).toContain(
-      `Stored as ${expected_utc}:00 UTC`,
-    );
   });
 });

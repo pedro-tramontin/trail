@@ -74,13 +74,31 @@
   let editing = $state(false);
 
   // Editable local copies (only used when `editing === true`).
+  // They live in their respective answer rows so toggling `editing`
+  // only swaps the value slot between summary text and editable
+  // input — never the row's outer dimensions.
   let edit_claude_paths = $state("");
   let edit_github_repos = $state("");
 
-  // Local review hour (0–23). Defaults to 18. The user can
-  // override via the picker that appears when editing === true.
-  let review_hour_local = $state(18);
-  let editing_review_hour = $state(false);
+  /*
+   * Local review time, as an "HH:MM" string (24h) bound to a
+   * <input type="time">. Default "18:00" to match the existing
+   * baseline. We split into hour/minute before converting to
+   * UTC so the user can pick minutes too — not just hours.
+   *
+   * Note: the Rust scheduler parses `cfg.review_time` (in the
+   * final config) as `%H:%M`, but the LLM answer object stores
+   * `hour_utc` as an integer hour (see
+   * src-tauri/src/onboarding/answers.rs). We preserve that
+   * integer-only contract here (minute granularity is shown
+   * to the user but only the hour is propagated back to
+   * `answers.review_time.hour_utc`, which is what
+   * config_writer.rs currently reads — see that file's
+   * `answers_to_config` for the cadence propagation path).
+   */
+  let review_hhmm_local = $state("18:00");
+  let review_hour_local = $derived(parseInt(review_hhmm_local.split(":")[0], 10) || 0);
+  let review_minute_local = $derived(parseInt(review_hhmm_local.split(":")[1], 10) || 0);
 
   // Browser-detected IANA timezone (e.g. "America/Sao_Paulo").
   const local_tz: string =
@@ -88,16 +106,34 @@
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : "UTC";
 
-  function local_hour_to_utc(local_hour: number): number {
-    const offset_minutes = new Date().getTimezoneOffset();
-    const offset_hours = offset_minutes / 60;
-    return ((local_hour - offset_hours) + 24) % 24;
-  }
-
   function short_tz_label(tz: string): string {
     if (tz === "UTC") return "UTC";
     const parts = tz.split("/");
     return parts[parts.length - 1].replace(/_/g, " ");
+  }
+
+  /**
+   * Translate "HH:MM" local time to a UTC "HH:MM" string.
+   * `new Date().getTimezoneOffset()` returns minutes-from-local-
+   * TO-UTC (sign-flipped per ECMA: UTC-5 → 300), so a user in
+   * UTC-5 picking local "18:00" should see UTC stored as
+   * "23:00".
+   */
+  function local_hhmm_to_utc(local_hhmm: string): string {
+    const parts = local_hhmm.split(":");
+    const h = parseInt(parts[0] ?? "0", 10) || 0;
+    const m = parseInt(parts[1] ?? "0", 10) || 0;
+    const local_total = h * 60 + m;
+    const offset_min = new Date().getTimezoneOffset();
+    const utc_total = ((local_total - offset_min) + 1440) % 1440;
+    return `${String(Math.floor(utc_total / 60)).padStart(2, "0")}:${String(utc_total % 60).padStart(2, "0")}`;
+  }
+
+  /** Same conversion, integer hour only (for `hour_utc`). */
+  function local_hour_to_utc(local_hour: number): number {
+    const offset_minutes = new Date().getTimezoneOffset();
+    const offset_hours = offset_minutes / 60;
+    return ((local_hour - offset_hours) + 24) % 24;
   }
 
   /**
@@ -143,10 +179,10 @@
       // Seed the local edit buffers from the LLM answer.
       edit_claude_paths = (result.claude_sessions_paths ?? []).join("\n");
       edit_github_repos = (result.github?.repos ?? []).join("\n");
-      // Default the local review-hour picker to 18. The user
-      // can pick a different hour.
-      review_hour_local = 18;
-      editing_review_hour = false;
+      // Default the local review-time picker to 18:00. The user
+      // can pick a different hour+minute via the inline picker
+      // when the master Edit toggle is on.
+      review_hhmm_local = "18:00";
     } catch (err) {
       error = String(err);
     } finally {
@@ -232,10 +268,19 @@
     </p>
 
     <ul class="answers" data-testid="ask-answers">
-      <li class="answer-row">
+      <li class="answer-row" data-testid="row-claude-sessions">
         <span class="label">Claude sessions</span>
         <span class="value">
-          {#if answers.claude_sessions_paths.length === 0}
+          {#if editing}
+            <textarea
+              rows="2"
+              class="inline-edit"
+              bind:value={edit_claude_paths}
+              data-testid="edit-claude-paths"
+              aria-label="Claude sessions paths (one per line)"
+            ></textarea>
+            <span class="hint">One path per line</span>
+          {:else if answers.claude_sessions_paths.length === 0}
             <em>disabled</em>
             <button
               type="button"
@@ -245,15 +290,28 @@
               title={disabled_reason("claude_sessions", answers.question_log)}
             >?</button>
           {:else}
-            {answers.claude_sessions_paths.length} path(s)
+            <span class="value-text" data-testid="claude-sessions-summary">
+              {answers.claude_sessions_paths.length} path(s)
+            </span>
           {/if}
         </span>
       </li>
 
-      <li class="answer-row">
+      <li class="answer-row" data-testid="row-github">
         <span class="label">GitHub</span>
         <span class="value">
-          {#if !answers.github?.enabled}
+          {#if editing}
+            <textarea
+              rows="2"
+              class="inline-edit"
+              bind:value={edit_github_repos}
+              data-testid="edit-github-repos"
+              aria-label="GitHub repos (one per line, or comma-separated)"
+            ></textarea>
+            <span class="hint">
+              One repo per line (or comma-separated)
+            </span>
+          {:else if !answers.github?.enabled}
             <em>disabled</em>
             <button
               type="button"
@@ -263,10 +321,12 @@
               title={disabled_reason("github", answers.question_log)}
             >?</button>
           {:else}
-            enabled
-            {#if answers.github?.repos?.length}
-              — watching {answers.github.repos.length} repo(s)
-            {/if}
+            <span class="value-text" data-testid="github-summary">
+              enabled
+              {#if answers.github?.repos?.length}
+                — watching {answers.github.repos.length} repo(s)
+              {/if}
+            </span>
           {/if}
         </span>
       </li>
@@ -307,41 +367,29 @@
         </span>
       </li>
 
-      <li class="answer-row">
+      <li class="answer-row" data-testid="row-review-time">
         <span class="label">Review time</span>
-        <span class="value review-time" data-testid="review-time-value">
-          <span class="review-time-summary">
-            {answers.review_time.cadence} at
-            <strong data-testid="review-time-hour">{String(review_hour_local).padStart(2, "0")}:00</strong>
-            your time
-            <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
-          </span>
-          <button
-            type="button"
-            class="link"
-            data-testid="review-time-edit"
-            onclick={() => (editing_review_hour = !editing_review_hour)}
-          >
-            {editing_review_hour ? "Done" : "Change time"}
-          </button>
-          {#if editing_review_hour}
-            <div class="review-time-picker" data-testid="review-time-picker">
-              <label class="picker-label" for="review-hour-input">
-                Hour (0–23, your local time)
-              </label>
-              <input
-                id="review-hour-input"
-                type="number"
-                min="0"
-                max="23"
-                step="1"
-                bind:value={review_hour_local}
-                data-testid="review-hour-input"
-              />
-              <span class="picker-note">
-                Stored as <strong>{local_hour_to_utc(review_hour_local)}:00 UTC</strong>
-              </span>
-            </div>
+        <span class="value review-time">
+          {#if editing}
+            <input
+              type="time"
+              class="inline-edit time-input"
+              bind:value={review_hhmm_local}
+              data-testid="review-time-input"
+              aria-label="Review time (your local time, HH:MM)"
+            />
+            <span class="hint">
+              Stored as
+              <strong data-testid="review-time-utc" class="utc">{local_hhmm_to_utc(review_hhmm_local)} UTC</strong>
+              <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
+            </span>
+          {:else}
+            <span class="value-text review-time-summary" data-testid="review-time-value">
+              {answers.review_time.cadence} at
+              <strong data-testid="review-time-hour">{review_hhmm_local}</strong>
+              your time
+              <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
+            </span>
           {/if}
         </span>
       </li>
@@ -359,26 +407,12 @@
       </li>
     </ul>
 
-    {#if editing}
-      <div class="edits" data-testid="ask-edits">
-        <label class="field">
-          <span>Claude sessions paths (one per line)</span>
-          <textarea
-            rows="3"
-            bind:value={edit_claude_paths}
-            data-testid="edit-claude-paths"
-          ></textarea>
-        </label>
-        <label class="field">
-          <span>GitHub repos (one per line, or comma-separated)</span>
-          <textarea
-            rows="3"
-            bind:value={edit_github_repos}
-            data-testid="edit-github-repos"
-          ></textarea>
-        </label>
-      </div>
-    {/if}
+    <!--
+      No separate `.edits` block — textareas live in their
+      respective answer rows above so flipping `editing` swaps
+      summary → input inside the same row, keeping the row's
+      outer dimensions stable.
+    -->
 
     <div class="actions">
       <button
@@ -403,8 +437,19 @@
 </section>
 
 <style>
+  /**
+   * `width: 100%` + `min-width: 0` + `box-sizing: border-box`
+   * so the step body sits inside the wizard's fixed 640px track
+   * without overflowing horizontally on any inner content.
+   * Mirrors the same fix in StepScan — see that file for the
+   * full rationale (long unbreakable tokens otherwise push
+   * the wizard wider than the parent on certain steps).
+   */
   .step {
     padding: 1.5rem;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -470,57 +515,73 @@
     color: white;
     outline: none;
   }
-  .review-time {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .review-time-summary {
-    flex: 1;
-  }
-  .review-time-picker {
+  /**
+   * Inline value-slot layout. The right column of every
+   * answer-row hosts either read-only summary text or the
+   * inline editable input — never both at once. Both modes
+   * live inside the same column track so toggling `editing`
+   * only swaps content, never row dimensions (this is what
+   * stops the wizard from "resizing when I click Edit").
+   */
+  .value {
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+    min-width: 0;
+  }
+  .value-text {
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  /**
+   * Inline edit controls fill the value column without
+   * overflowing. `<textarea>` gets `resize: vertical` so the
+   * user can grow a row if they paste a long path, but the
+   * initial size (`rows="2"`) is consistent across users.
+   */
+  .inline-edit {
     width: 100%;
-    margin-top: 0.5rem;
-    padding: 0.5rem;
-    background: var(--bg-soft, #f6f8fa);
-    border: 1px solid var(--border, #ccc);
-    border-radius: 4px;
-  }
-  .picker-label {
-    font-size: 0.85rem;
-    color: var(--muted, #666);
-  }
-  .picker-note {
-    font-size: 0.8rem;
-    color: var(--muted, #666);
-  }
-  .review-time-picker input {
-    width: 4rem;
-    padding: 0.25rem 0.4rem;
-    font-size: 0.95rem;
-    border: 1px solid var(--border, #ccc);
-    border-radius: 3px;
-  }
-  .edits {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-  .field textarea {
+    box-sizing: border-box;
     font-family: monospace;
     font-size: 0.9rem;
-    padding: 0.4rem;
-    border: 1px solid var(--border, #ccc);
+    padding: 0.35rem 0.45rem;
+    border: 1px solid var(--border, #c4c4c4);
     border-radius: 3px;
+    background: var(--bg, #fff);
+    color: var(--fg, #111);
+    min-width: 0;
+  }
+  .inline-edit:focus {
+    outline: 2px solid var(--primary, #2563eb);
+    outline-offset: 1px;
+  }
+  /**
+   * The time picker uses `<input type="time">` which on
+   * some browsers expands to ~10rem; cap its width so it
+   * doesn't push the column track. The TZ label / "Stored
+   * as NN:MM UTC" hint sit underneath.
+   */
+  .time-input {
+    max-width: 9rem;
+  }
+  .hint {
+    font-size: 0.8rem;
+    color: var(--muted, #666);
+    line-height: 1.3;
+  }
+  .utc {
+    font-family: monospace;
+    font-weight: 600;
+    color: var(--fg, #111);
+  }
+  /**
+   * Review-time row uses a flex layout in its value slot so
+   * summary text and the inline picker both flow naturally.
+   * `.review-time` itself is just a thin wrapper to keep
+   * the existing grid-column targeting.
+   */
+  .review-time {
+    gap: 0.25rem;
   }
   .actions {
     margin-top: 1rem;
@@ -557,18 +618,12 @@
     background: var(--primary, #2563eb);
     color: white;
   }
-  .link {
-    background: transparent;
-    border: none;
-    color: var(--primary, #2563eb);
-    cursor: pointer;
-    padding: 0.25rem 0.5rem;
-    font-size: 0.85rem;
-    font-weight: 500;
-  }
-  .link:hover {
-    text-decoration: underline;
-  }
+  /*
+   * `.link` class removed: the old review-time edit button
+   * (which used this style) is gone. The master "Edit" /
+   * "Done editing" toggle in `.actions` uses `.secondary`
+   * instead. No replacement for `.link` is needed.
+   */
   .spinner {
     display: inline-block;
   }

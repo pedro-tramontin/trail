@@ -152,6 +152,11 @@
    * scroll region. `100dvh` (dynamic viewport height) handles
    * mobile URL-bar collapse; `min-height: 100vh` falls back on
    * browsers that don't support `dvh`.
+   *
+   * Card-style box: a faint shadow + slightly thicker top/bottom
+   * borders so the wizard reads as a distinct card against the
+   * page background on every step (including short ones like
+   * StepWelcome where the wizard used to "blend into the page").
    */
   .wizard {
     height: 100vh;
@@ -159,13 +164,32 @@
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    max-width: 640px;
+    width: 640px;
+    max-width: 100%;
     margin: 0 auto;
-    border: 1px solid var(--border, #ccc);
+    border: 1px solid var(--border, #c4c4c4);
     border-radius: 6px;
     background: var(--bg, #fff);
     color: var(--fg, #111);
     overflow: hidden;
+    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.08);
+  }
+  /**
+   * Card body — the wizard's three regions (header, step body,
+   * nav) each get an explicit `width: 100%` so the wizard's
+   * outer 640px track is what sizes everything inside. Without
+   * this, a region could grow to fit its longest child
+   * (e.g. a long URL in the nav) and push the wizard wider
+   * than 640px on that step, then snap back on the next step.
+   * Paired with `min-width: 0`, flex children honor overflow
+   * rules and stay within the parent's bounded track.
+   */
+  .wizard-header,
+  .wizard-nav,
+  .step-container {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
   }
   .wizard-header {
     flex-shrink: 0;
@@ -191,12 +215,22 @@
    * effect — without it, the child grows past the container
    * and the parent grows too, defeating the purpose of the
    * fixed-height wizard.
+   *
+   * `scrollbar-gutter: stable` reserves the scrollbar track
+   * space even when content fits in the visible area, so the
+   * inner column width does NOT shift between steps based on
+   * whether the inner scrollbar is rendered or not. This is
+   * what keeps the wizard width visually identical across
+   * steps (e.g. StepWelcome doesn't show a scrollbar, StepScan
+   * or StepAsk can).
    */
   .step-container {
     flex: 1 1 auto;
     min-height: 0;
+    min-width: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    scrollbar-gutter: stable;
   }
   /**
    * Bottom-of-step controls (StepScan's auto-advance footer,

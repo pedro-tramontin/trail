@@ -211,8 +211,20 @@
 </section>
 
 <style>
+  /**
+   * `width: 100%` + `min-width: 0` on the step root pins the
+   * step body's outer dimensions to the parent wizard's
+   * fixed-width track (640px). Without these, long unbreakable
+   * content (a long path, a single-line summary, the LLM's
+   * `notes` field) could push the step wider than the parent
+   * and trigger the very "width changes between steps" effect
+   * the user reported.
+   */
   .step {
     padding: 1.5rem;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -283,14 +295,45 @@
     margin-top: 1rem;
     padding-top: 0.75rem;
     border-top: 1px solid var(--border, #ccc);
-    display: flex;
+    /*
+     * Lock the layout so toggling between the running and
+     * paused states doesn't cause a visible horizontal reflow.
+     * The countdown text lives in the first column; the action
+     * controls live in the second column with a fixed minimum
+     * width that holds one or two buttons (whichever the state
+     * requires). Previously the layout used
+     * `justify-content: space-between`, so going from
+     * "{Stop, Continue}" (two buttons) to "{Continue}"
+     * (one button) pushed the lone button hard to the right
+     * edge of the row — that's the "resizes when I click stop"
+     * behavior the user reported.
+     */
+    display: grid;
+    grid-template-columns: 1fr minmax(15rem, auto);
     align-items: center;
-    justify-content: space-between;
     gap: 1rem;
     font-size: 0.9rem;
   }
   .countdown {
     color: var(--muted, #666);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /*
+   * Controls sit in their own grid column (see `.auto-advance`
+   * above). The column track has `minmax(15rem, auto)` so it
+   * stays the same width whether the user sees one button
+   * (paused) or two buttons (running), eliminating the
+   * "click stop and the controls shift" reflow. We
+   * right-align inside the slot so the buttons hug the same
+   * edge in both states.
+   */
+  .controls {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    align-items: center;
   }
   .link {
     background: transparent;
