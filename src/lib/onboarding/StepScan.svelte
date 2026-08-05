@@ -7,14 +7,20 @@
    *
    * On mount, fires `scan_laptop_cmd`. On success, shows a
    * 10-second auto-advance countdown at the bottom of the step
-   * that the user can stop, skip, or let run. Three explicit
-   * controls — no surprise transitions:
+   * that the user can stop or skip. Two explicit controls —
+   * no surprise transitions:
    *
    *   - "Stop countdown" — cancel the auto-advance; user stays
    *     on this step until they click Continue now.
    *   - "Continue now"   — skip the countdown and advance
    *     immediately.
-   *   - "Resume countdown" (after Stop) — restart the 10s timer.
+   *
+   * There is no Resume button: once the user pauses the
+   * countdown, the only way forward is "Continue now". This
+   * matches the rest of the wizard's "explicit confirmation,
+   * no implicit auto-progression" model and removes the
+   * double-control confusion that came from having both
+   * Resume and Continue-now alongside a paused countdown.
    *
    * The countdown state is exposed as three values via
    * `countdown_state`: "ticking" | "stopped" | null. The
@@ -71,11 +77,6 @@
     clear_timers();
     countdown_state = "stopped";
     countdown = null;
-  }
-
-  function resume_countdown(): void {
-    if (countdown_state === "ticking") return;
-    start_countdown();
   }
 
   function continue_now(): void {
@@ -195,14 +196,6 @@
           Auto-advance paused
         </span>
         <div class="controls">
-          <button
-            type="button"
-            class="link"
-            data-testid="scan-resume-countdown"
-            onclick={resume_countdown}
-          >
-            Resume countdown
-          </button>
           <button
             type="button"
             class="link"

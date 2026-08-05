@@ -63,7 +63,7 @@ describe("StepScan.svelte", () => {
     }
   });
 
-  it("(e) Stop countdown pauses the timer and shows Resume + Continue now", async () => {
+  it("(e) Stop countdown pauses the timer and shows only Continue now", async () => {
     vi.useFakeTimers();
     try {
       const on_next = vi.fn();
@@ -72,9 +72,11 @@ describe("StepScan.svelte", () => {
       await vi.runOnlyPendingTimersAsync();
       await screen.findByTestId("scan-findings");
       await fireEvent.click(screen.getByTestId("scan-stop-countdown"));
-      // Stop button is gone, Resume + Continue now remain.
+      // The Stop button is gone. The only forward control is
+      // Continue now — there is NO Resume button by design
+      // (the user must explicitly advance after pausing).
       expect(screen.queryByTestId("scan-stop-countdown")).toBeNull();
-      expect(screen.getByTestId("scan-resume-countdown")).toBeTruthy();
+      expect(screen.queryByTestId("scan-resume-countdown")).toBeNull();
       expect(screen.getByTestId("scan-continue-now")).toBeTruthy();
       expect(screen.getByTestId("scan-countdown").textContent).toMatch(
         /Auto-advance paused/,
@@ -89,7 +91,7 @@ describe("StepScan.svelte", () => {
     }
   });
 
-  it("(f) Resume countdown restarts the timer from 10", async () => {
+  it("(f) Continue now advances immediately after Stop", async () => {
     vi.useFakeTimers();
     try {
       const on_next = vi.fn();
@@ -97,16 +99,15 @@ describe("StepScan.svelte", () => {
       await Promise.resolve();
       await vi.runOnlyPendingTimersAsync();
       await screen.findByTestId("scan-findings");
+      // Stop, then Continue now.
       await fireEvent.click(screen.getByTestId("scan-stop-countdown"));
-      await fireEvent.click(screen.getByTestId("scan-resume-countdown"));
-      expect(screen.getByTestId("scan-countdown").textContent).toMatch(
-        /Auto-advancing in 10s/,
-      );
-      // Advance 10s — auto-advance fires.
-      for (let i = 0; i < 10; i++) {
+      await fireEvent.click(screen.getByTestId("scan-continue-now"));
+      expect(on_next).toHaveBeenCalledWith(MOCK_SCAN_REPORT);
+      // Advance past the original window — no double-fire.
+      for (let i = 0; i < 15; i++) {
         await vi.advanceTimersByTimeAsync(1000);
       }
-      expect(on_next).toHaveBeenCalledWith(MOCK_SCAN_REPORT);
+      expect(on_next).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
