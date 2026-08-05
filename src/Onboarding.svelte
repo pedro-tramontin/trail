@@ -144,15 +144,31 @@
 </div>
 
 <style>
+  /**
+   * Wizard layout: fixed viewport so the Tauri window doesn't
+   * resize between steps (which was clipping content on shorter
+   * steps after navigating from a taller one). The header and
+   * nav stay at the top/bottom edges; the step body is the only
+   * scroll region. `100dvh` (dynamic viewport height) handles
+   * mobile URL-bar collapse; `min-height: 100vh` falls back on
+   * browsers that don't support `dvh`.
+   */
   .wizard {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
     max-width: 640px;
     margin: 0 auto;
     border: 1px solid var(--border, #ccc);
     border-radius: 6px;
     background: var(--bg, #fff);
     color: var(--fg, #111);
+    overflow: hidden;
   }
   .wizard-header {
+    flex-shrink: 0;
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--border, #ccc);
     display: flex;
@@ -168,10 +184,40 @@
     font-size: 0.85rem;
     margin: 0;
   }
+  /**
+   * The step body fills the remaining height and scrolls
+   * internally when content overflows. `min-height: 0` is
+   * required on flex children for `overflow-y: auto` to take
+   * effect — without it, the child grows past the container
+   * and the parent grows too, defeating the purpose of the
+   * fixed-height wizard.
+   */
   .step-container {
-    min-height: 200px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  /**
+   * Bottom-of-step controls (StepScan's auto-advance footer,
+   * StepAsk's Looks-good button row) should stay visible
+   * even when the step's content is long enough to scroll.
+   * `position: sticky` keeps them pinned to the bottom of
+   * the visible scroll region without leaving the flow.
+   */
+  .step-container :global(footer.sticky-actions),
+  .step-container :global(div.auto-advance),
+  .step-container :global(div.actions) {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg, #fff);
+    /* A subtle gradient masks content scrolling under the
+     * sticky footer. Without it the footer's border collides
+     * with overflowing list rows visually. */
+    box-shadow: 0 -8px 8px -8px rgba(0, 0, 0, 0.08);
   }
   .wizard-nav {
+    flex-shrink: 0;
     padding: 0.75rem 1.5rem;
     border-top: 1px solid var(--border, #ccc);
     display: flex;
