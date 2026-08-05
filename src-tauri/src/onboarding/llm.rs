@@ -590,8 +590,8 @@ mod tests {
             "review_time": {
                 "selected": true,
                 "cadence": "evening",
-                "hour_utc": 22,
-                "notes": "evening is the lowest-disruption default",
+                "hour_utc": 18,
+                "notes": "evening at 18:00 (the wizard shows 18:00 in the user's local timezone and stores the equivalent UTC hour; the LLM's UTC hour is overridden client-side)",
                 "evidence_refs": []
             },
             "summarizer": {
@@ -662,7 +662,7 @@ mod tests {
         assert!(ans.calendar_ics.is_some());
         assert!(ans.voice.is_none(), "voice selected=false -> None");
         assert_eq!(ans.review_time.cadence, "evening");
-        assert_eq!(ans.review_time.hour_utc, 22);
+        assert_eq!(ans.review_time.hour_utc, 18);
         assert_eq!(ans.summarizer.backend, "ollama");
         assert_eq!(ans.summarizer.model, "qwen2.5:7b");
         assert_eq!(ans.transport.method, "tailscale");

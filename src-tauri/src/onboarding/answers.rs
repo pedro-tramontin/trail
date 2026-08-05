@@ -61,6 +61,18 @@ impl Default for OnboardingAnswers {
     /// that build up the struct piecewise. The [`baseline_answers`]
     /// fallback returns a more opinionated default; `Default` here
     /// is the literal zero.
+    ///
+    /// `review_time.hour_utc` defaults to 18. The Svelte wizard
+    /// treats this as a local-hour value (18:00 in the user's
+    /// timezone) and translates it to the equivalent UTC hour
+    /// before sending the answers to `write_onboarding_config`.
+    /// The Rust side stays UTC-only; the timezone handling lives
+    /// in the wizard so the scheduler (which parses `%H:%M` as
+    /// UTC) doesn't need to change. See
+    /// `src/lib/onboarding/StepAsk.svelte`'s `apply_local_review_time`
+    /// for the conversion. A future item can persist the IANA
+    /// timezone string alongside `hour_utc` and let the user
+    /// override the local hour in Settings.
     fn default() -> Self {
         Self {
             claude_sessions_paths: Vec::new(),
@@ -69,7 +81,7 @@ impl Default for OnboardingAnswers {
             voice: None,
             review_time: ReviewTimeConfig {
                 cadence: "evening".to_string(),
-                hour_utc: 22,
+                hour_utc: 18,
             },
             summarizer: SummarizerConfig {
                 backend: "stub".to_string(),
@@ -400,7 +412,7 @@ mod tests {
             review_time: AnswerFieldReviewTime {
                 selected: true,
                 cadence: "evening".to_string(),
-                hour_utc: 22,
+                hour_utc: 18,
                 notes: None,
                 evidence_refs: vec![],
             },
@@ -460,7 +472,7 @@ mod tests {
             review_time: AnswerFieldReviewTime {
                 selected: false,
                 cadence: "evening".to_string(),
-                hour_utc: 22,
+                hour_utc: 18,
                 notes: None,
                 evidence_refs: vec![],
             },

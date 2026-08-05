@@ -98,7 +98,7 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
         ),
         q(
             "What cadence for the daily review?",
-            "evening is the lowest-disruption default; user can override in Settings",
+            "evening at 18:00 (the wizard shows 18:00 in the user's local timezone and stores the equivalent UTC hour; the LLM's UTC hour is overridden client-side)",
             vec![],
         ),
         q(
@@ -136,7 +136,7 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
         voice: None,
         review_time: ReviewTimeConfig {
             cadence: "evening".to_string(),
-            hour_utc: 22,
+            hour_utc: 18,
         },
         summarizer: SummarizerConfig {
             backend: "stub".to_string(),

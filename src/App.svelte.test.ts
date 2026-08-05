@@ -73,7 +73,13 @@ async function walk_wizard_to_step_finish(): Promise<void> {
   // Welcome
   expect(await screen.findByTestId("onboarding-wizard")).toBeTruthy();
   await fireEvent.click(screen.getByTestId("welcome-next"));
-  // StepScan auto-advances after 800ms
+  // StepScan has a 10-second auto-advance countdown; bypass it
+  // by clicking the "Continue now" button. The countdown
+  // itself is exercised in StepScan.test.ts.
+  await waitFor(() => {
+    expect(screen.getByTestId("scan-continue-now")).toBeTruthy();
+  });
+  await fireEvent.click(screen.getByTestId("scan-continue-now"));
   await waitFor(
     () => {
       expect(screen.getByTestId("step-ask")).toBeTruthy();
