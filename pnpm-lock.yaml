@@ -58,7 +58,7 @@ importers:
         specifier: ^4.0.0
         version: 4.7.4(picomatch@4.0.5)(svelte@5.56.8(@typescript-eslint/types@8.65.0))(typescript@5.9.3)
       tslib:
-        specifier: ^2.6.0
+        specifier: ^2.8.1
         version: 2.8.1
       typescript:
         specifier: ^5.5.0
