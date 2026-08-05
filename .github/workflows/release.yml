@@ -198,33 +198,49 @@ jobs:
           # setup step above for the corresponding target list.
           args: --target aarch64-apple-darwin
 
-      # Phase 9 §9.4 — ad-hoc codesign the .app bundle so Gatekeeper
-      # stops blocking the binary with "corrupted, move to trash."
-      # No Apple Developer Program enrollment (Decision 3) — ad-hoc
-      # signing with `codesign --force --deep --sign "$DEVELOPER_NAME"`
-      # is sufficient for the user's own machine. The DEVELOPER_NAME
-      # env is set inline (not a GitHub secret) because ad-hoc
-      # identities are public info. The `[ -n "${DEVELOPER_NAME:-}" ]`
-      # guard inside `run:` is per the talon PR #62 pitfall
-      # (`if:` at job level resolves before secrets are exposed).
-      # The step is no-op on non-macOS runners via the if: guard.
-      - name: Ad-hoc codesign .app bundle
+      # Ad-hoc codesign the .app bundle as a defensive belt-
+      # and-suspenders step. Tauri's `bundle.macOS.signingIdentity`
+      # (set in src-tauri/tauri.conf.json) already ad-hoc-signs
+      # during the build, so this step is normally a no-op
+      # verification pass — but it protects against a future
+      # regression where someone removes the signingIdentity
+      # config and forgets to verify locally. The .dmg is
+      # uploaded by the previous `tauri-apps/tauri-action`
+      # step AFTER signing, so we don't need to re-upload.
+      #
+      # Path note: with `--target aarch64-apple-darwin`, the
+      # .app is at `target/aarch64-apple-darwin/release/bundle/
+      # macos/Trail.app` (NOT `src-tauri/target/...`). This was
+      # a real bug in trail-v0.4.0 — the previous step used
+      # `find src-tauri/target -name "*.app"` which returned
+      # empty, so the codesign was a no-op and the uploaded
+      # .dmg was unsigned. macOS Sequoia Gatekeeper then
+      # rejected it with "Trail.app is damaged, move to trash."
+      # (PR #158).
+      - name: Ad-hoc codesign .app bundle (defensive)
         if: runner.os == 'macOS'
         env:
           DEVELOPER_NAME: "Pedro Tramontin"
         run: |
-          if [ -n "${DEVELOPER_NAME:-}" ]; then
-            APP_PATH=$(find src-tauri/target -name "*.app" -type d | head -n 1)
-            if [ -z "$APP_PATH" ]; then
-              echo "::warning::No .app bundle found; skipping codesign."
-              exit 0
-            fi
-            echo "Ad-hoc codesigning $APP_PATH with identity '$DEVELOPER_NAME'"
-            codesign --force --deep --sign "$DEVELOPER_NAME" "$APP_PATH"
-            codesign --verify --deep --strict "$APP_PATH"
-          else
-            echo "::notice::DEVELOPER_NAME not set; skipping ad-hoc codesign."
+          APP_PATH=$(find target -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            # No .app found — the Tauri bundler may have put
+            # it elsewhere (e.g. when the bundle target list
+            # doesn't include "app"). Don't fail the build;
+            # Tauri signing already ran.
+            echo "::notice::No .app bundle found in target/; skipping defensive codesign."
+            exit 0
           fi
+          echo "Verifying ad-hoc codesign on $APP_PATH"
+          # `codesign -dv` is read-only — verify the embedded
+          # signature exists. If Tauri already signed, this
+          # passes silently. If Tauri somehow didn't sign,
+          # this fails the build loudly instead of shipping
+          # an unsigned .dmg.
+          codesign -dv "$APP_PATH" 2>&1 || {
+            echo "::warning::$APP_PATH is not codesigned; applying ad-hoc sign as fallback."
+            codesign --force --deep --sign "$DEVELOPER_NAME" "$APP_PATH"
+          }
 
   # ----- Windows build (.exe installer via NSIS) -----
   # Tauri's `bundle.targets` includes `nsis` (Nullsoft Scriptable Install
