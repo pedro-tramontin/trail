@@ -73,8 +73,8 @@ fn fixture_envelope() -> serde_json::Value {
         "review_time": {
             "selected": true,
             "cadence": "evening",
-            "hour_utc": 22,
-            "notes": "evening is the lowest-disruption default",
+            "hour_utc": 18,
+            "notes": "evening at 18:00 (the wizard shows 18:00 in the user's local timezone and stores the equivalent UTC hour)",
             "evidence_refs": []
         },
         "summarizer": {

@@ -12,37 +12,81 @@
    * status (Available / Unavailable / AlreadyConfigured).
    *
    * Auto-advances to StepAsk once the scan resolves
-   * successfully by calling the `on_next` prop with the
-   * `ScanReport` as the argument. The parent
-   * `Onboarding.svelte` updates `scan_report` + `current_step`.
+   * successfully, after a 10-second countdown so the user has
+   * time to read the findings. The countdown is visible at the
+   * bottom of the step ("Auto-advancing in N…") and is
+   * cancellable via the "Continue now" button, which advances
+   * immediately. The user can also click "← Back" to revisit
+   * this step (the wizard's nav button).
+   *
+   * The 10s default replaces the previous 800ms implementation
+   * after feedback that the auto-advance felt jarring — users
+   * had to click back 3+ times to actually read the scan
+   * findings. The countdown gives them a clear time window
+   * to read + an explicit control to skip it.
    */
 
   let { on_next }: { on_next: (report: ScanReport) => void } = $props();
 
+  /** Seconds the user gets to read the findings before
+   *  auto-advance. Tweakable for tests. */
+  const AUTO_ADVANCE_SECONDS = 10;
+
   let report = $state<ScanReport | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let auto_advance_timer: ReturnType<typeof setTimeout> | null = null;
+  /** Remaining seconds on the auto-advance countdown. Starts
+   *  at `null` (no countdown running) and goes to
+   *  AUTO_ADVANCE_SECONDS when the scan resolves. */
+  let countdown = $state<number | null>(null);
+  let interval_timer: ReturnType<typeof setInterval> | null = null;
+  let advance_timer: ReturnType<typeof setTimeout> | null = null;
+
+  function clear_timers(): void {
+    if (interval_timer !== null) {
+      clearInterval(interval_timer);
+      interval_timer = null;
+    }
+    if (advance_timer !== null) {
+      clearTimeout(advance_timer);
+      advance_timer = null;
+    }
+  }
+
+  function start_countdown(): void {
+    clear_timers();
+    countdown = AUTO_ADVANCE_SECONDS;
+    interval_timer = setInterval(() => {
+      if (countdown === null) return;
+      if (countdown <= 1) {
+        clear_timers();
+        countdown = null;
+        if (report) on_next(report);
+      } else {
+        countdown -= 1;
+      }
+    }, 1000);
+  }
+
+  function continue_now(): void {
+    clear_timers();
+    countdown = null;
+    if (report) on_next(report);
+  }
 
   async function run_scan(): Promise<void> {
     loading = true;
     error = null;
     report = null;
-    if (auto_advance_timer !== null) {
-      clearTimeout(auto_advance_timer);
-      auto_advance_timer = null;
-    }
+    countdown = null;
+    clear_timers();
     try {
       const result = await invoke<ScanReport>("scan_laptop_cmd");
       report = result;
       loading = false;
-      // Auto-advance: the spec calls for the scan step to
-      // transition to StepAsk on success. The 800ms delay
-      // gives the user a moment to read the findings.
-      auto_advance_timer = setTimeout(() => {
-        auto_advance_timer = null;
-        if (report) on_next(report);
-      }, 800);
+      // Start the visible auto-advance countdown so the user
+      // can read the findings before we transition.
+      start_countdown();
     } catch (err) {
       error = String(err);
       loading = false;
@@ -52,9 +96,7 @@
   $effect(() => {
     void run_scan();
     return () => {
-      if (auto_advance_timer !== null) {
-        clearTimeout(auto_advance_timer);
-      }
+      clear_timers();
     };
   });
 
@@ -115,9 +157,23 @@
       {/each}
     </ul>
 
-    <p class="muted" data-testid="scan-auto-advance">
-      Auto-advancing to the next step…
-    </p>
+    <div class="auto-advance" data-testid="scan-auto-advance">
+      <span class="countdown" data-testid="scan-countdown">
+        {#if countdown !== null}
+          Auto-advancing in {countdown}s…
+        {:else}
+          Auto-advancing to the next step…
+        {/if}
+      </span>
+      <button
+        type="button"
+        class="link"
+        data-testid="scan-continue-now"
+        onclick={continue_now}
+      >
+        Continue now
+      </button>
+    </div>
   {/if}
 </section>
 
@@ -189,6 +245,31 @@
     margin-top: 1rem;
     display: flex;
     justify-content: flex-end;
+  }
+  .auto-advance {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border, #ccc);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.9rem;
+  }
+  .countdown {
+    color: var(--muted, #666);
+  }
+  .link {
+    background: transparent;
+    border: none;
+    color: var(--primary, #2563eb);
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+  .link:hover {
+    text-decoration: underline;
   }
   .primary {
     background: var(--primary, #2563eb);

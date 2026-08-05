@@ -29,6 +29,25 @@ beforeEach(() => {
   });
 });
 
+/**
+ * Skip StepScan's 10-second auto-advance countdown by clicking
+ * the "Continue now" button. The wizard then lands on StepAsk.
+ *
+ * Used by the tests below to walk through the flow quickly
+ * without waiting on the real countdown (which exists so end
+ * users have time to read the scan findings). The countdown
+ * behavior itself is covered by StepScan.test.ts.
+ */
+async function skip_scan_countdown(): Promise<void> {
+  await waitFor(() => {
+    expect(screen.getByTestId("scan-continue-now")).toBeTruthy();
+  });
+  await fireEvent.click(screen.getByTestId("scan-continue-now"));
+  await waitFor(() => {
+    expect(screen.getByTestId("step-ask")).toBeTruthy();
+  });
+}
+
 describe("Onboarding.svelte (root)", () => {
   it("(a) mounts and shows step 1 (Welcome) with a 'Get started' button", () => {
     render(Onboarding, { props: { oncomplete: () => {} } });
@@ -56,16 +75,13 @@ describe("Onboarding.svelte (root)", () => {
     );
   });
 
-  it("(c) auto-advances through StepScan to StepAsk after the scan resolves", async () => {
+  it("(c) Continue-now button on StepScan advances to StepAsk", async () => {
+    // The auto-advance countdown itself is covered in
+    // StepScan.test.ts. Here we just verify the wizard routes
+    // through StepScan → StepAsk via the user-facing control.
     render(Onboarding, { props: { oncomplete: () => {} } });
     await fireEvent.click(screen.getByTestId("welcome-next"));
-    // Wait long enough for the scan to fire + 800ms auto-advance.
-    await waitFor(
-      () => {
-        expect(screen.getByTestId("step-ask")).toBeTruthy();
-      },
-      { timeout: 3000 },
-    );
+    await skip_scan_countdown();
     expect(screen.getByTestId("step-indicator").textContent).toMatch(
       /Step 3 of 6/,
     );
@@ -88,15 +104,11 @@ describe("Onboarding.svelte (root)", () => {
   it("(e) StepTransport shows the per-field validation errors when fields are empty", async () => {
     render(Onboarding, { props: { oncomplete: () => {} } });
     // Skip to step 4 (transport) by walking through the wizard
-    // quickly. We bypass auto-advance by clicking "Looks good"
-    // immediately when StepAsk renders.
+    // quickly. We bypass auto-advance by clicking Continue now
+    // on StepScan and "Looks good" immediately when StepAsk
+    // renders.
     await fireEvent.click(screen.getByTestId("welcome-next"));
-    await waitFor(
-      () => {
-        expect(screen.getByTestId("step-ask")).toBeTruthy();
-      },
-      { timeout: 3000 },
-    );
+    await skip_scan_countdown();
     await waitFor(() => {
       const next = screen.getByTestId("ask-next") as HTMLButtonElement;
       expect(next.disabled).toBe(false);
@@ -112,12 +124,7 @@ describe("Onboarding.svelte (root)", () => {
     render(Onboarding, { props: { oncomplete: () => {} } });
     // Welcome → Scan → Ask → Transport
     await fireEvent.click(screen.getByTestId("welcome-next"));
-    await waitFor(
-      () => {
-        expect(screen.getByTestId("step-ask")).toBeTruthy();
-      },
-      { timeout: 3000 },
-    );
+    await skip_scan_countdown();
     await waitFor(() => {
       const next = screen.getByTestId("ask-next") as HTMLButtonElement;
       expect(next.disabled).toBe(false);
@@ -150,12 +157,7 @@ describe("Onboarding.svelte (root)", () => {
     const oncomplete = vi.fn();
     render(Onboarding, { props: { oncomplete } });
     await fireEvent.click(screen.getByTestId("welcome-next"));
-    await waitFor(
-      () => {
-        expect(screen.getByTestId("step-ask")).toBeTruthy();
-      },
-      { timeout: 3000 },
-    );
+    await skip_scan_countdown();
     await waitFor(() => {
       const next = screen.getByTestId("ask-next") as HTMLButtonElement;
       expect(next.disabled).toBe(false);
@@ -185,11 +187,21 @@ describe("Onboarding.svelte (root)", () => {
       { timeout: 3000 },
     );
     // write_onboarding_config should have been called exactly
-    // once, with the LLM's answers and the SSH key flag set.
+    // once, with the LLM's answers (translated to the user's
+    // local-time `hour_utc`) and the SSH key flag set.
+    const offset_minutes = new Date().getTimezoneOffset();
+    const offset_hours = offset_minutes / 60;
+    const expected_hour_utc = ((18 - offset_hours) + 24) % 24;
     expect(mockInvoke).toHaveBeenCalledWith(
       "write_onboarding_config",
       expect.objectContaining({
-        answers: MOCK_ANSWERS,
+        answers: expect.objectContaining({
+          ...MOCK_ANSWERS,
+          review_time: {
+            ...MOCK_ANSWERS.review_time,
+            hour_utc: expected_hour_utc,
+          },
+        }),
         sshKeyGenerated: true,
       }),
     );
@@ -206,12 +218,7 @@ describe("Onboarding.svelte (root)", () => {
     // Welcome → Scan → Ask (jump straight to "Looks good" once
     // the answers load).
     await fireEvent.click(screen.getByTestId("welcome-next"));
-    await waitFor(
-      () => {
-        expect(screen.getByTestId("step-ask")).toBeTruthy();
-      },
-      { timeout: 3000 },
-    );
+    await skip_scan_countdown();
     await waitFor(() => {
       const next = screen.getByTestId("ask-next") as HTMLButtonElement;
       expect(next.disabled).toBe(false);
