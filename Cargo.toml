@@ -35,7 +35,7 @@ ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core", "getrandom"] 
 keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 zeroize = { version = "1", features = ["derive"] }
 walkdir = "2"
-tempfile = "3"
+tempfile = "3.27.0"
 icalendar = "0.7"
 tokio-cron-scheduler = "0.15.1"
 # Phase 3 — summarizer + anonymizer + scheduler notifications.
