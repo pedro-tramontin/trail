@@ -313,7 +313,6 @@ jobs:
               print("- No user-facing changes in this release.")
               print()
           PY
-          PRS_JSON="$PRS_JSON" python3 - "$VERSION" "$TODAY" > /tmp/changelog_src.md
 
           # Helper: prepend a new version section to a CHANGELOG
           # file while preserving the file's existing version

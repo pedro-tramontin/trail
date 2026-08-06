@@ -9,6 +9,13 @@
 # and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.4.1] - 2026-08-05
+
+### Fixed
+
+- fix(release): ad-hoc codesign macOS .app so Gatekeeper accepts it (#160)
+- fix(release): preserve CHANGELOG history across version bumps + backfill v0.1.0-v0.3.0 (#166)
+
 ## [0.4.0] - 2026-08-05
 
 ### Added
