@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/pedro-tramontin/trail/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/pedro-tramontin/trail/release.yml?branch=main&label=release&logo=github" alt="Release build"></a>
-  <a href="https://github.com/pedro-tramontin/trail/actions/workflows/draft-build.yml"><img src="https://img.shields.io/github/actions/workflow/status/pedro-tramontin/trail/draft-build.yml?branch=main&label=draft-build&logo=github" alt="Draft build"></a>
+  <a href="https://github.com/pedro-tramontin/trail/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/pedro-tramontin/trail/ci.yml?branch=main&label=ci&logo=github" alt="CI"></a>
   <a href="https://github.com/pedro-tramontin/trail/releases"><img src="https://img.shields.io/github/v/release/pedro-tramontin/trail?include_prereleases&sort=semver&logo=github" alt="Release"></a>
   <a href="https://github.com/pedro-tramontin/trail/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pedro-tramontin/trail?logo=github" alt="License"></a>
   <a href="https://github.com/pedro-tramontin/trail/releases"><img src="https://img.shields.io/github/downloads/pedro-tramontin/trail/total?logo=github" alt="Downloads"></a>

@@ -1,0 +1,183 @@
+# Fast CI workflow for the README status badge + per-commit regression
+# detection.
+#
+# Why this workflow exists (and why draft-build.yml is not the answer):
+#   - draft-build.yml only triggers on `pull_request` + `workflow_dispatch`.
+#     It has never run on `main`, which is why the README's draft-build
+#     badge has historically rendered as "no status" — the shields.io
+#     URL `actions/workflow/status/<wf>.yml?branch=main` looks up runs
+#     whose `head_branch == main`, and there are none.
+#   - The full 3-platform Tauri debug build is overkill for a "did
+#     main stay green" check. It costs ~10-12 min of CI minutes on
+#     every merge and overlaps with the signed release.yml build
+#     (which fires on the `trail-X.Y.Z` tag after release-please).
+#   - The actual regression-detection surface that matters on main
+#     is: lint, type-check, vitest, and `cargo check --workspace`
+#     (no link). All four run on ubuntu-latest in ~2-3 min.
+#
+# Triggers:
+#   - `push: branches: [main]`           — keeps the README badge green
+#                                          and catches post-merge breaks
+#                                          that PR-only CI misses (e.g.,
+#                                          release-please config edits,
+#                                          renovate.json changes that
+#                                          re-shape package.json).
+#   - `pull_request: branches: [main]`   — fast pre-merge signal
+#                                          alongside draft-build's
+#                                          slower per-platform smoke
+#                                          build. Splitting these out
+#                                          means a lint or type failure
+#                                          surfaces in <1 min instead
+#                                          of after the 3-4 min Tauri
+#                                          build.
+#   - `workflow_dispatch`                — manual re-run.
+#
+# Why a single ubuntu runner, not 3-platform matrix:
+#   - The lint + test jobs are platform-independent. The Rust
+#     `cargo check` job uses `target/*-unknown-linux-gnu` which
+#     matches the Tauri macOS-only audio code path's `cfg` gates
+#     correctly (cpal / objc2 / block2 are gated to macOS in
+#     src-tauri/Cargo.toml, so a Linux `cargo check` exercises the
+#     Linux build path: the gating compiles out, the non-gated code
+#     gets checked). The macOS-specific audio capture path is still
+#     covered by draft-build's `draft-macos` job on every PR.
+#   - Saves ~2x the CI minutes vs. duplicating across macos-latest
+#     and windows-latest runners for commands whose output is
+#     identical on all three.
+#
+# Why this is *not* a status check required for merging:
+#   - draft-build.yml already provides the required gating signals
+#     (pr-label-check + the three platform builds). This workflow
+#     is informational: it keeps the README badge honest and gives
+#     a fast feedback loop on PRs, but the branch protection rules
+#     (configured separately in repo settings) still gate on
+#     draft-build's checks.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# `contents: read` is enough — no PR-mutating actions run here.
+permissions:
+  contents: read
+
+# Cancel any in-flight run for the same ref when a new commit lands.
+# For a fast CI workflow, two builds racing is just wasted minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===================================================================
+  # Frontend lint (eslint)
+  # ===================================================================
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+  # ===================================================================
+  # Frontend type-check (svelte-check + tsc)
+  # ===================================================================
+  # svelte-check covers the .svelte files; tsc --noEmit covers the
+  # plain .ts files. Both run from the same `pnpm install` so the
+  # node_modules setup is shared.
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm exec svelte-check --tsconfig ./tsconfig.json
+      - run: pnpm exec tsc --noEmit
+
+  # ===================================================================
+  # Frontend tests (vitest)
+  # ===================================================================
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test
+
+  # ===================================================================
+  # Rust workspace check (no link, no test run)
+  # ===================================================================
+  # `cargo check --workspace --all-targets` exercises every example,
+  # test, and bench target's compilation. Faster than `cargo test`
+  # (no link) and catches the most common post-merge breakage:
+  #   - new rust code that doesn't compile under the stable toolchain
+  #   - feature-flag / cfg-gate misconfigurations
+  #   - workspace dependency version drift
+  # The actual `cargo test --workspace` run is exercised on PRs by
+  # draft-build's per-platform jobs (which run the full test suite
+  # on Linux as a side effect of `cargo test`).
+  rust-check:
+    name: rust-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          # Match rust-toolchain.toml at the repo root. The toolchain
+          # file pins the MSRV; we want CI to fail loudly if a PR
+          # bumps it without updating the file.
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/trail-collector -> target
+            src-tauri -> target
+
+      - run: cargo check --workspace --all-targets --locked
