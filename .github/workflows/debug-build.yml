@@ -7,24 +7,24 @@
 # Trigger: push to main, with a commit-message filter that narrows
 # down to "only the version-bump PR's merge commit." This is the
 # shape from the user's spec (2026-08-06): debug-build runs after
-# release-drafter creates the draft, draft-version-bump.yml opens
+# release-drafter creates the draft, open-draft-version-pr.yml opens
 # the version-bump PR, the user merges that PR, and the merge
-# commit (whose subject line is `chore(release): bump version to
+# commit (whose subject line is `chore(draft-release): bump version to
 # X.Y.Z` mirrored from the PR #N's title by GitHub's merge UI)
 # triggers this workflow.
 #
 # Why push: branches: [main] + commit-message filter (vs
-# workflow_run: ["draft-version-bump"]):
+# workflow_run: ["open-draft-version-pr"]):
 #   - workflow_run fires when the *workflow* completes, but the
-#     version-bump PR is opened, not merged, by draft-version-bump.
+#     version-bump PR is opened, not merged, by open-draft-version-pr.
 #     The PR merge is a separate Git event that workflow_run
 #     can't see directly — we'd need to chain workflow_run on
-#     draft-version-bump (which opens the PR) PLUS a pull_request
+#     open-draft-version-pr (which opens the PR) PLUS a pull_request
 #     closed event on the version-bump PR. Two coupled triggers
 #     is brittle.
 #   - The push to main event fires when the version-bump PR
 #     merges. Adding a commit-message filter to the gate job
-#     (`^chore(release): bump version to X.Y.Z`) is a single
+#     (`^chore(draft-release): bump version to X.Y.Z`) is a single
 #     trigger that always fires at the right moment.
 #   - This is the same pattern promote.yml uses for the prod
 #     build path (see promote.yml's gate job; same regex).
@@ -144,11 +144,11 @@ jobs:
           # GitHub merges PRs with a "merge commit" whose subject line
           # is the PR title. For PR #179 (the version-bump PR) the
           # subject is:
-          #   chore(release): bump version to 0.4.2 (#179)
+          #   chore(draft-release): bump version to 0.4.2 (#179)
           # Two differences from the version-bump workflow's literal
           # commit message:
-          #   1. No `v` prefix on the version. draft-version-bump.yml
-          #      produces `chore(release): bump version to 0.4.2`
+          #   1. No `v` prefix on the version. open-draft-version-pr.yml
+          #      produces `chore(draft-release): bump version to 0.4.2`
           #      (no `v`). The `v` prefix was a release-please
           #      relic; we strip it if present and re-add it when
           #      computing TAG.
@@ -161,7 +161,7 @@ jobs:
           # multi-line (PR body appended after a blank line). Use only
           # the first line.
           COMMIT_MSG=$(printf '%s' "$COMMIT_MSG" | head -1)
-          if [[ "$COMMIT_MSG" =~ ^chore\(release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]*(\(#[0-9]+\))?$ ]]; then
+          if [[ "$COMMIT_MSG" =~ ^chore(draft-release):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]*(\(#[0-9]+\))?$ ]]; then
             VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
             TAG="trail-v$VERSION"
             echo "Matched version-bump commit: $COMMIT_MSG"
@@ -300,17 +300,18 @@ jobs:
           # the case where release-drafter.yml failed to create it.
           releaseDraft: true
           prerelease: false
-          # Mirror promote.yml's prod args exactly. `--bundles`
-          # controls Tauri 2's output bundle types; the same names
-          # (deb, appimage) → same filenames (Trail_X.Y.Z_amd64.deb,
-          # .AppImage) → tauri-action's upload-by-name replaces the
-          # existing assets.
+          # Slim bundle set: 1 per OS (3 total per build). Linux gets
+          # appimage (single-file portable, runs on most distros
+          # without install). The same filename pattern
+          # (Trail_X.Y.Z_amd64.AppImage) lets tauri-action's
+          # upload-by-name replace the existing assets on each
+          # checkpoint PR merge.
           # NB: do NOT add `--debug` here — tauri-action's
           # `includeDebug: true` below already injects it. Passing
           # both produces a duplicated `--debug` flag that clap
           # rejects with "the argument '--debug' cannot be used
           # multiple times."
-          args: --bundles deb,appimage
+          args: --bundles appimage
           # tauri-action defaults `includeRelease: true, includeDebug:
           # false`, so without these overrides it scans `release/`
           # for artifacts and finds nothing (the `--debug` build
@@ -353,12 +354,12 @@ jobs:
           # the build-linux job above for the rationale.
           releaseDraft: true
           prerelease: false
-          # macOS: only AppImage and deb are Linux bundles — macOS
-          # uses .app / .dmg. The `--bundles app,dmg` flag tells
-          # Tauri 2 to produce both, and tauri-action uploads them
-          # to the draft release.
+          # macOS: slim to .app only (the .app bundle can be tar.gz'd
+          # for sharing). The `--bundles app` flag tells Tauri 2 to
+          # produce the .app, and tauri-action uploads it to the
+          # draft release.
           # NB: do NOT add `--debug` — handled by includeDebug below.
-          args: --bundles app,dmg
+          args: --bundles app
           includeRelease: false
           includeDebug: true
 
@@ -397,7 +398,7 @@ jobs:
           # the build-linux job above for the rationale.
           releaseDraft: true
           prerelease: false
-          # Windows: .exe (NSIS installer) and .msi (WiX) bundles.
-          args: --bundles nsis,msi
+          # Windows: slim to .exe (NSIS installer) only.
+          args: --bundles nsis
           includeRelease: false
           includeDebug: true

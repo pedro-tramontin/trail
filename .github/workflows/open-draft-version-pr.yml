@@ -1,7 +1,7 @@
-# draft-version-bump workflow
+# open-draft-version-pr workflow
 #
 # Reads the version of the open draft release (created by
-# release-drafter.yml) and opens a `chore(release): bump version
+# release-drafter.yml) and opens a `chore(draft-release): bump version
 # to X.Y.Z` PR against main that updates the 4 version files
 # (src-tauri/Cargo.toml, src-tauri/tauri.conf.json, package.json,
 # crates/trail-collector/Cargo.toml) and prepends a new section
@@ -46,7 +46,7 @@
 #     merges within seconds). The first run should complete
 #     naturally; we don't want to cancel-and-restart because the
 #     restart would read the same draft and do the same work.
-#   - Group key is `draft-version-bump-${{ github.event.workflow_run.id }}`
+#   - Group key is `open-draft-version-pr-${{ github.event.workflow_run.id }}`
 #     so each upstream release-drafter run's downstream is its own
 #     concurrency group. Two unrelated PR merges won't cancel each
 #     other.
@@ -62,7 +62,7 @@
 # has been deliberately avoided (see the Pre-populate CHANGELOGs
 # comment for the rationale).
 
-name: draft-version-bump
+name: open-draft-version-pr
 
 on:
   workflow_run:
@@ -75,14 +75,9 @@ on:
         description: 'Release tag to bump version files for (e.g. trail-v0.4.1). If blank, derive from the most recent open draft release.'
         required: false
         type: string
-      force:
-        description: 'If true, bypass the "main already at draft version" check and force a new version-bump PR. Useful when the draft version was manually edited.'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
-  group: draft-version-bump-${{ github.event.workflow_run.id || github.run_id }}
+  group: open-draft-version-pr-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -173,47 +168,48 @@ jobs:
           echo "::notice::No draft to bump; exiting cleanly."
           exit 0
 
-      - name: Skip if main already at draft version
-        id: already_at
+      - name: Read triggering commit message
+        id: trigger
         if: steps.draft.outputs.has_draft == 'true'
         env:
-          VERSION: ${{ steps.draft.outputs.version }}
-          FORCE: ${{ inputs.force }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          # If a previous version-bump run already landed the
-          # bump on main, the next release-drafter run will find
-          # a stale draft for the same version. Without this
-          # guard, the workflow tries to push a new
-          # `infra/bump-X.Y.Z` branch to origin where one
-          # already exists, fails with `fetch first` (non-
-          # fast-forward), and leaves the run red.
+          # Read the merge commit that triggered release-drafter
+          # (which triggered this workflow). The first line of the
+          # commit message is the conventional-commits subject
+          # (`feat:`, `fix:`, `chore:`, etc.).
           #
-          # Detect this by checking if main's version files
-          # already match the draft's VERSION. If so, set
-          # should_bump=false so all subsequent steps are
-          # skipped by their `if:` guard. If not, set
-          # should_bump=true and proceed.
+          # Extract the prefix (the part before `:` or `(scope):`).
+          # If the prefix is `chore`, skip — chore commits don't
+          # change the draft's content, so no checkpoint PR is
+          # needed. Any other prefix (feat, fix, refactor, docs,
+          # perf, build, ci, test, style, revert) opens a
+          # checkpoint PR.
           #
-          # The FORCE input (manual dispatch only) bypasses this
-          # check — useful when the draft was manually edited
-          # (e.g. `gh release edit --tag-name`) and we want to
-          # re-open the version-bump PR.
-          CURRENT=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
-          if [ "$CURRENT" = "$VERSION" ] && [ "$FORCE" != "true" ]; then
-            echo "::notice::Main is already at version $VERSION (draft version); nothing to bump. Skipping. (Pass force=true to override.)"
-            echo "should_bump=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$CURRENT" = "$VERSION" ] && [ "$FORCE" = "true" ]; then
-            echo "::warning::Main is already at $VERSION (matches draft), but force=true; proceeding anyway."
+          # This replaces the previous "main already at draft
+          # version" check, which was wrong for the draft-only
+          # mode: it would skip a checkpoint PR even when the
+          # draft had new content (e.g. a `fix:` landed on main
+          # but the version didn't change).
+          HEAD_COMMIT=$(git log -1 --format=%s "$COMMIT_SHA" 2>/dev/null || echo "")
+          COMMIT_PREFIX=$(echo "$HEAD_COMMIT" | sed -E 's/^([a-zA-Z]+)(\([^)]+\))?:.*/\1/')
+          echo "head_commit=$HEAD_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "commit_prefix=$COMMIT_PREFIX" >> "$GITHUB_OUTPUT"
+          if [ "$COMMIT_PREFIX" = "chore" ]; then
+            echo "should_open=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Main is at $CURRENT, draft is $VERSION — proceeding with bump."
+            echo "should_open=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "should_bump=true" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if chore commit
+        if: steps.trigger.outputs.should_open == 'false'
+        run: |
+          echo "::notice::Triggering commit is '${{ steps.trigger.outputs.commit_prefix }}:'; skipping checkpoint PR (chore commits don't change the draft)."
+          exit 0
 
       - name: Close superseded version-bump PRs (if draft version changed)
         id: close_superseded
-        if: steps.already_at.outputs.should_bump == 'true'
+        if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -231,7 +227,7 @@ jobs:
           # clean.
           #
           # Title regex: matches
-          #   chore(release): bump version to X.Y.Z
+          #   chore(draft-release): bump version to X.Y.Z
           # The version captured is the OLD version. We close
           # whenever OLD_VERSION != VERSION (the current draft
           # version). Same-version PRs are left alone (they're the
@@ -259,7 +255,7 @@ jobs:
                 # flag. If the branch delete fails (e.g. branch is
                 # protected or already gone), we don't care — the
                 # PR closure is what matters for cleanliness.
-                BRANCH_TO_DELETE="infra/bump-$OLD_VERSION"
+                BRANCH_TO_DELETE="infra/draft-bump-$OLD_VERSION"
                 if git ls-remote --heads origin "$BRANCH_TO_DELETE" | grep -q "$BRANCH_TO_DELETE"; then
                   git push origin --delete "$BRANCH_TO_DELETE" 2>/dev/null || \
                     echo "::notice::Could not delete remote branch $BRANCH_TO_DELETE (likely protected or already removed); orphan ref will be cleaned up on next manual sweep."
@@ -272,7 +268,7 @@ jobs:
           echo "closed_count=$CLOSED" >> "$GITHUB_OUTPUT"
 
       - name: Update 4 version files
-        if: steps.already_at.outputs.should_bump == 'true'
+        if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
         run: |
@@ -315,7 +311,7 @@ jobs:
             package.json crates/trail-collector/Cargo.toml
 
       - name: Update Cargo.lock to match the new versions
-        if: steps.already_at.outputs.should_bump == 'true'
+        if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
         run: |
@@ -358,7 +354,7 @@ jobs:
           git diff -- Cargo.lock | head -30
 
       - name: Pre-populate CHANGELOGs (Keep a Changelog format)
-        if: steps.already_at.outputs.should_bump == 'true'
+        if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -384,8 +380,8 @@ jobs:
           # Step 1: categorize PRs into the 3 Keep-a-Changelog
           # sections (added / changed / fixed) based on the
           # conventional-commits prefix from the PR title. The
-          # version-bump PR itself (`chore(release): bump version to
-          # X.Y.Z`) is the only `chore(release):` PR that should
+          # version-bump PR itself (`chore(draft-release): bump version to
+          # X.Y.Z`) is the only `chore(draft-release):` PR that should
           # ever appear; everything else is chore/deps/ci/etc. and
           # falls into the "not user-facing" branch (omitted from
           # the changelog body).
@@ -474,7 +470,7 @@ jobs:
           # read an empty new_section and wrote the CHANGELOGs
           # with empty content, making the new section header
           # silently disappear from the commit. The fix was to
-          # REMOVE the duplicate line. This file (draft-version-bump.yml)
+          # REMOVE the duplicate line. This file (open-draft-version-pr.yml)
           # has only the single correct invocation above; the
           # heredoc `<<'PY'` is present, so the script body is
           # fed via stdin correctly. Do NOT add a second invocation
@@ -531,18 +527,18 @@ jobs:
           echo "Prepended [$VERSION] section to both CHANGELOGs (prior sections preserved)"
 
       - name: Open version-bump PR
-        if: steps.already_at.outputs.should_bump == 'true'
+        if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           TAG: ${{ steps.draft.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Branch name: infra/bump-X.Y.Z
+          # Branch name: infra/draft-bump-X.Y.Z
           # (Phase-agnostic — previously `infra/8-2-bump-X.Y.Z` while
           # this workflow lived under the Phase 8 release-pipeline
           # refactor. The phase number was noise in the branch name.)
-          BRANCH="infra/bump-$VERSION"
+          BRANCH="infra/draft-bump-$VERSION"
 
           # Commit + push
           git config user.name "github-actions[bot]"
@@ -552,7 +548,7 @@ jobs:
           # so `--force-with-lease` has a ref to lease against.
           # actions/checkout@v4 defaults to fetch-depth:1 (the
           # current branch only), so the runner's local repo has
-          # no ref for `infra/bump-X.Y.Z` on the first push
+          # no ref for `infra/draft-bump-X.Y.Z` on the first push
           # of a new version. `--force-with-lease` then fails with
           # "stale info" because it has nothing to lease against.
           # The `|| true` swallows the expected failure on the
@@ -573,9 +569,9 @@ jobs:
                   Cargo.lock \
                   src-tauri/CHANGELOG.md \
                   crates/trail-collector/CHANGELOG.md
-          git commit -m "chore(release): bump version to $VERSION"
+          git commit -m "chore(draft-release): bump version to $VERSION"
           # Use --force-with-lease so a stale orphan branch from a
-          # previous failed run (e.g. draft-version-bump.yml's
+          # previous failed run (e.g. open-draft-version-pr.yml's
           # `gh pr create` failed after pushing the branch, leaving
           # a non-fast-forward tip) doesn't block the new push.
           # --force-with-lease only fails if the remote tip is NOT
@@ -616,7 +612,7 @@ jobs:
           # with multi-line strings containing backticks and pipes.
           TODAY=$(date -u +%Y-%m-%d)
           cat > /tmp/pr_body.md <<EOF
-          draft-version-bump.yml opened this PR after release-drafter updated the draft release \`$TAG\` to \`$VERSION\`.
+          open-draft-version-pr.yml opened this PR after release-drafter updated the draft release \`$TAG\` to \`$VERSION\`.
 
           ## Changes in this PR
 
@@ -642,7 +638,7 @@ jobs:
           gh pr create \
             --base main \
             --head "$BRANCH" \
-            --title "chore(release): bump version to $VERSION" \
+            --title "chore(draft-release): bump version to $VERSION" \
             --body-file /tmp/pr_body.md \
             || {
               echo "::error::gh pr create failed"
