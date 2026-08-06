@@ -78,7 +78,7 @@ uuid = { version = "1", features = ["v4"] }
 # these crates don't compile on Linux (block2 + objc2 both transitively
 # link CoreFoundation) so they only land on macOS at the call site.
 objc2 = "0.6"
-objc2-foundation = "0.3"
+objc2-foundation = "0.3.2"
 block2 = "0.6.2"
 
 [profile.release]
