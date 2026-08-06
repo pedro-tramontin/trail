@@ -28,7 +28,7 @@ jsonschema = { version = "0.18", default-features = false, features = ["draft202
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 ssh2 = "0.9"
 async-trait = "0.1"
 ssh-key = { version = "0.6", features = ["ed25519", "rand_core", "getrandom"] }
