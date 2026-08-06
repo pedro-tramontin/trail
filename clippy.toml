@@ -1,0 +1,35 @@
+# clippy.toml — workspace-wide configuration for `cargo clippy`.
+#
+# CI runs `cargo clippy --workspace --all-targets -- -D warnings`
+# (see .github/workflows/ci.yml `rust-clippy` job), which denies
+# every default-warn clippy lint. The settings below constrain how
+# clippy behaves when it lints — they do not themselves add new
+# lints to the deny set.
+#
+# Why no `disallowed-methods` / `disallowed-types` here:
+#   The project has ~40 pre-existing call sites of
+#   `std::env::var[_os]` and a handful of `std::sync::Mutex` uses
+#   in tests/examples that all predate the gate. Folding them into
+#   a single PR would require either `#[allow]`s scattered across
+#   the source or a separate cleanup PR to migrate the call sites
+#   to the project's stated chokepoints (parking_lot for sync
+#   primitives; `Config::from_env` for env reads). Both belong in
+#   their own scoped PR — this one is just "block the build on
+#   `unused_imports` and friends".
+#
+# When new chokepoint rules are added, put them here with a
+# short reason and link the cleanup PR in the comment.
+
+# Pin clippy's MSRV to the project's rust-version so it doesn't
+# suggest features that wouldn't compile on the toolchain pin in
+# rust-toolchain.toml. Without this, clippy can suggest idioms
+# stable on 1.97 but not 1.81, then CI (on 1.81) errors out with
+# "feature not allowed at this MSRV".
+msrv = "1.81"
+
+# We don't promise a frozen public API yet (workspace version 0.1.0;
+# release version 0.4.2 in src-tauri). Set to false so clippy still
+# flags e.g. `clippy::needless_pub_crate` against a `pub use` we'd
+# have to break in v1, but doesn't pre-emptively lint things only
+# safe to change post-1.0.
+avoid-breaking-exported-api = false
