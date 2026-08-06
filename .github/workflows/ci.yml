@@ -83,13 +83,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pnpm 10.18.0 matches the project's pnpm-workspace.yaml lockfile
+      # version. MUST run before `actions/setup-node@v4` with
+      # `cache: pnpm` — setup-node looks up `pnpm` on PATH to discover
+      # the store directory, and fails with "Unable to locate
+      # executable file: pnpm" if pnpm isn't on PATH yet. See
+      # draft-build.yml for the full rationale.
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.18.0
 
+      # pnpm 10+ requires Node.js 22.13+ (calls node:sqlite builtin).
+      # Pin to 22 LTS to match pnpm@10.18.0.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "22"
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -111,11 +119,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.18.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "22"
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -135,11 +143,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.18.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "22"
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -165,19 +173,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # dtolnay/rust-toolchain@stable picks up the toolchain pin
+      # from rust-toolchain.toml at the repo root (stable-1.81.x).
+      # The toolchain file is the source of truth for MSRV — if a
+      # PR bumps it, this step uses the new toolchain, so CI will
+      # exercise whatever the user committed.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          # Match rust-toolchain.toml at the repo root. The toolchain
-          # file pins the MSRV; we want CI to fail loudly if a PR
-          # bumps it without updating the file.
-          components: rustfmt, clippy
 
+      # Separate cache key from `trail-draft-*` (PR review artifacts)
+      # and `trail-release-*` (prod builds) so ci runs don't evict
+      # the warmer caches used by those workflows.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            .
-            crates/trail-collector -> target
-            src-tauri -> target
+          shared-key: trail-ci
 
       - run: cargo check --workspace --all-targets --locked
