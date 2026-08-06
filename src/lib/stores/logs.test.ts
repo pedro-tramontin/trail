@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { logsState, refresh, remove, selectDate } from "./logs.svelte.ts";
+import { logsState, refresh, remove, selectDate } from "./logs.svelte";
 import * as api from "$lib/api/logs";
 
 vi.mock("$lib/api/logs", () => ({

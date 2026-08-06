@@ -173,6 +173,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Tauri 2 on Linux transitively depends on the GTK/glib stack
+      # (glib-sys / gobject-sys / gio-sys build scripts link against
+      # system libs). Without these apt packages, `cargo check` fails
+      # with "failed to run custom build command for glib-sys".
+      # The package list mirrors Tauri's official prerequisites:
+      # https://v2.tauri.app/start/prerequisites/
+      - name: Install Linux system deps (Tauri 2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libwebkit2gtk-4.1-dev \
+            libglib2.0-dev
+
       # dtolnay/rust-toolchain@stable picks up the toolchain pin
       # from rust-toolchain.toml at the repo root (stable-1.81.x).
       # The toolchain file is the source of truth for MSRV — if a

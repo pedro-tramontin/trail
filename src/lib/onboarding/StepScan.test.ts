@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent } from "@testing-library/svelte";
 import StepScan from "./StepScan.svelte";
 import { MOCK_SCAN_REPORT } from "./types";
 
