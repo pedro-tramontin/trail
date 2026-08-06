@@ -284,26 +284,63 @@ jobs:
       # is defensive: it surfaces any filename-shape mismatch (e.g.
       # macOS .app.tar.gz vs .app.tar.gz-dsym vs .app.tar.gz-debug)
       # as a clean log line instead of a silent duplicate-asset.
+      # ----- Fix rationale (the 2026-08-06 incident) -----
+      #
+      # An earlier version of this step used `set -euo pipefail` and
+      # relied on `gh api -X DELETE` returning 204 for every asset
+      # ID. If a previous run or a manual cleanup had already
+      # deleted one of the assets, the DELETE returns 404, the
+      # non-zero exit code trips `set -e`, and the whole step
+      # aborts. The next step ("Flip draft → published") is then
+      # skipped — the draft stays a draft, with whatever binaries
+      # managed to attach before the crash still in place.
+      #
+      # This happened in run 31104607282 (2026-08-06, the 0.4.2
+      # publish): one of the 12 stale 0.4.1 debug binaries was
+      # already gone, the first DELETE returned 404, the step died,
+      # and the 5 fresh 0.4.2 prod binaries sat on the draft
+      # unpublished. The fix below:
+      #   1. Tolerates 404 ("asset already deleted, that's fine").
+      #   2. Logs other non-2xx as warnings but continues the loop.
+      #   3. Does NOT use `set -e` so the loop continues past any
+      #      single asset's failure.
       - name: Delete existing assets (debug binary replacement)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.gate.outputs.tag }}
         run: |
-          set -euo pipefail
+          set -uo pipefail  # NOTE: removed -e; see comment above
           ASSET_IDS=$(gh release view "$TAG" --json assets --jq '.assets[].id')
           if [ -z "$ASSET_IDS" ]; then
             echo "No existing assets on draft $TAG — skipping delete step."
           else
             COUNT=$(echo "$ASSET_IDS" | wc -l)
-            echo "Deleting $COUNT existing assets from draft $TAG..."
+            echo "Deleting up to $COUNT existing assets from draft $TAG (404s are tolerated)..."
             echo "$ASSET_IDS" | while read -r id; do
               [ -z "$id" ] && continue
-              gh api -X DELETE \
+              HTTP_CODE=$(gh api -X DELETE \
                 -H "Accept: application/vnd.github+json" \
-                "/repos/${{ github.repository }}/releases/assets/$id"
-              echo "  Deleted asset id=$id"
+                --include \
+                "/repos/${{ github.repository }}/releases/assets/$id" \
+                -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+              case "$HTTP_CODE" in
+                204|404)
+                  # 204 = deleted; 404 = already gone (e.g. manual cleanup
+                  # or a previous run removed it). Both are fine.
+                  echo "  asset id=$id: $HTTP_CODE (ok)"
+                  ;;
+                *)
+                  # Any other status is suspicious (rate-limit, auth,
+                  # server error). Log loudly but continue — the goal
+                  # is to make the publish step runnable; a few
+                  # leftovers can be cleaned up manually.
+                  echo "  ::warning::asset id=$id: HTTP $HTTP_CODE (unexpected; left in place)"
+                  ;;
+              esac
             done
-            echo "All $COUNT existing assets deleted."
+            echo "Asset cleanup loop completed. Re-verifying draft state..."
+            REMAINING=$(gh release view "$TAG" --json assets --jq '.assets | length')
+            echo "  Remaining assets on draft: $REMAINING"
           fi
       - name: Flip draft → published
         env:
