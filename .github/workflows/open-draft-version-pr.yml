@@ -215,6 +215,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Re-inject the GITHUB_TOKEN into git config so the
+          # `git push origin --delete` below can authenticate. The
+          # Checkout step uses `persist-credentials: false` (see
+          # comment there), which strips the extraheader that
+          # actions/checkout would normally set. Without the
+          # extraheader, `git push` fails with "could not read
+          # Username for 'https://github.com'". The `trap` removes
+          # the extraheader on exit so it doesn't leak into
+          # subsequent steps.
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --local http.https://github.com/.extraheader "$AUTH_HEADER"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader' EXIT
           # When release-drafter's next-version computation changes
           # (e.g. a new `feat:` PR landed on main after the previous
           # version-bump PR was opened, bumping the draft from 0.2.1
@@ -534,6 +546,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Re-inject the GITHUB_TOKEN into git config so the
+          # `git push --force-with-lease` below can authenticate. The
+          # Checkout step uses `persist-credentials: false` (see
+          # comment there), which strips the extraheader that
+          # actions/checkout would normally set. Without the
+          # extraheader, `git push` fails with "could not read
+          # Username for 'https://github.com'". The `trap` removes
+          # the extraheader on exit so it doesn't leak into
+          # subsequent steps.
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --local http.https://github.com/.extraheader "$AUTH_HEADER"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader' EXIT
           # Branch name: infra/draft-bump-X.Y.Z
           # (Phase-agnostic — previously `infra/8-2-bump-X.Y.Z` while
           # this workflow lived under the Phase 8 release-pipeline
