@@ -693,7 +693,7 @@ jobs:
 
           - Review the changelog entries + version bumps.
           - **Merge this PR manually** (auto-merge is disabled per the Phase 8 design).
-          - \`debug-build.yml\` will fire on the merge commit and attach debug binaries to the draft release page for smoke-testing.
+          - \`draft-build.yml\` will fire on the merge commit and attach debug binaries to the draft release page for smoke-testing.
 
           Draft release: $TAG
           EOF

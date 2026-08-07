@@ -1,115 +1,143 @@
-# Per-PR draft build workflow.
+# draft-build workflow
 #
-# Runs on every opened/synchronized PR to main and uploads unsigned
-# debug bundles for **all three** target platforms (Linux, macOS,
-# Windows) so reviewers (and the author) can smoke-test the binary
-# before the official release lands. Does NOT push to GitHub
-# Releases — only uploads downloadable artifacts.
+# Dual-purpose debug-build workflow: serves both the PR-time smoke
+# test AND the post-merge draft-release-attach. Replaces the previous
+# two-workflow split (draft-build.yml for PRs, debug-build.yml for
+# post-merge) with one workflow whose jobs run conditionally on the
+# trigger type.
 #
-# Why unsigned: signing requires APPLE_CERTIFICATE_BASE64 + the
-# private key in the Apple keychain, which is a per-fork secret.
-# Forks do NOT have access to the upstream repo's secrets, by
-# design (prevents PR-submitted code from getting secret-bearing
-# builds). The unsigned-draft is fine for "does it compile + bundle
-# + the UI launches" QA. Once the PR merges, the official
-# release.yml does the signed + notarized + universal release
-# build.
+# Two execution modes, distinguished by `github.event_name`:
 #
-# Why three jobs, not one matrix: the host runners are different
-# (ubuntu-latest vs macos-latest vs windows-latest) and the
-# per-platform setup steps diverge (Linux needs apt webkit2gtk
-# deps, macOS needs the codesign-conf template patched out,
-# Windows needs NSIS downloaded by `pnpm tauri build` itself).
-# Keeping them as three named jobs makes the failure surface
-# obvious: a Mac PR breakage shows up on the draft-macos job
-# specifically instead of one matrix row that obscures which
-# runner failed.
+#   1. PR mode (`pull_request` against `main`):
+#      - `pr-label-check` validates the PR title → `type:` label
+#        mapping (required by release-drafter v6's label-only
+#        categorization).
+#      - `draft-linux` / `draft-macos` / `draft-windows` build the
+#        debug bundle on all 3 platforms and upload the artifacts
+#        to the PR so reviewers can smoke-test the binary before
+#        merge. NOT attached to a release.
+#      - Same `RUSTFLAGS=-D warnings` defense as the post-merge
+#        builds, so a platform-only warning (the `cfg(unix)` bug
+#        from PR #182) fails the PR gate.
+#      - Fork PRs are skipped via per-step `if:` guards (forks
+#        don't have access to the upstream repo's secrets or
+#        labels).
 #
-# What `pnpm tauri build --debug` actually produces per platform
-# (Tauri 2.x canonical paths — note the trail Cargo workspace
-# has its root at the repo root, so `target/` lives at the repo
-# root, NOT at `src-tauri/target/`):
-#   - Linux:   target/debug/bundle/deb/*.deb
-#              + target/debug/bundle/appimage/*.AppImage
-#              + the raw binary at target/debug/trail
-#   - macOS:   target/aarch64-apple-darwin/debug/bundle/macos/Trail.app
-#              + target/aarch64-apple-darwin/debug/bundle/dmg/*.dmg
-#              (the path includes the target triple because
-#              we pass `--target aarch64-apple-darwin`; without
-#              --target the path would be `target/debug/...`
-#              like Linux/Windows)
-#   - Windows: target/debug/bundle/msi/*.msi
-#              + target/debug/bundle/nsis/*.exe
-#              + the raw binary at target/debug/trail.exe
+#   2. Post-merge mode (`push` to `main`):
+#      - `gate` extracts the version from the version-bump commit
+#        message (`chore(draft-release): bump version to X.Y.Z`),
+#        verifies the draft release exists, and verifies main's
+#        `src-tauri/tauri.conf.json` version matches the tag. If
+#        any check fails, `should_attach=false` and the 3 build
+#        jobs are skipped.
+#      - `build-linux` / `build-macos` / `build-windows` run
+#        `tauri-apps/tauri-action@v0` with `includeDebug: true` +
+#        slim bundle set (1 artifact per OS), attaching the
+#        binaries to the existing draft release created by
+#        release-drafter.yml. NOT uploaded as a workflow artifact.
 #
-# Why --debug not release: debug builds skip LTO + codesign +
-# notarization + universal-binary merge, dropping build time
-# from ~10 min (release on macos-latest) to ~3-4 min. The
-# produced binary is functionally equivalent for smoke-testing:
-# the same Rust code, the same Svelte bundle, the same Tauri
-# 2 runtime. The only difference is binary size and (for macOS)
-# the absence of codesign on the .app. Per the
-# tests/MACOS_PHASE5_CHECKLIST.md trail-voice permission flow
-# the TCC prompt fires on the bundle id, which is identical
-# between debug and release.
+#   3. Manual dispatch (`workflow_dispatch`):
+#      - Same as post-merge mode. Caller can provide a `tag`
+#        input (e.g. `trail-v0.4.3`) to bypass the commit-message
+#        regex. Useful for retroactive re-runs when the gate
+#        missed on a previous push.
 #
-# Item §7.6/7.7 followup: the §7.1 STUB only had draft-linux.
-# This file extends it with draft-macos + draft-windows so every
-# PR ships a downloadable Trail.{app,exe,deb,AppImage,msi} for
-# cross-platform smoke-testing on a HostMyApple macOS VM, a
-# Windows VM, and any Linux host.
+# Why push: branches: [main] + commit-message filter (vs
+# workflow_run: ["open-draft-version-pr"]):
+#   - workflow_run fires when the *workflow* completes, but the
+#     version-bump PR is opened, not merged, by
+#     open-draft-version-pr. The PR merge is a separate Git event
+#     that workflow_run can't see directly — we'd need to chain
+#     workflow_run on open-draft-version-pr PLUS a pull_request
+#     closed event on the version-bump PR. Two coupled triggers
+#     is brittle.
+#   - The push to main event fires when the version-bump PR
+#     merges. Adding a commit-message filter to the gate job is a
+#     single trigger that always fires at the right moment.
+#   - This is the same pattern promote.yml uses for the prod
+#     build path (see promote.yml's gate job; same regex).
+#
+# Permissions:
+#   - contents: write   — push-mode jobs attach binaries to the
+#                         draft release via tauri-action.
+#                         PR-mode jobs (draft-*) only read the
+#                         checkout, so the write permission is
+#                         unused for them but harmless — the
+#                         per-step fork guard (`if:` on
+#                         `actions/checkout@v4`) prevents fork PRs
+#                         from exercising any jobs.
+#   - pull-requests: read — used by the PR-mode label-check to
+#                            read PR labels via `gh pr view`.
+#
+# Concurrency:
+#   - `cancel-in-progress: true` so a fast follow-up push to main
+#     (e.g. you fix a typo in the version-bump PR, re-merge)
+#     doesn't run two debug-build cycles in parallel. The first
+#     one is wasted.
+#   - Group key includes `github.event_name` so PR runs and push
+#     runs have separate concurrency buckets — they don't cancel
+#     each other.
 
 name: draft-build
 
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build debug binaries for (e.g. trail-v0.4.1). If blank, derive from the most recent version-bump commit on main. Only applies to post-merge mode (workflows dispatched manually do not trigger PR-mode jobs).'
+        required: false
+        type: string
 
-# Fork guard applied per-job below — the GH Actions schema
-# rejects `if:` at the workflow top level.
+concurrency:
+  group: draft-build-${{ github.event_name }}-${{ github.event.pull_request.head.ref || github.event.head_commit.id || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: read
 
 jobs:
   # ===================================================================
   # PR label check (Conventional Commits title -> type: label)
   # ===================================================================
+  # PR mode only. Read-only check: no PR mutation. This is the gate
+  # that ensures every PR has the right `type: <name>` label before
+  # merge, so release-drafter v6 (which is labels-only) can do its
+  # categorization + version bump. Without this check, a PR with a
+  # bad title (no Conventional Commits prefix) would slip through
+  # labeler.yml's "no match" notice and merge without a label,
+  # leaving release-drafter nothing to bucket.
+  #
+  # Why in draft-build.yml and not a separate workflow:
+  #   - Already has `on: pull_request:` + `contents: read`, which
+  #     is exactly what this job needs. No new permissions to
+  #     grant, no new trigger to manage.
+  #   - Runs first (declared before draft-linux/-macos/-windows)
+  #     so a label-check failure fails the PR in seconds, not
+  #     after a 3-4 min Tauri build.
+  #
+  # What it checks:
+  #   1. PR title matches at least one rule in
+  #      .github/label-rules.py (i.e. starts with a known
+  #      Conventional Commits prefix).
+  #   2. The PR has exactly one `type: *` label.
+  #   3. The single `type: *` label is the one the title would
+  #      produce (i.e. the human/labeller didn't apply a wrong
+  #      label).
+  #
+  # Source of truth: .github/label-rules.py - same module
+  # labeler.yml uses. Both MUST stay in lockstep; if you add a
+  # rule to one, add it to the other.
+  #
+  # Fork PRs are skipped: forks don't have access to the
+  # upstream repo's labels via the default GITHUB_TOKEN. A
+  # maintainer can apply the label manually on fork PRs.
   pr-label-check:
-    # Read-only check: no PR mutation. This is the gate that
-    # ensures every PR has the right `type: <name>` label before
-    # merge, so release-drafter v6 (which is labels-only) can do
-    # its categorization + version bump. Without this check, a PR
-    # with a bad title (no Conventional Commits prefix) would slip
-    # through labeler.yml's "no match" notice and merge without a
-    # label, leaving release-drafter nothing to bucket.
-    #
-    # Why in draft-build.yml and not a separate workflow:
-    #   - Already has `on: pull_request:` + `contents: read`, which
-    #     is exactly what this job needs. No new permissions to
-    #     grant, no new trigger to manage.
-    #   - Runs first (declared before draft-linux/-macos/-windows)
-    #     so a label-check failure fails the PR in seconds, not
-    #     after a 3-4 min Tauri build.
-    #
-    # What it checks:
-    #   1. PR title matches at least one rule in
-    #      .github/label-rules.py (i.e. starts with a known
-    #      Conventional Commits prefix).
-    #   2. The PR has exactly one `type: *` label.
-    #   3. The single `type: *` label is the one the title would
-    #      produce (i.e. the human/labeller didn't apply a wrong
-    #      label).
-    #
-    # Source of truth: .github/label-rules.py - same module
-    # labeler.yml uses. Both MUST stay in lockstep; if you add a
-    # rule to one, add it to the other.
-    #
-    # Fork PRs are skipped: forks don't have access to the
-    # upstream repo's labels via the default GITHUB_TOKEN. A
-    # maintainer can apply the label manually on fork PRs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name == github.repository)
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -255,6 +283,12 @@ jobs:
     # Linux runner — what the headless CI host uses. The artifact
     # is a `tauri build --debug` output so reviewers can smoke-test
     # the binary on a Linux VM without needing macOS hardware.
+    # PR mode only. The push-mode equivalent is `build-linux`
+    # below, which uses tauri-action to attach binaries to the
+    # draft release instead of uploading a PR artifact.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: pr-label-check
+
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -277,7 +311,6 @@ jobs:
       # code into a context where secrets are not exposed — skip them
       # so a fork PR does not consume runner minutes.
       - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
       # Tauri 2 Linux build prereqs. The collect crate is pure-Rust musl
       # with no system deps, but `pnpm tauri build` (the main app) pulls
@@ -381,9 +414,13 @@ jobs:
   # macOS draft build (unsigned .app + .dmg)
   # ===================================================================
   draft-macos:
-    # macos-14 is the Apple-silicon runner image — matches the
-    # release.yml's `targets: aarch64-apple-darwin`. Avoids the
-    # universal-binary build cost (~2x) for the draft.
+    # PR mode only. See draft-linux's comment for the dual-mode
+    # context. macos-14 is the Apple-silicon runner image —
+    # matches the release.yml's `targets: aarch64-apple-darwin`.
+    # Avoids the universal-binary build cost (~2x) for the draft.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: pr-label-check
+
     runs-on: macos-14
     timeout-minutes: 30
     env:
@@ -397,7 +434,6 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -465,10 +501,14 @@ jobs:
   # Windows draft build (unsigned .msi + .exe)
   # ===================================================================
   draft-windows:
-    # windows-latest matches release.yml's choice. As of 2026-08
-    # this is windows-2022; GitHub rolls the "latest" label
+    # PR mode only. See draft-linux's comment for the dual-mode
+    # context. windows-latest matches release.yml's choice. As of
+    # 2026-08 this is windows-2022; GitHub rolls the "latest" label
     # forward periodically but the toolchain (VS 2022, Rust msvc,
     # NSIS 3.x) is the same across recent images.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: pr-label-check
+
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -485,7 +525,6 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
       - name: Setup Rust toolchain (msvc)
         uses: dtolnay/rust-toolchain@stable
@@ -546,3 +585,377 @@ jobs:
             target/debug/bundle/**/*.msi
             target/debug/bundle/**/*.exe
           if-no-files-found: error
+
+  # ===================================================================
+  # Gate: validate the trigger, extract the version tag
+  # ===================================================================
+  # Push + dispatch mode only. Two paths converge here:
+  #   1. Push to main: read github.event.head_commit.message, regex
+  #      match against the version-bump commit message format.
+  #   2. Manual dispatch: caller passes `tag` (e.g. trail-v0.4.3)
+  #      directly via workflow_dispatch inputs.
+  #
+  # Output: `tag` (e.g. trail-v0.4.3) and `should_attach` (true/false).
+  # Build jobs are gated on `needs.gate.outputs.should_attach == 'true'`.
+  gate:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.extract.outputs.tag }}
+      should_attach: ${{ steps.extract.outputs.should_attach }}
+    steps:
+      # Checkout is required so `gh release view` has a git working
+      # directory on the runner — without a cwd-anchored git repo,
+      # `gh` aborts with `failed to run git: fatal: not a git
+      # repository` before even reaching the GitHub API. The
+      # `persist-credentials: false` setting keeps GITHUB_TOKEN out of
+      # the git config (so a malicious `gh api` call from a sub-
+      # step can't extract it via `git config --get`); we pass
+      # GITHUB_TOKEN explicitly via env in each step that needs it.
+      - name: Checkout (provides cwd + git context for `gh`)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Extract version tag from trigger
+        id: extract
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # ----- Path 1: manual dispatch -----
+          # If the caller passed `tag` via workflow_dispatch, use that
+          # directly. This handles the case where the gate missed on a
+          # previous push (e.g. before the regex fix) and we need to
+          # retroactively build+attach binaries to an existing draft.
+          if [ -n "$DISPATCH_TAG" ]; then
+            if [[ ! "$DISPATCH_TAG" =~ ^trail-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::Invalid tag '$DISPATCH_TAG' (expected trail-vX.Y.Z)"
+              exit 1
+            fi
+            TAG="$DISPATCH_TAG"
+            echo "Manual dispatch: tag=$TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "should_attach=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ----- Path 2: push to main -----
+          # GitHub merges PRs with a "merge commit" whose subject line
+          # is the PR title. For PR #186 (the version-bump PR) the
+          # subject is:
+          #   chore(draft-release): bump version to 0.4.3 (#186)
+          # Two differences from the version-bump workflow's literal
+          # commit message:
+          #   1. No `v` prefix on the version. open-draft-version-pr.yml
+          #      produces `chore(draft-release): bump version to 0.4.3`
+          #      (no `v`). The `v` prefix was a release-please
+          #      relic; we strip it if present and re-add it when
+          #      computing TAG.
+          #   2. Trailing `(#NNN)` suffix from GitHub's merge commit.
+          #      The regex allows ` *(#NNN)?$` so both the literal
+          #      version-bump commit (no suffix) and the merge commit
+          #      (with PR number suffix) match.
+          #
+          # Also handle the case where the head_commit.message is
+          # multi-line (PR body appended after a blank line). Use only
+          # the first line.
+          #
+          # Parens around `draft-release` MUST be escaped — bash's
+          # `[[ =~ ]]` treats unescaped parens as a capture group, so
+          # `^chore(draft-release):` would mean "match `chore` then
+          # capture `draft-release`", which fails because the next
+          # char in the commit message is `(` not `d`. The original
+          # debug-build.yml had this bug from PR #184 onwards; it was
+          # never caught because the workflow only ever saw non-
+          # version-bump commits until PR #186 (the 0.4.3 bump) was
+          # the first real match attempt. promote.yml's regex had it
+          # right (parens escaped).
+          COMMIT_MSG=$(printf '%s' "$COMMIT_MSG" | head -1)
+          if [[ "$COMMIT_MSG" =~ ^chore\(draft-release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]*(\(#[0-9]+\))?$ ]]; then
+            VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+            TAG="trail-v$VERSION"
+            echo "Matched version-bump commit: $COMMIT_MSG"
+            echo "Extracted version: $VERSION"
+            echo "Tag: $TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "should_attach=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Most-recent commit is not a version bump: $COMMIT_MSG"
+            echo "should_attach=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ----- Defense-in-depth: verify the draft exists and main's -----
+      # ----- version matches the tag. If either fails, abort.      -----
+      #
+      # Why both checks are HARD fails (vs the warning/error split
+      # we previously had):
+      #   - The draft should exist (release-drafter.yml creates it
+      #     on push to main, and the version-bump PR's merge commit
+      #     is itself a push to main, so release-drafter ran first
+      #     and updated the draft). If the draft isn't there now,
+      #     either release-drafter failed or someone deleted it
+      #     manually. Either way, something is wrong that the user
+      #     needs to know about — silently auto-creating the draft
+      #     via `releaseDraft: true` on the build jobs would mask
+      #     the real problem.
+      #   - The version check catches the bug that motivated this
+      #     whole rewrite: if main's tauri.conf.json still has the
+      #     OLD version (e.g. the version-bump PR was merged but the
+      #     config files weren't updated), we should NOT build
+      #     binaries that misname themselves. tauri-action reads
+      #     tauri.conf.json directly, so binary filenames come from
+      #     the source, not from the tag. Failing here surfaces the
+      #     problem clearly.
+      #
+      # The build jobs also explicitly set `releaseDraft: true`
+      # (matching the action's default — explicit for clarity) so
+      # that if the draft was deleted between the gate's check and
+      # the build's attach, the build re-creates the draft with
+      # the same tag and continues rather than failing. The gate
+      # is the real defense: it hard-fails if the draft doesn't
+      # exist or main's version doesn't match the tag.
+      - name: Verify draft exists and main version matches
+        if: steps.extract.outputs.should_attach == 'true'
+        env:
+          TAG: ${{ steps.extract.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Check 1: draft exists with this tag.
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo "MISSING")
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Draft release $TAG does not exist or is not a draft (got: $IS_DRAFT). release-drafter.yml should have created this draft on the most recent push to main. Aborting so misversioned binaries are not built."
+            echo "::error::If release-drafter.yml failed, see its run log for the root cause. To re-run this workflow after fixing the draft, dispatch draft-build.yml with the tag input."
+            exit 1
+          fi
+          echo "Verified draft release $TAG exists."
+
+          # Check 2: src-tauri/tauri.conf.json version matches the tag.
+          MAIN_VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          EXPECTED_VERSION="${TAG#trail-v}"
+          if [ "$MAIN_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Main version ($MAIN_VERSION) != tag version ($EXPECTED_VERSION). The version-bump PR probably didn't update all 4 files. Aborting to avoid attaching misversioned binaries."
+            exit 1
+          fi
+          echo "Verified src-tauri/tauri.conf.json version ($MAIN_VERSION) matches tag."
+
+  # ===================================================================
+  # Post-merge Linux debug build (attached to draft release)
+  # ===================================================================
+  # Push + dispatch mode only. Mirror of the original debug-build.yml's
+  # `build-linux` job. Slim bundle set (1 artifact per OS) to keep CI
+  # minutes low — reviewers who want full bundles can run the
+  # release path. Uses `tauri-apps/tauri-action@v0` with
+  # `includeDebug: true` + `args: --bundles appimage` to produce and
+  # attach the .AppImage directly to the existing draft release.
+  build-linux:
+    needs: gate
+    if: github.event_name != 'pull_request' && needs.gate.outputs.should_attach == 'true'
+    name: Build (Linux, debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. Parallel of ci.yml's `clippy -D warnings` gate
+    # (which runs only on Linux) and the draft-linux job's
+    # `RUSTFLAGS=-D warnings` env. Closes the platform-asymmetry gap:
+    # a warning on the macOS or Windows build path here would also
+    # fail the post-merge attach to the draft release. The flag is
+    # set at job env so the build step inside tauri-action inherits
+    # it through every cargo subprocess it spawns. See PR #182 for
+    # the full rationale.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps (Tauri 2 prereqs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same cache bucket as draft-linux's `trail-draft-linux`
+          # so a PR's draft build and the post-merge attach reuse
+          # the same target/ cache. The PR-mode run warms it; the
+          # post-merge attach is incremental on top.
+          shared-key: trail-draft-linux
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Linux, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Use the gate's tag so tauri-action attaches to the
+          # existing draft release (the one release-drafter.yml
+          # created). The tag comes from the version-bump commit,
+          # which matches the version in src-tauri/tauri.conf.json
+          # (verified by the gate's Check 2).
+          tagName: ${{ needs.gate.outputs.tag }}
+          # INTENTIONALLY no `releaseName` or `releaseBody` here.
+          # tauri-action treats both as OVERRIDES of the existing
+          # release's name and body, not as appends. Passing them
+          # would clobber release-drafter's curated changelog body
+          # (the Keep a Changelog section it built from the merged
+          # PRs) with the debug boilerplate below. tauri-action
+          # falls back to the existing release's name when these
+          # are omitted, which is what we want.
+          # `releaseDraft: true` = create draft if not exists, attach
+          # to existing draft if it does. The gate's Check 1 verifies
+          # the draft already exists; this is just a safety net for
+          # the case where release-drafter.yml failed to create it.
+          releaseDraft: true
+          prerelease: false
+          # Slim bundle set: 1 per OS (3 total per build). Linux gets
+          # appimage (single-file portable, runs on most distros
+          # without install). The same filename pattern
+          # (Trail_X.Y.Z_amd64.AppImage) lets tauri-action's
+          # upload-by-name replace the existing assets on each
+          # checkpoint PR merge.
+          # NB: do NOT add `--debug` here — tauri-action's
+          # `includeDebug: true` below already injects it. Passing
+          # both produces a duplicated `--debug` flag that clap
+          # rejects with "the argument '--debug' cannot be used
+          # multiple times."
+          args: --bundles appimage
+          # tauri-action defaults `includeRelease: true, includeDebug:
+          # false`, so without these overrides it scans `release/`
+          # for artifacts and finds nothing (the `--debug` build
+          # produced binaries in `debug/`). Flip to debug-only.
+          includeRelease: false
+          includeDebug: true
+
+  # ===================================================================
+  # Post-merge macOS debug build (attached to draft release)
+  # ===================================================================
+  build-macos:
+    needs: gate
+    if: github.event_name != 'pull_request' && needs.gate.outputs.should_attach == 'true'
+    name: Build (macOS, debug)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. See build-linux's `RUSTFLAGS` comment for the
+    # full rationale; this is the macOS half of the same
+    # defense-in-depth pattern.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same cache bucket as draft-macos's `trail-draft-mac` so
+          # a PR's draft-macos run and the post-merge macos attach
+          # share target/.
+          shared-key: trail-draft-mac
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (macOS, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.gate.outputs.tag }}
+          # INTENTIONALLY no `releaseName` or `releaseBody` — see
+          # the build-linux job above for the rationale.
+          releaseDraft: true
+          prerelease: false
+          # macOS: slim to .app only (the .app bundle can be tar.gz'd
+          # for sharing). The `--bundles app` flag tells Tauri 2 to
+          # produce the .app, and tauri-action uploads it to the
+          # draft release.
+          # NB: do NOT add `--debug` — handled by includeDebug below.
+          args: --bundles app
+          includeRelease: false
+          includeDebug: true
+
+  # ===================================================================
+  # Post-merge Windows debug build (attached to draft release)
+  # ===================================================================
+  build-windows:
+    needs: gate
+    if: github.event_name != 'pull_request' && needs.gate.outputs.should_attach == 'true'
+    name: Build (Windows, debug)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. See build-linux's `RUSTFLAGS` comment for the
+    # full rationale; this is specifically the Windows half — the
+    # platform that triggered the original `unused_imports` warning
+    # on transport.rs:13 (`use zeroize::Zeroizing` was
+    # unconditional even though its only caller
+    # `load_private_key_pem` is `#[cfg(unix)]`). The cfg(unix) fix
+    # on the import is the surgical half; this flag is the
+    # defense-in-depth half.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same cache bucket as draft-windows's `trail-draft-windows`
+          # so a PR's draft-windows run and the post-merge windows
+          # attach share target/.
+          shared-key: trail-draft-windows
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps + build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri bundle (Windows, debug)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.gate.outputs.tag }}
+          # INTENTIONALLY no `releaseName` or `releaseBody` — see
+          # the build-linux job above for the rationale.
+          releaseDraft: true
+          prerelease: false
+          # Windows: slim to .exe (NSIS installer) only.
+          args: --bundles nsis
+          includeRelease: false
+          includeDebug: true
