@@ -33,6 +33,68 @@ pub async fn health_check_transport(config_path: String) -> Result<String, Strin
     Ok(t.name().to_string())
 }
 
+/// Tauri command: probe a not-yet-persisted SSH connection from the
+/// wizard's "Test connection" button. Builds an [`SshTransport`]
+/// in-memory from the supplied (host, port, user) — publickey auth
+/// against whatever key is currently in the OS keychain — runs
+/// [`SshTransport::health_check`], and returns `Ok(())` on success
+/// or a flattened error string on failure.
+///
+/// Distinct from [`health_check_transport`] in two ways:
+///   1. No config file is read from disk (the wizard hasn't written
+///      one yet at this point).
+///   2. The connection details are passed in as arguments rather
+///      than loaded from the on-disk [`crate::config::Config`].
+///
+/// The keychain lookup matches the v1 design: [`crate::keyring`]
+/// stores the private key on first-run, and every subsequent
+/// onboarding reuses the same key. If no key is in the keychain
+/// (fresh install + user clicked "Test connection" before
+/// "Generate SSH key"), the underlying `load_private_key_pem`
+/// returns `SSH key not generated yet — run onboarding first`
+/// and we surface that string to the UI so the error is
+/// actionable.
+#[tauri::command]
+pub async fn test_ssh_connection(
+    host: String,
+    port: u16,
+    user: String,
+) -> Result<(), String> {
+    use crate::config::SshAuth;
+    use crate::transport::SshTransport;
+
+    let host = host.trim().to_string();
+    let user = user.trim().to_string();
+    if host.is_empty() {
+        return Err("host is required".into());
+    }
+    if user.is_empty() {
+        return Err("user is required".into());
+    }
+    if port == 0 {
+        return Err("port must be between 1 and 65535".into());
+    }
+
+    // The on-disk `path` in `SshAuth::PublicKey` is required by
+    // the config schema but the v1 transport loads the private
+    // key from the keychain via `userauth_pubkey_memory`, so the
+    // path is unused at runtime. `remote_path` is likewise unused
+    // by `health_check` (it only opens a TCP connection + does
+    // pubkey auth). Both fields are populated with benign defaults
+    // so the SshTransport constructor is satisfied.
+    let t = SshTransport::new(
+        host,
+        port,
+        user,
+        SshAuth::PublicKey {
+            path: PathBuf::from("~/.ssh/trail_ed25519"),
+        },
+        PathBuf::from("/tmp/"),
+    );
+    t.health_check().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Tauri command: push a serialized day summary to the VPS via the
 /// configured transport. `payload` is the raw bytes (JSON in
 /// practice); `remote_name` is the filename the VPS side will see
@@ -356,5 +418,43 @@ mod tests {
         // The error string is non-empty and comes from serde's unknown-variant message.
         let err = result.unwrap_err();
         assert!(!err.is_empty(), "error string must not be empty");
+    }
+
+    /// `test_ssh_connection` is the wizard's "Test connection"
+    /// button. It validates host / user / port BEFORE opening
+    /// any TCP socket, so the validation arm is testable
+    /// without a real SSH server. The success arm requires a
+    /// real server (and a key in the keychain) and is left to
+    /// the integration tests.
+    #[tokio::test]
+    async fn empty_host_returns_required_error() {
+        let r = test_ssh_connection("".into(), 22, "pedro".into()).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("host is required"));
+    }
+
+    #[tokio::test]
+    async fn whitespace_host_returns_required_error() {
+        // Trim should make whitespace-only an empty string and
+        // then fail the required check.
+        let r = test_ssh_connection("   ".into(), 22, "pedro".into()).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("host is required"));
+    }
+
+    #[tokio::test]
+    async fn empty_user_returns_required_error() {
+        let r = test_ssh_connection("vps.example.com".into(), 22, "".into()).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("user is required"));
+    }
+
+    #[tokio::test]
+    async fn port_zero_returns_range_error() {
+        // u16 is the parameter type so the smallest legal value
+        // is 0; we explicitly reject that and require 1+.
+        let r = test_ssh_connection("vps.example.com".into(), 0, "pedro".into()).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("port"));
     }
 }

@@ -202,6 +202,56 @@ export interface OnboardingEnvelope {
 export type InstallOption = "auto" | "show_script" | "skip";
 
 // ---------------------------------------------------------------------------
+// Hoisted per-step state (PR #193)
+//
+// The wizard root (`Onboarding.svelte`) keeps these in `$state` and
+// passes them down to the step components. Each step mutates the
+// object directly; the parent's reactive graph stays live. This
+// is what survives a Back navigation — without hoisting, every
+// `$state` declared inside the step component is destroyed when
+// Svelte's `{#if}` block unmounts the step.
+// ---------------------------------------------------------------------------
+
+/** Step 2 (Ask) state. LLM-fetched `answers` is NOT included —
+ *  re-fetching on remount is fast and idempotent. */
+export interface StepAskState {
+  /** Whether the user is in "Edit" mode (textareas visible). */
+  editing: boolean;
+  /** Local edit buffer for the claude_sessions paths row. */
+  edit_claude_paths: string;
+  /** Local edit buffer for the github repos row. */
+  edit_github_repos: string;
+  /** Local review time, "HH:MM" 24h. Translated to UTC hour on
+   *  Next (the Rust scheduler parses UTC). */
+  review_hhmm_local: string;
+}
+
+/** Step 3 (Transport) state. All fields are user-visible
+ *  (typed in the form) or transient (test-connection
+ *  in-flight flag). */
+export interface StepTransportState {
+  host: string;
+  user: string;
+  port: number;
+  /** Public key in OpenSSH single-line form. Populated by
+   *  `generate_ssh_key` (which is idempotent — re-running it
+   *  returns the existing public key) or by the "Use existing
+   *  key" path. `null` until one of those has resolved. */
+  ssh_key_path: string | null;
+  /** How the key was attached. Drives the right-hand
+   *  affordance on remount. */
+  ssh_key_source: "generated" | "existing" | null;
+  /** True while `generate_ssh_key` is in flight. */
+  generating: boolean;
+  /** Error from the most recent keygen or "Use existing"
+   *  attempt. Cleared on the next attempt. */
+  key_error: string | null;
+  /** "Test connection" button state. */
+  test_state: "idle" | "testing" | "ok" | "error";
+  test_error: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Shared test fixtures — imported by *.test.ts so the wizard steps and
 // the parent Onboarding.svelte exercise the same shapes the Rust
 // commands return. Keep these in sync with the test mocks in

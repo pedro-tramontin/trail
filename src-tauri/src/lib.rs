@@ -702,6 +702,11 @@ pub fn run() {
             demo_status,
             commands::health_check_transport,
             commands::push_to_vps,
+            // Wizard "Test connection" button — probes a
+            // not-yet-persisted SSH connection (no config on disk
+            // yet). Distinct from `health_check_transport` which
+            // reads the on-disk config.
+            commands::test_ssh_connection,
             commands::validate_day_summary,
             commands::summarize_day,
             commands::record_review_diff,
