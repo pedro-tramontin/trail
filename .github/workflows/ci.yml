@@ -12,8 +12,11 @@
 #     every merge and overlaps with the signed release.yml build
 #     (which fires on the `trail-X.Y.Z` tag after release-please).
 #   - The actual regression-detection surface that matters on main
-#     is: lint, type-check, vitest, and `cargo check --workspace`
-#     (no link). All four run on ubuntu-latest in ~2-3 min.
+#     is: lint, type-check, vitest, and `cargo clippy --workspace
+#     --all-targets -- -D warnings` (no link, every default-warn
+#     clippy lint demoted to deny — see the `rust-clippy` job below
+#     and clippy.toml at the repo root). All four run on
+#     ubuntu-latest in ~2-3 min.
 #
 # Triggers:
 #   - `push: branches: [main]`           — keeps the README badge green
@@ -34,10 +37,10 @@
 #
 # Why a single ubuntu runner, not 3-platform matrix:
 #   - The lint + test jobs are platform-independent. The Rust
-#     `cargo check` job uses `target/*-unknown-linux-gnu` which
+#     `cargo clippy` job uses `target/*-unknown-linux-gnu` which
 #     matches the Tauri macOS-only audio code path's `cfg` gates
 #     correctly (cpal / objc2 / block2 are gated to macOS in
-#     src-tauri/Cargo.toml, so a Linux `cargo check` exercises the
+#     src-tauri/Cargo.toml, so a Linux `cargo clippy` exercises the
 #     Linux build path: the gating compiles out, the non-gated code
 #     gets checked). The macOS-specific audio capture path is still
 #     covered by draft-build's `draft-macos` job on every PR.
@@ -155,19 +158,27 @@ jobs:
       - run: pnpm test
 
   # ===================================================================
-  # Rust workspace check (no link, no test run)
+  # Rust workspace clippy (no link, no test run)
   # ===================================================================
-  # `cargo check --workspace --all-targets` exercises every example,
-  # test, and bench target's compilation. Faster than `cargo test`
-  # (no link) and catches the most common post-merge breakage:
+  # `cargo clippy --workspace --all-targets -- -D warnings` exercises
+  # every example, test, and bench target's compilation under clippy
+  # with every default-warn lint demoted to deny. Catches the most
+  # common post-merge breakage:
   #   - new rust code that doesn't compile under the stable toolchain
   #   - feature-flag / cfg-gate misconfigurations
   #   - workspace dependency version drift
+  #   - `unused_imports` / `dead_code` / `unused_variables` and the
+  #     rest of the default clippy `warn` set, demoted to errors
+  #     via `-D warnings` (see clippy.toml for MSRV + behavior knobs).
+  # Faster than `cargo test` (no link) and stricter than `cargo check`
+  # (no separate `cargo check` job is needed — clippy compiles a
+  # superset of what `cargo check` would and the Swatinem cache is
+  # shared).
   # The actual `cargo test --workspace` run is exercised on PRs by
   # draft-build's per-platform jobs (which run the full test suite
   # on Linux as a side effect of `cargo test`).
-  rust-check:
-    name: rust-check
+  rust-clippy:
+    name: rust-clippy
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -175,9 +186,9 @@ jobs:
 
       # Tauri 2 on Linux transitively depends on the GTK/glib stack
       # (glib-sys / gobject-sys / gio-sys build scripts link against
-      # system libs). Without these apt packages, `cargo check` fails
-      # with "failed to run custom build command for glib-sys".
-      # The package list mirrors Tauri's official prerequisites:
+      # system libs). Without these apt packages, clippy fails with
+      # "failed to run custom build command for glib-sys". The
+      # package list mirrors Tauri's official prerequisites:
       # https://v2.tauri.app/start/prerequisites/
       - name: Install Linux system deps (Tauri 2)
         run: |
@@ -200,8 +211,14 @@ jobs:
       # from rust-toolchain.toml at the repo root (stable-1.81.x).
       # The toolchain file is the source of truth for MSRV — if a
       # PR bumps it, this step uses the new toolchain, so CI will
-      # exercise whatever the user committed.
+      # exercise whatever the user committed. `components: clippy`
+      # ensures the clippy component is installed; rust-toolchain.toml
+      # already declares `components = ["clippy", "rustfmt"]` so this
+      # is belt-and-braces for the case where a contributor edits
+      # that file and forgets clippy.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       # Separate cache key from `trail-draft-*` (PR review artifacts)
       # and `trail-release-*` (prod builds) so ci runs don't evict
@@ -210,4 +227,11 @@ jobs:
         with:
           shared-key: trail-ci
 
-      - run: cargo check --workspace --all-targets --locked
+      # `--locked` so a stale Cargo.lock on the PR still fails with
+      # a clear "needs cargo update" message rather than silently
+      # being rewritten (the v0.4.2 regression that PR #170's
+      # `--locked` flag was added to catch). `-D warnings` demotes
+      # every default-warn clippy lint to deny; see clippy.toml for
+      # the MSRV pin that prevents clippy from suggesting idioms
+      # stable on 1.97 but not 1.81.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings

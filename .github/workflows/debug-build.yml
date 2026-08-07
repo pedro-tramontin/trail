@@ -244,6 +244,17 @@ jobs:
     name: Build (Linux, debug)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. Parallel of ci.yml's `clippy -D warnings` gate
+    # (which runs only on Linux) and draft-build.yml's per-platform
+    # `RUSTFLAGS=-D warnings` env on its 3 jobs. Closes the
+    # platform-asymmetry gap: a warning on the macOS or Windows
+    # build path here would also fail the post-merge attach to the
+    # draft release. The flag is set at job env so the build step
+    # inside tauri-action inherits it through every cargo
+    # subprocess it spawns. See PR #182 for the full rationale.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
 
@@ -325,6 +336,12 @@ jobs:
     name: Build (macOS, debug)
     runs-on: macos-latest
     timeout-minutes: 25
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. See build-linux's `RUSTFLAGS` comment for the
+    # full rationale; this is the macOS half of the same
+    # defense-in-depth pattern.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
 
@@ -369,6 +386,17 @@ jobs:
     name: Build (Windows, debug)
     runs-on: windows-latest
     timeout-minutes: 25
+    # Promote every rustc warning to a build error on the actual
+    # Tauri build. See build-linux's `RUSTFLAGS` comment for the
+    # full rationale; this is specifically the Windows half — the
+    # platform that triggered the original `unused_imports` warning
+    # on transport.rs:13 (`use zeroize::Zeroizing` was
+    # unconditional even though its only caller
+    # `load_private_key_pem` is `#[cfg(unix)]`). The cfg(unix) fix
+    # on the import is the surgical half; this flag is the
+    # defense-in-depth half.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
 
