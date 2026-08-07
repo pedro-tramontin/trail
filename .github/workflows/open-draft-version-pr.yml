@@ -55,6 +55,29 @@
 #   - contents: write    — to push the version-bump branch
 #   - pull-requests: write — to open PRs and close superseded ones
 #
+# NOTE: the `permissions:` block below is the documented intent, but
+# workflow_run triggers inherit the upstream workflow's permissions
+# and CANNOT escalate them. In practice, the inherited GITHUB_TOKEN
+# from release-drafter.yml has `contents: write, pull-requests: read`
+# (release-drafter doesn't need PR-write). The `gh pr create` and
+# `gh pr close` calls fail with
+#   "GitHub Actions is not permitted to create or approve pull requests"
+# because the API rejects PR-write operations from GITHUB_TOKEN when
+# the workflow_run scope is read-only.
+# To bypass this, the write steps (`Close superseded version-bump
+# PRs` and `Open version-bump PR`) bind `GH_TOKEN` to the PAT
+# stored in `secrets.CI_TRAIL` instead of the default GITHUB_TOKEN.
+# The PAT is created with `repo:write` scope (classic) or
+# `Contents: write + Pull requests: write` (fine-grained) and is
+# therefore accepted by the API regardless of the workflow_run
+# scope. Read-only steps (`Find open draft release`,
+# `Pre-populate CHANGELOGs`) keep GITHUB_TOKEN since the inherited
+# `contents: write` is sufficient for `gh release list` /
+# `gh pr list`.
+# Observed live: run 31177562328 (2026-08-07) failed at
+# `gh pr create` with the workflow_run read-only rejection even
+# though the `permissions:` block above declared write.
+#
 # Replacement for: version-bump.yml (which used `push: branches: [main]`
 # as its trigger and was the source of the original line-316 typo
 # bug fixed in PR #176). The new trigger is what the user wants
@@ -212,18 +235,27 @@ jobs:
         if: steps.trigger.outputs.should_open == 'true'
         env:
           VERSION: ${{ steps.draft.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_TOKEN is bound to the PAT (CI_TRAIL), not the
+          # default GITHUB_TOKEN, because this step does write
+          # operations (`gh pr close`, `git push origin --delete`)
+          # that the workflow_run-inherited GITHUB_TOKEN does not
+          # have permission for. The PAT has `repo:write` scope
+          # and bypasses the workflow_run read-only restriction.
+          GH_TOKEN: ${{ secrets.CI_TRAIL }}
         run: |
           set -euo pipefail
-          # Re-inject the GITHUB_TOKEN into git config so the
-          # `git push origin --delete` below can authenticate. The
-          # Checkout step uses `persist-credentials: false` (see
-          # comment there), which strips the extraheader that
-          # actions/checkout would normally set. Without the
-          # extraheader, `git push` fails with "could not read
-          # Username for 'https://github.com'". The `trap` removes
-          # the extraheader on exit so it doesn't leak into
-          # subsequent steps.
+          # Re-inject the auth token (PAT, see `env:` above) into
+          # git config so `git push origin --delete` below can
+          # authenticate. The Checkout step uses
+          # `persist-credentials: false` (see comment there), which
+          # strips the extraheader that actions/checkout would
+          # normally set. Without the extraheader, `git push` fails
+          # with "could not read Username for 'https://github.com'".
+          # The `trap` removes the extraheader on exit so it doesn't
+          # leak into subsequent steps.
+          # Same mechanism works for both GITHUB_TOKEN and PATs
+          # (both are bearer tokens accepted by GitHub via the same
+          # `x-access-token:$TOKEN` basic-auth format).
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git config --local http.https://github.com/.extraheader "$AUTH_HEADER"
           trap 'git config --local --unset-all http.https://github.com/.extraheader' EXIT
@@ -543,18 +575,28 @@ jobs:
         env:
           VERSION: ${{ steps.draft.outputs.version }}
           TAG: ${{ steps.draft.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_TOKEN is bound to the PAT (CI_TRAIL), not the
+          # default GITHUB_TOKEN, because this step does write
+          # operations (`git push --force-with-lease`,
+          # `gh pr create`) that the workflow_run-inherited
+          # GITHUB_TOKEN does not have permission for. The PAT
+          # has `repo:write` scope and bypasses the workflow_run
+          # read-only restriction.
+          GH_TOKEN: ${{ secrets.CI_TRAIL }}
         run: |
           set -euo pipefail
-          # Re-inject the GITHUB_TOKEN into git config so the
-          # `git push --force-with-lease` below can authenticate. The
-          # Checkout step uses `persist-credentials: false` (see
-          # comment there), which strips the extraheader that
-          # actions/checkout would normally set. Without the
-          # extraheader, `git push` fails with "could not read
-          # Username for 'https://github.com'". The `trap` removes
-          # the extraheader on exit so it doesn't leak into
-          # subsequent steps.
+          # Re-inject the auth token (PAT, see `env:` above) into
+          # git config so `git push --force-with-lease` below can
+          # authenticate. The Checkout step uses
+          # `persist-credentials: false` (see comment there), which
+          # strips the extraheader that actions/checkout would
+          # normally set. Without the extraheader, `git push` fails
+          # with "could not read Username for 'https://github.com'".
+          # The `trap` removes the extraheader on exit so it doesn't
+          # leak into subsequent steps.
+          # Same mechanism works for both GITHUB_TOKEN and PATs
+          # (both are bearer tokens accepted by GitHub via the same
+          # `x-access-token:$TOKEN` basic-auth format).
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git config --local http.https://github.com/.extraheader "$AUTH_HEADER"
           trap 'git config --local --unset-all http.https://github.com/.extraheader' EXIT
