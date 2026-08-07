@@ -259,6 +259,19 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_BACKTRACE: "1"
+      # Promote every rustc warning to a build error on the actual
+      # Tauri build, mirroring the `clippy -D warnings` gate in
+      # ci.yml but on the platform-build side. The clippy gate runs
+      # only on Linux, so a platform-asymmetric warning (e.g. the
+      # `cfg(unix)`-gated `use zeroize::Zeroizing` in transport.rs
+      # — dead on Windows, live on Linux/macOS) would silently
+      # emit on Windows/macOS and pass the build. With this flag,
+      # `cargo build` (which tauri-action drives internally) fails
+      # on every warning, on every platform. Layered with the
+      # Linux-only clippy gate, this catches windows-only/macos-only
+      # warnings the clippy job structurally can't see. See PR #182
+      # for the rationale.
+      RUSTFLAGS: "-D warnings"
     steps:
       # Per-step fork guard: forks checking out untrusted SHA pulls
       # code into a context where secrets are not exposed — skip them
@@ -375,6 +388,13 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_BACKTRACE: "1"
+      # Promote every rustc warning to a build error on the actual
+      # Tauri build. See the draft-linux job's RUSTFLAGS comment for
+      # the rationale: this is the platform-build-side parallel of
+      # ci.yml's Linux-only `clippy -D warnings` gate, closing the
+      # platform-asymmetry gap where the Linux clippy job can't see
+      # macOS-only or Windows-only warnings.
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -453,6 +473,16 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_BACKTRACE: "1"
+      # Promote every rustc warning to a build error on the actual
+      # Tauri build. See the draft-linux job's RUSTFLAGS comment for
+      # the rationale: this flag is what would have caught the
+      # `unused_imports` warning on `use zeroize::Zeroizing` in
+      # transport.rs (dead on Windows because `load_private_key_pem`
+      # is `#[cfg(unix)]`, but the import was unconditional). The
+      # `cfg(unix)` fix on the import is the surgical half; this
+      # flag is the defense-in-depth half so future Windows-only
+      # warnings fail the build too.
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

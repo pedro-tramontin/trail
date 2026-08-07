@@ -10,6 +10,13 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 use thiserror::Error;
+// `Zeroizing` is only referenced by `load_private_key_pem`, which is
+// gated `#[cfg(unix)]` (see its doc comment). On Windows the gate
+// excludes the function, so the import would otherwise trigger an
+// `unused_imports` warning under the clippy `-D warnings` gate and
+// an `unused_imports` warning under `RUSTFLAGS=-D warnings` on the
+// draft-build Windows job. Gate the import to match.
+#[cfg(unix)]
 use zeroize::Zeroizing;
 
 use crate::config::{SshAuth, TransportConfig};
