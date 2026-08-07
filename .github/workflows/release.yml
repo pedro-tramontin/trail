@@ -125,7 +125,7 @@ jobs:
       - name: Build Tauri bundle (Linux)
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.CI_TRAIL }}
         with:
           tagName: ${{ env.TAG }}
           releaseName: "Trail ${{ env.TAG }}"
@@ -184,7 +184,7 @@ jobs:
       - name: Build Tauri bundle (macOS aarch64)
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.CI_TRAIL }}
         with:
           tagName: ${{ env.TAG }}
           releaseName: "Trail ${{ env.TAG }}"
@@ -282,7 +282,7 @@ jobs:
       - name: Build Tauri bundle (Windows)
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.CI_TRAIL }}
         with:
           tagName: ${{ env.TAG }}
           releaseName: "Trail ${{ env.TAG }}"
@@ -322,7 +322,7 @@ jobs:
       - name: Determine release type from tag
         id: classify
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TRAIL }}
           TAG: ${{ env.TAG }}
         run: |
           # Tag format: trail-X.Y.Z[-suffix]
@@ -347,7 +347,7 @@ jobs:
 
       - name: Publish the draft release
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TRAIL }}
           TAG: ${{ env.TAG }}
           IS_PRERELEASE: ${{ steps.classify.outputs.is_prerelease }}
           RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
@@ -380,7 +380,7 @@ jobs:
       - name: Summary
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TRAIL }}
           TAG: ${{ env.TAG }}
           RELEASE_TYPE: ${{ steps.classify.outputs.release_type }}
         run: |
