@@ -132,11 +132,21 @@ describe("StepAsk.svelte", () => {
     expect(why_calendar).toBeTruthy();
     expect(why_voice).toBeTruthy();
     // Tooltip text comes from question_log — verify both have
-    // a non-empty title that includes a "?" / reasoning.
-    expect(why_calendar.getAttribute("title")).toBeTruthy();
-    expect(why_calendar.getAttribute("title")?.length).toBeGreaterThan(0);
-    expect(why_voice.getAttribute("title")).toBeTruthy();
-    expect(why_voice.getAttribute("title")?.length).toBeGreaterThan(0);
+    // the LLM's reasoning, NOT the generic fallback. The
+    // fallback substring signals the bug where the question_log
+    // entry's evidence_refs didn't include the field_id, so
+    // the UI couldn't find a matching entry.
+    const calendar_title = why_calendar.getAttribute("title") ?? "";
+    const voice_title = why_voice.getAttribute("title") ?? "";
+    expect(calendar_title.length).toBeGreaterThan(0);
+    expect(voice_title.length).toBeGreaterThan(0);
+    expect(calendar_title).not.toMatch(/didn't log a reason/i);
+    expect(voice_title).not.toMatch(/didn't log a reason/i);
+    // Sanity: the LLM's reasoning must surface in the tooltip
+    // — otherwise the test would pass against the fallback
+    // message which has nothing to do with the actual answer.
+    expect(calendar_title.toLowerCase()).toContain("calendar");
+    expect(voice_title.toLowerCase()).toContain("voice");
     expect(screen.queryByTestId("why-github")).toBeNull();
     expect(screen.queryByTestId("why-claude_sessions")).toBeNull();
   });

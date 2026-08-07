@@ -162,8 +162,13 @@ pub fn build_prompt(scan: &ScanReport) -> String {
         "\nFor every answer include:\n\
          - `selected`: true or false (or the enum value the field requires)\n\
          - `notes`: a short reasoning string\n\
-         - `evidence_refs`: the list of `collector_id` strings from the scan that informed your answer\n\
-         - `question_log`: an array of `{question, reasoning, evidence_refs}` (one per question)\n\n\
+         - `evidence_refs`: the list of `collector_id` strings from the scan whose data informed this answer. \
+         Include the relevant `collector_id` even when the answer is \"not enabled\" — the scan's \
+         absence-of-evidence still informed the decision, and the UI uses `evidence_refs` to look up \
+         the reasoning behind disabled fields.\n\
+         - `question_log`: an array of `{question, reasoning, evidence_refs}` (one per question). \
+         Each entry's `evidence_refs` lists the collector_ids whose scan data informed that question, \
+         including when the answer was \"no, not available\".\n\n\
          Reply with a single JSON object only. No markdown fences, no commentary.",
     );
     out

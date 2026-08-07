@@ -268,5 +268,19 @@ export const MOCK_ANSWERS: OnboardingAnswers = {
       reasoning: "gh CLI is authenticated; safe to enable by default.",
       evidence_refs: ["github"],
     },
+    // The mock has calendar_ics = null and voice = null; entries
+    // exist for both so the Svelte tooltip can surface the
+    // LLM's reasoning for the disabled fields. The evidence_refs
+    // must contain the field_id so `find_reason` can locate them.
+    {
+      question: "Enable the calendar collector?",
+      reasoning: "no .ics files or Calendar.app bundle were found on this machine.",
+      evidence_refs: ["calendar"],
+    },
+    {
+      question: "Enable voice capture?",
+      reasoning: "voice is GPU-bound; defaulting to disabled until the user opts in via Settings.",
+      evidence_refs: ["voice"],
+    },
   ],
 };

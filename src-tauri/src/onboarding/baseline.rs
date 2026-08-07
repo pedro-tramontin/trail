@@ -62,7 +62,16 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
     };
 
     // Question log: one entry per question, with the evidence_refs
-    // set to the relevant collector_id when present.
+    // set to the relevant collector_id whenever the question is
+    // about that collector — regardless of whether the answer
+    // ended up enabled or disabled. The Svelte tooltip looks up
+    // entries by `evidence_refs.includes(field_id)`, so an entry
+    // for a disabled field must still claim its collector_id
+    // (otherwise the user sees a generic "LLM didn't log a reason"
+    // message exactly when they want to know "why is this
+    // disabled?"). Voice / review-time / transport questions
+    // aren't tied to a single collector, so they keep an empty
+    // evidence_refs list.
     let question_log = vec![
         q(
             "Which claude_sessions paths should the collector monitor?",
@@ -71,7 +80,7 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
             } else {
                 "scan reported a single ~/.claude/projects/ directory; using that as the only monitored path"
             },
-            if claude_sessions_enabled { vec!["claude_sessions".to_string()] } else { vec![] },
+            vec!["claude_sessions".to_string()],
         ),
         q(
             "Enable the github collector?",
@@ -80,7 +89,7 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
             } else {
                 "scan found no GitHub CLI artifacts; defaulting to disabled"
             },
-            if github_enabled { vec!["github".to_string()] } else { vec![] },
+            vec!["github".to_string()],
         ),
         q(
             "Enable the calendar collector?",
@@ -89,7 +98,7 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
             } else {
                 "scan found no calendar artifacts; defaulting to disabled"
             },
-            if calendar_enabled { vec!["calendar".to_string()] } else { vec![] },
+            vec!["calendar".to_string()],
         ),
         q(
             "Enable voice capture?",
@@ -261,6 +270,41 @@ mod tests {
         for entry in &ans.question_log {
             assert!(!entry.question.is_empty());
             assert!(!entry.reasoning.is_empty());
+        }
+    }
+
+    /// Regression: the Svelte `disabled_reason` tooltip looks up
+    /// entries by `evidence_refs.includes(field_id)`. If the
+    /// baseline sets `evidence_refs = []` for a disabled field, the
+    /// tooltip falls through to a generic "LLM didn't log a
+    /// reason" message exactly when the user is asking "why is
+    /// this disabled?". Each per-collector question must keep its
+    /// collector_id in `evidence_refs` regardless of whether the
+    /// answer was enabled or disabled.
+    #[test]
+    fn disabled_collector_questions_keep_their_evidence_refs() {
+        let scan = scan_with(&[]);
+        let ans = baseline_answers(&scan);
+        // All three collectors are disabled in this empty-scan
+        // case; the question_log must still tag each entry with
+        // its collector_id so the UI can find it.
+        for (id, expected) in [
+            ("claude_sessions", "claude_sessions"),
+            ("github", "github"),
+            ("calendar", "calendar"),
+        ] {
+            let entry = ans
+                .question_log
+                .iter()
+                .find(|e| e.evidence_refs.iter().any(|r| r == expected))
+                .unwrap_or_else(|| panic!("no question_log entry claims evidence_refs for {id}"));
+            // And the question text must be about the collector
+            // (otherwise we tagged the wrong entry).
+            assert!(
+                entry.question.to_lowercase().contains(id),
+                "entry tagged with {expected} doesn't mention it: {:?}",
+                entry.question
+            );
         }
     }
 }
