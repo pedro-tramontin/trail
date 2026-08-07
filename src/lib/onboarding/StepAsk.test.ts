@@ -1,8 +1,9 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import StepAsk from "./StepAsk.svelte";
+import { writable, type Writable } from "svelte/store";
 import { MOCK_SCAN_REPORT, MOCK_ANSWERS } from "./types";
-import type { OnboardingAnswers } from "./types";
+import type { OnboardingAnswers, StepAskState } from "./types";
 
 const { invoke_mock } = vi.hoisted(() => {
   return { invoke_mock: vi.fn() };
@@ -23,18 +24,29 @@ beforeEach(() => {
   });
 });
 
+/** Build a fresh, default-valued StepAskState store for the
+ *  test cases. Mirrors the wizard root's initial state shape. */
+function fresh_state(): Writable<StepAskState> {
+  return writable({
+    editing: false,
+    edit_claude_paths: "",
+    edit_github_repos: "",
+    review_hhmm_local: "18:00",
+  });
+}
+
 describe("StepAsk.svelte", () => {
   it("(a) shows loading state before ask_onboarding_cmd resolves", () => {
     mockInvoke.mockImplementation(() => new Promise(() => {}));
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     expect(screen.getByTestId("ask-loading")).toBeTruthy();
   });
 
   it("(b) renders the LLM's answers as a flat list", async () => {
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     expect(await screen.findByTestId("ask-answers")).toBeTruthy();
     expect(screen.getByText(/enabled/)).toBeTruthy();
@@ -48,7 +60,7 @@ describe("StepAsk.svelte", () => {
 
     const on_next = vi.fn();
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
     });
     const next = await screen.findByTestId("ask-next");
     expect((next as HTMLButtonElement).disabled).toBe(false);
@@ -65,7 +77,7 @@ describe("StepAsk.svelte", () => {
 
   it("(c2) renders '18:00 your time (<tz>)' by default", async () => {
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     const value = await screen.findByTestId("review-time-value");
     expect(value.textContent).toMatch(/18:00/);
@@ -83,7 +95,7 @@ describe("StepAsk.svelte", () => {
     // so flipping the Edit toggle only swaps the value-slot
     // content — never the row's outer dimensions.
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     const toggle = await screen.findByTestId("ask-toggle-edit");
     await fireEvent.click(toggle);
@@ -105,7 +117,7 @@ describe("StepAsk.svelte", () => {
       return Promise.reject(new Error(`Unknown command: ${cmd}`));
     });
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     expect(await screen.findByTestId("ask-error")).toBeTruthy();
   });
@@ -113,14 +125,14 @@ describe("StepAsk.svelte", () => {
   it("(f) the Next button is disabled while IPC is in flight", () => {
     mockInvoke.mockImplementation(() => new Promise(() => {}));
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     expect(screen.queryByTestId("ask-next")).toBeNull();
   });
 
   it("(g) disabled fields show a '?' tooltip with the LLM's reasoning", async () => {
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
     // MOCK_ANSWERS has calendar_ics = null and voice = null →
@@ -162,7 +174,7 @@ describe("StepAsk.svelte", () => {
     // an <input type="time"> that replaces the summary in
     // the same row when `editing` is on.
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
     // Pre-edit: summary is rendered, no input is present.
@@ -191,7 +203,7 @@ describe("StepAsk.svelte", () => {
     // testid in edit mode (we removed that DOM node), and the
     // existing `review-time-tz` testid must still render.
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next: () => {} },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
@@ -208,7 +220,7 @@ describe("StepAsk.svelte", () => {
   it("(i2) editing the local HH:MM stores the converted hour on Next", async () => {
     const on_next = vi.fn();
     render(StepAsk, {
-      props: { scan: MOCK_SCAN_REPORT, on_next },
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
     });
     await screen.findByTestId("ask-answers");
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
@@ -227,5 +239,44 @@ describe("StepAsk.svelte", () => {
     const offset_hours = offset_minutes / 60;
     const expected = ((9 - offset_hours) + 24) % 24;
     expect(called_with.review_time.hour_utc).toBe(expected);
+  });
+
+  // PR #193 — back-navigation preserves edits.
+  it("(j) the hoisted state edits persist when the parent store is updated", async () => {
+    // Simulate the "Back" navigation: the parent wizard has
+    // already populated the StepAskState store with the
+    // user's previous edits (editing=true, edit_claude_paths
+    // non-empty, review_hhmm_local = "20:30"). The fresh
+    // mount of StepAsk should read those values from the
+    // store and render them.
+    const pre_populated = writable({
+      editing: true,
+      edit_claude_paths: "/Users/back-nav/.claude/projects",
+      edit_github_repos: "pedro-tramontin/trail",
+      review_hhmm_local: "20:30",
+    });
+    render(StepAsk, {
+      props: {
+        scan: MOCK_SCAN_REPORT,
+        initial_answers: null,
+        state: pre_populated,
+        on_next: () => {},
+      },
+    });
+    await screen.findByTestId("ask-answers");
+    // The Edit toggle should be ON (so the textareas render).
+    expect(screen.getByTestId("edit-claude-paths")).toBeTruthy();
+    expect(screen.getByTestId("edit-github-repos")).toBeTruthy();
+    // The textareas should be pre-populated from the store.
+    expect(
+      (screen.getByTestId("edit-claude-paths") as HTMLTextAreaElement).value,
+    ).toBe("/Users/back-nav/.claude/projects");
+    expect(
+      (screen.getByTestId("edit-github-repos") as HTMLTextAreaElement).value,
+    ).toBe("pedro-tramontin/trail");
+    // The review-time picker should be pre-populated.
+    expect(
+      (screen.getByTestId("review-time-input") as HTMLInputElement).value,
+    ).toBe("20:30");
   });
 });
