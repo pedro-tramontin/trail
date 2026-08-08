@@ -5,10 +5,13 @@
   import StepTransport from "./lib/onboarding/StepTransport.svelte";
   import StepInstall from "./lib/onboarding/StepInstall.svelte";
   import StepFinish from "./lib/onboarding/StepFinish.svelte";
+  import { writable, type Writable } from "svelte/store";
   import type {
     OnboardingAnswers,
     ScanReport,
     InstallOption,
+    StepAskState,
+    StepTransportState,
   } from "./lib/onboarding/types";
 
   /**
@@ -31,6 +34,24 @@
    * Steps share parent state via prop drilling — simpler than
    * the Svelte context API for a 6-step wizard, and keeps
    * each step independently testable.
+   *
+   * ## State-preservation rationale (PR #193)
+   *
+   * Steps 2 (Ask) and 3 (Transport) hold editable local state
+   * (time picker, path lists, VPS details, key path). When the
+   * user navigates Back from step 4 (Install) to step 2 (Ask),
+   * Svelte's `{#if}` block remounts the step component, which
+   * discards every `$state` declaration. The user loses any
+   * edits they made.
+   *
+   * Fix: hoist the editable state into the parent wizard
+   * (`step_ask_state`, `step_transport_state` below) and pass
+   * it down as a single object prop. The child mutates the
+   * object directly; Svelte 5's runes keep the parent's
+   * reactive graph live so the next mount reads the persisted
+   * values. LLM-fetch state (`loading`, `error`, `answers`)
+   * stays in the child because the LLM call is fast and
+   * idempotent — re-fetching on remount is fine.
    */
 
   let current_step = $state(0);
@@ -44,6 +65,53 @@
   // the `Password` fallback (see
   // src-tauri/src/onboarding/config_writer.rs).
   let ssh_key_generated = $state(false);
+
+  /** Per-step editable state. Hoisted to the wizard root so it
+   *  survives step unmount on Back navigation. The child step
+   *  mutates the object directly; Svelte 5 runes propagate
+   *  the writes to the parent's reactive graph. */
+  // Step 2 (Ask) — local edits the user typed in the answer
+  // rows + the review-time picker. The LLM-fetched `answers`
+  // object is NOT hoisted (re-running ask_onboarding_cmd on
+  // remount is fast and idempotent). We use a writable store
+  // for the same reason as step_transport_state — see that
+  // block's comment for the Svelte 5.56 deep-reactivity
+  // rationale.
+  const step_ask_state: Writable<StepAskState> = writable({
+    editing: false,
+    edit_claude_paths: "",
+    edit_github_repos: "",
+    review_hhmm_local: "18:00",
+  });
+
+  // Step 3 (Transport) — VPS connection details + key
+  // material + test-connection transient state. Hoisted so
+  // the user's typed values (and the "key already in
+  // keychain" choice) persist when they navigate back from
+  // step 4 (Install).
+  //
+  // We use a Svelte writable store here (not a $state object)
+  // because Svelte 5's $state proxies are not transparently
+  // deep-reactive across component boundaries when the child
+  // reads `prop.field` directly — the child's $derived +
+  // template only re-evaluate when the *prop reference* changes,
+  // not when one of its nested properties does. (This is a
+  // Svelte 5.56 limitation; the workaround is a writable store
+  // from svelte/store, which IS transparently deep-reactive via
+  // the $store-name auto-subscription syntax.) The store value
+  // is the StepTransportState object; the child's form fields
+  // read it via $state.host, $state.user, etc.
+  const step_transport_state: Writable<StepTransportState> = writable({
+    host: "",
+    user: "",
+    port: 22,
+    ssh_key_path: null,
+    ssh_key_source: null,
+    generating: false,
+    key_error: null,
+    test_state: "idle",
+    test_error: null,
+  });
 
   /** Emitted when the wizard finishes writing the config. The
    * callback may be async (Phase 9 §9.3 — `App.svelte` awaits
@@ -114,10 +182,15 @@
     {:else if current_step === 2}
       <StepAsk
         scan={scan_report}
+        initial_answers={onboarding_answers}
+        state={step_ask_state}
         on_next={handle_step_2_next}
       />
     {:else if current_step === 3}
-      <StepTransport on_next={handle_step_3_next} />
+      <StepTransport
+        state={step_transport_state}
+        on_next={handle_step_3_next}
+      />
     {:else if current_step === 4}
       <StepInstall on_next={handle_step_4_next} />
     {:else if current_step === 5}

@@ -1,8 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { writable, type Writable } from "svelte/store";
   import type {
     OnboardingAnswers,
     ScanReport,
+    StepAskState,
     QuestionLogEntry,
   } from "./types";
 
@@ -58,45 +60,57 @@
    * DST is handled imperfectly (we read the offset at the
    * current moment, not at the next fire time). Documented
    * in earlier commit; the user can refine in Settings later.
+   *
+   * ## Hoisted state (PR #193)
+   *
+   * The editable local state (edit buffers + review-time
+   * picker) is hoisted to the parent wizard via the `state`
+   * prop. The `editing` toggle, the per-row textareas, and
+   * the time picker mutate `hoisted.*` directly so their values
+   * survive a Back navigation. LLM-fetched `answers` +
+   * `loading` + `error` are NOT hoisted — re-running
+   * `ask_onboarding_cmd` on remount is fast and idempotent.
+   *
+   * If `initial_answers` is non-null (the user has already
+   * been through this step and clicked Next once, then went
+   * Back), we skip the LLM call entirely and use the cached
+   * answers.
    */
 
   let {
     scan = null,
+    initial_answers = null,
+    state: hoisted,
     on_next,
   }: {
     scan: ScanReport | null;
+    initial_answers: OnboardingAnswers | null;
+    state: Writable<StepAskState>;
     on_next: (answers: OnboardingAnswers) => void;
   } = $props();
 
-  let answers = $state<OnboardingAnswers | null>(null);
-  let loading = $state(true);
-  let error = $state<string | null>(null);
-  let editing = $state(false);
+  // svelte-ignore state_referenced_locally
+  let answers: OnboardingAnswers | null = $state(initial_answers);
+  // svelte-ignore state_referenced_locally
+  let loading = $state(initial_answers === null);
+  let error: string | null = $state(null);
 
-  // Editable local copies (only used when `editing === true`).
-  // They live in their respective answer rows so toggling `editing`
-  // only swaps the value slot between summary text and editable
-  // input — never the row's outer dimensions.
-  let edit_claude_paths = $state("");
-  let edit_github_repos = $state("");
-
-  /*
-   * Local review time, as an "HH:MM" string (24h) bound to a
-   * <input type="time">. Default "18:00" to match the existing
-   * baseline. We split into hour before converting to UTC.
-   *
-   * Note: the Rust scheduler parses `cfg.review_time` (in the
-   * final config) as `%H:%M`, but the LLM answer object stores
-   * `hour_utc` as an integer hour (see
-   * src-tauri/src/onboarding/answers.rs). We preserve that
-   * integer-only contract here (minute granularity is shown
-   * to the user but only the hour is propagated back to
-   * `answers.review_time.hour_utc`, which is what
-   * config_writer.rs currently reads — see that file's
-   * `answers_to_config` for the cadence propagation path).
-   */
-  let review_hhmm_local = $state("18:00");
-  let review_hour_local = $derived(parseInt(review_hhmm_local.split(":")[0], 10) || 0);
+  // The hoisted `state` prop is a Svelte writable store
+  // containing the editable form values (edit buffers,
+  // review-time picker, edit toggle). We use a store (not
+  // a $state object) because Svelte 5's $state proxies are
+  // not transparently deep-reactive across component
+  // boundaries when the child reads `prop.field` directly —
+  // the child's $derived + template only re-evaluate when
+  // the *prop reference* changes, not when one of its
+  // nested properties does. (Svelte 5.56 limitation; the
+  // workaround is a writable store from svelte/store, which
+  // IS transparently deep-reactive via the $store-name
+  // auto-subscription syntax.) The form fields bind to
+  // `$hoisted.X` and the template reads from `$hoisted.X`.
+  let review_hour_local = $derived(
+    parseInt($hoisted.review_hhmm_local.split(":")[0], 10) || 0,
+  );
 
   // Browser-detected IANA timezone (e.g. "America/Sao_Paulo").
   const local_tz: string =
@@ -165,6 +179,10 @@
 
   async function run_ask(): Promise<void> {
     if (!scan) return;
+    // If the user is returning to this step (Back from
+    // Install), `initial_answers` is non-null and we already
+    // hydrated `answers` at mount. Skip the LLM call entirely.
+    if (initial_answers !== null) return;
     loading = true;
     error = null;
     try {
@@ -174,12 +192,22 @@
       );
       answers = result;
       // Seed the local edit buffers from the LLM answer.
-      edit_claude_paths = (result.claude_sessions_paths ?? []).join("\n");
-      edit_github_repos = (result.github?.repos ?? []).join("\n");
-      // Default the local review-time picker to 18:00. The user
-      // can pick a different hour+minute via the inline picker
-      // when the master Edit toggle is on.
-      review_hhmm_local = "18:00";
+      // These are the FIRST-time-seeds — only applied if the
+      // hoisted buffers are still empty (i.e. fresh wizard
+      // run, not a Back navigation that reuses the previous
+      // edits).
+      if ($hoisted.edit_claude_paths === "") {
+        hoisted.update((s) => {
+          s.edit_claude_paths = (result.claude_sessions_paths ?? []).join("\n");
+          return s;
+        });
+      }
+      if ($hoisted.edit_github_repos === "") {
+        hoisted.update((s) => {
+          s.edit_github_repos = (result.github?.repos ?? []).join("\n");
+          return s;
+        });
+      }
     } catch (err) {
       error = String(err);
     } finally {
@@ -188,26 +216,35 @@
   }
 
   function toggle_edit(): void {
-    if (!editing && answers) {
-      edit_claude_paths = (answers.claude_sessions_paths ?? []).join("\n");
-      edit_github_repos = (answers.github?.repos ?? []).join("\n");
+    if (!$hoisted.editing && answers !== null) {
+      const a = answers;
+      hoisted.update((s) => {
+        s.edit_claude_paths = (a.claude_sessions_paths ?? []).join("\n");
+        s.edit_github_repos = (a.github?.repos ?? []).join("\n");
+        s.editing = !s.editing;
+        return s;
+      });
+    } else {
+      hoisted.update((s) => {
+        s.editing = !s.editing;
+        return s;
+      });
     }
-    editing = !editing;
   }
 
   function build_edited_answers(): OnboardingAnswers {
     if (!answers) {
       throw new Error("build_edited_answers called before answers loaded");
     }
-    const claude_sessions_paths = edit_claude_paths
+    const claude_sessions_paths = $hoisted.edit_claude_paths
       .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    const github_repos = edit_github_repos
+      .map((s: string) => s.trim())
+      .filter((s: string) => s.length > 0);
+    const github_repos = $hoisted.edit_github_repos
       .split(/\r?\n/)
-      .flatMap((line) => line.split(","))
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+      .flatMap((line: string) => line.split(","))
+      .map((s: string) => s.trim())
+      .filter((s: string) => s.length > 0);
     return {
       ...answers,
       claude_sessions_paths,
@@ -236,7 +273,7 @@
 
   function on_next_click(): void {
     if (!answers) return;
-    const edited = editing ? build_edited_answers() : answers;
+    const edited = $hoisted.editing ? build_edited_answers() : answers;
     const final = apply_local_review_time(edited);
     on_next(final);
   }
@@ -268,11 +305,11 @@
       <li class="answer-row" data-testid="row-claude-sessions">
         <span class="label">Claude sessions</span>
         <span class="value">
-          {#if editing}
+          {#if $hoisted.editing}
             <textarea
               rows="2"
               class="inline-edit"
-              bind:value={edit_claude_paths}
+              bind:value={$hoisted.edit_claude_paths}
               data-testid="edit-claude-paths"
               aria-label="Claude sessions paths (one per line)"
             ></textarea>
@@ -297,11 +334,11 @@
       <li class="answer-row" data-testid="row-github">
         <span class="label">GitHub</span>
         <span class="value">
-          {#if editing}
+          {#if $hoisted.editing}
             <textarea
               rows="2"
               class="inline-edit"
-              bind:value={edit_github_repos}
+              bind:value={$hoisted.edit_github_repos}
               data-testid="edit-github-repos"
               aria-label="GitHub repos (one per line, or comma-separated)"
             ></textarea>
@@ -367,11 +404,11 @@
       <li class="answer-row" data-testid="row-review-time">
         <span class="label">Review time</span>
         <span class="value review-time">
-          {#if editing}
+          {#if $hoisted.editing}
             <input
               type="time"
               class="inline-edit time-input"
-              bind:value={review_hhmm_local}
+              bind:value={$hoisted.review_hhmm_local}
               data-testid="review-time-input"
               aria-label="Review time (your local time, HH:MM)"
             />
@@ -394,7 +431,7 @@
           {:else}
             <span class="value-text review-time-summary" data-testid="review-time-value">
               {answers.review_time.cadence} at
-              <strong data-testid="review-time-hour">{review_hhmm_local}</strong>
+              <strong data-testid="review-time-hour">{$hoisted.review_hhmm_local}</strong>
               your time
               <span class="tz" data-testid="review-time-tz">({short_tz_label(local_tz)})</span>
             </span>
@@ -429,7 +466,7 @@
         data-testid="ask-toggle-edit"
         onclick={toggle_edit}
       >
-        {editing ? "Done editing" : "Edit"}
+        {$hoisted.editing ? "Done editing" : "Edit"}
       </button>
       <button
         type="button"
@@ -438,7 +475,7 @@
         disabled={!can_advance}
         onclick={on_next_click}
       >
-        {editing ? "Save & continue" : "Looks good"}
+        {$hoisted.editing ? "Save & continue" : "Looks good"}
       </button>
     </div>
   {/if}
