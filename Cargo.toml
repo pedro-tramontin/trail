@@ -16,9 +16,9 @@ repository = ""  # Filled in once repo URL is known
 
 [workspace.dependencies]
 # Shared deps — pinned once at the workspace level.
-tauri = { version = "2.0", features = ["tray-icon"] }
-tauri-build = { version = "2.0", features = [] }
-tauri-plugin-os = "2.0"
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-build = { version = "2.6.3", features = [] }
+tauri-plugin-os = "2.3.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "1.0.69"
