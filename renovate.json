@@ -7,11 +7,14 @@
     "main"
   ],
   "dependencyDashboard": true,
-  "automerge": false,
+  "timezone": "America/Los_Angeles",
+  "schedule": [
+    "before 6am on monday"
+  ],
   "reviewers": [
     "pedro-tramontin"
   ],
-  "prHourlyLimit": 2,
+  "prHourlyLimit": 8,
   "prConcurrentLimit": 10,
   "rangeStrategy": "bump",
   "rebaseWhen": "conflicted",
@@ -23,10 +26,27 @@
   },
   "packageRules": [
     {
-      "matchCategories": [
-        "rust"
+      "description": "Allow platform-native auto-merge for non-major updates. Major bumps stay manual (vetted by the user).",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
       ],
-      "enabled": true
+      "automerge": true,
+      "platformAutomerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "requiredStatusChecks": [
+        "lint",
+        "typecheck",
+        "test",
+        "rust-clippy",
+        "pr-label-check",
+        "draft-linux",
+        "draft-macos",
+        "draft-windows"
+      ]
     },
     {
       "description": "Bundle vite + vitest + @sveltejs/vite-plugin-svelte + @vitejs/plugin-react — they ship in lockstep and a half-updated toolchain breaks the dev server.",
