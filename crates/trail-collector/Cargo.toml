@@ -6,7 +6,7 @@ name = "trail-collector"
 # versions — `version.workspace = true` is invisible to that walker.
 # The workspace root + each member's `[package].version` are kept in
 # lockstep manually; release-please rewrites both on every release.
-version = "0.4.3"
+version = "0.5.0"
 edition.workspace = true
 rust-version.workspace = true
 # `cargo install trail-collector --git <repo>` discoverability metadata.
