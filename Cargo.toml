@@ -68,7 +68,7 @@ tokio-util = "0.7.19"
 # Phase 5 §5.5 — parking_lot::Mutex wraps the lazy whisper context
 # (faster than std::sync::Mutex under low contention), and uuid
 # provides v4 entry_ids for voice store entries.
-parking_lot = "0.12"
+parking_lot = "0.12.5"
 uuid = { version = "1.24.0", features = ["v4"] }
 # Phase 5 §5.7 — macOS mic permission detection via `objc2` (the modern
 # safe wrapper around Apple's Objective-C runtime). The trio of
