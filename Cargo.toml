@@ -45,7 +45,7 @@ once_cell = "1.21.4"
 notify-rust = "4"
 humantime = "2"
 # HTTP mock server for the ollama client unit tests (no live ollama needed).
-wiremock = "0.6"
+wiremock = "0.6.5"
 sha2 = "0.10"
 # Phase 5 §5.1 — whisper model download + audio capture.
 whisper-rs = "0.13"
