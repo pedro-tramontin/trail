@@ -277,16 +277,29 @@ jobs:
           # version). Same-version PRs are left alone (they're the
           # legitimate in-flight PR this run is about to update).
           #
+          # IMPORTANT: this regex MUST match the exact title prefix
+          # the `Open version-bump PR` step (line ~707) writes via
+          # `--title "chore(draft-release): bump version to $VERSION"`.
+          # The previous regex `^chore\(release\):` was a stale
+          # carry-over from the deleted `version-bump.yml` workflow
+          # and never matched the new prefix, so the close step
+          # reported `Closed 0 superseded version-bump PR(s)` and
+          # duplicates accumulated (#193 against #191 on 2026-08-07,
+          # #199 against #193 on 2026-08-08). The two parens around
+          # `draft-release` are escaped for `[[ =~ ]]` because
+          # unescaped parens are capture groups in ERE.
+          #
           # Bug C documented in
           # references/release-pipeline-2026-08-attach-debug-real-run-failures.md
-          # (trail PR #125 / #127, 2026-08-04).
+          # (trail PR #125 / #127, 2026-08-04). Bug H (this fix):
+          # PR #200 (2026-08-08).
           CLOSED=0
           for pr_num in $(gh pr list \
               --state open \
               --json number \
               --jq '.[].number'); do
             TITLE=$(gh pr view "$pr_num" --json title --jq '.title')
-            if [[ "$TITLE" =~ ^chore\(release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            if [[ "$TITLE" =~ ^chore\(draft-release\):[[:space:]]bump[[:space:]]version[[:space:]]to[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
               OLD_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
               if [ "$OLD_VERSION" != "$VERSION" ]; then
                 echo "Closing superseded version-bump PR #$pr_num (was for $OLD_VERSION; draft is now $VERSION)"
