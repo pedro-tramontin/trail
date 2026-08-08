@@ -69,7 +69,7 @@ tokio-util = "0.7.19"
 # (faster than std::sync::Mutex under low contention), and uuid
 # provides v4 entry_ids for voice store entries.
 parking_lot = "0.12"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1.24.0", features = ["v4"] }
 # Phase 5 §5.7 — macOS mic permission detection via `objc2` (the modern
 # safe wrapper around Apple's Objective-C runtime). The trio of
 # `objc2` + `objc2-foundation` + `block2` is the standard macOS bindings
