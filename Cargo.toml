@@ -30,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
 chrono = { version = "0.4.45", features = ["serde"] }
 ssh2 = "0.9.6"
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core", "getrandom"] }
 keyring = { version = "3.6.3", features = ["apple-native", "linux-native", "windows-native"] }
 zeroize = { version = "1", features = ["derive"] }
