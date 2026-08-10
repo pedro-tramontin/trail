@@ -134,7 +134,12 @@ pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> 
     let supported = device
         .default_input_config()
         .map_err(|e| CaptureError::Cpal(e.to_string()))?;
-    let sample_rate = supported.sample_rate().0;
+    // cpal 0.18 dropped the `SampleRate(u32)` newtype wrapper and
+    // now returns the sample rate as a plain `u32` from
+    // `SupportedStreamConfig::sample_rate`. The `.0` field access
+    // that worked under cpal 0.15 (`SampleRate::0`) is no longer
+    // valid because `u32` is a primitive type.
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     let stream_config = supported.config();
 
@@ -152,8 +157,12 @@ pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> 
     std::thread::Builder::new()
         .name("trail-cpal-capture".into())
         .spawn(move || {
+            // cpal 0.18 also changed `Device::build_input_stream` to
+            // take the `StreamConfig` by value rather than by reference.
+            // The 0.15 form `&stream_config` produces a "expected
+            // `StreamConfig`, found `&StreamConfig`" error.
             let stream = match device.build_input_stream(
-                &stream_config,
+                stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     // `data` is already mono because we asserted
                     // `channels == 1` above; no interleaving to
