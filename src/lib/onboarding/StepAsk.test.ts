@@ -32,6 +32,8 @@ function fresh_state(): Writable<StepAskState> {
     edit_claude_paths: "",
     edit_github_repos: "",
     review_hhmm_local: "18:00",
+    edit_voice_enabled: false,
+    edit_voice_model: "base.en",
   });
 }
 
@@ -73,6 +75,10 @@ describe("StepAsk.svelte", () => {
       MOCK_ANSWERS.claude_sessions_paths,
     );
     expect(called_with.github).toEqual(MOCK_ANSWERS.github);
+    // PR #216 — the "Looks good" path (no Edit) must preserve
+    // the LLM's `voice: null` default. Only flipping the
+    // checkbox in Edit mode should produce a Some(VoiceConfig).
+    expect(called_with.voice).toBeNull();
   });
 
   it("(c2) renders '18:00 your time (<tz>)' by default", async () => {
@@ -254,6 +260,8 @@ describe("StepAsk.svelte", () => {
       edit_claude_paths: "/Users/back-nav/.claude/projects",
       edit_github_repos: "pedro-tramontin/trail",
       review_hhmm_local: "20:30",
+      edit_voice_enabled: true,
+      edit_voice_model: "small.en",
     });
     render(StepAsk, {
       props: {
@@ -278,5 +286,81 @@ describe("StepAsk.svelte", () => {
     expect(
       (screen.getByTestId("review-time-input") as HTMLInputElement).value,
     ).toBe("20:30");
+  });
+
+  // PR #216 — voice-capture toggle.
+  it("(k) edit mode shows a checkbox + model picker in the voice row", async () => {
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    await screen.findByTestId("ask-answers");
+    // Pre-edit: summary view, no checkbox.
+    expect(screen.getByTestId("why-voice")).toBeTruthy();
+    expect(screen.queryByTestId("voice-toggle")).toBeNull();
+    // Flip Edit on.
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
+    // Checkbox + select are now visible, summary view is gone.
+    const toggle = screen.getByTestId("voice-toggle") as HTMLInputElement;
+    expect(toggle).toBeTruthy();
+    expect((toggle as HTMLInputElement).checked).toBe(false); // default off
+    const model = screen.getByTestId("voice-model") as HTMLSelectElement;
+    expect(model).toBeTruthy();
+    expect(model.value).toBe("base.en"); // wizard-root default
+    // The "why disabled" tooltip is gone in edit mode (the
+    // user is now driving the choice directly).
+    expect(screen.queryByTestId("why-voice")).toBeNull();
+  });
+
+  it("(l) flipping the voice checkbox on, then Next, includes a VoiceConfig", async () => {
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    await screen.findByTestId("ask-answers");
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
+    // Toggle on.
+    const toggle = screen.getByTestId("voice-toggle") as HTMLInputElement;
+    await fireEvent.click(toggle);
+    // Pick a non-default model so the test pins the binding, not
+    // just the default.
+    const model = screen.getByTestId("voice-model") as HTMLSelectElement;
+    await fireEvent.change(model, { target: { value: "small.en" } });
+    // Click Next.
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.voice).not.toBeNull();
+    expect(called_with.voice).toMatchObject({
+      enabled: true,
+      model: "small.en",
+      language: "en",
+    });
+  });
+
+  it("(m) leaving the voice checkbox off, then Next, keeps voice=null (LLM-disabled preserved)", async () => {
+    // Regression guard for the "Looks good" path: not flipping
+    // the checkbox must NOT introduce a Some(VoiceConfig) into
+    // the answers, even when Edit mode was entered. The user
+    // needs to opt in explicitly.
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    await screen.findByTestId("ask-answers");
+    await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
+    // Touch the model picker but leave the checkbox at its
+    // default `false`. This catches a future regression where
+    // editing the picker accidentally also flips the enable
+    // bit.
+    const model = screen.getByTestId("voice-model") as HTMLSelectElement;
+    await fireEvent.change(model, { target: { value: "small.en" } });
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.voice).toBeNull();
   });
 });

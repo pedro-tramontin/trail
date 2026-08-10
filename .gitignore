@@ -41,3 +41,6 @@ src-tauri/resources/calendar.schema.json
 # helper in Tauri 2's test framework writes here, not to the
 # system tempdir, on some platforms). Per §5b D8, never commit.
 src-tauri/.local/
+
+# Local-only plans scratch directory (Hermes Agent plan files).
+.hermes/

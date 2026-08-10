@@ -245,12 +245,27 @@
       .flatMap((line: string) => line.split(","))
       .map((s: string) => s.trim())
       .filter((s: string) => s.length > 0);
+    // PR #216 — voice toggle. Synthesise a typed VoiceConfig when
+    // the user enables the checkbox in Edit mode, otherwise
+    // produce `null` to match the LLM's "voice disabled" shape
+    // (see answers.rs:347-355). The `language` field stays "en"
+    // because the codebase never exercises non-English in v1
+    // and the on-disk Config doesn't persist it (config_writer.rs
+    // only stores model + hotkey + transcriber).
+    const voice: OnboardingAnswers["voice"] = $hoisted.edit_voice_enabled
+      ? {
+          enabled: true,
+          model: $hoisted.edit_voice_model || "base.en",
+          language: "en",
+        }
+      : null;
     return {
       ...answers,
       claude_sessions_paths,
       github: answers.github
         ? { ...answers.github, repos: github_repos }
         : answers.github,
+      voice,
     };
   }
 
@@ -383,10 +398,46 @@
         </span>
       </li>
 
-      <li class="answer-row">
+      <li class="answer-row" data-testid="row-voice">
         <span class="label">Voice capture</span>
         <span class="value">
-          {#if !answers.voice?.enabled}
+          {#if $hoisted.editing}
+            <!--
+              Edit-mode toggle. Mirrors the github row's
+              pattern: a single inline control (checkbox +
+              model picker) that replaces the summary text.
+              The default model matches config_writer.rs:197
+              so flipping the checkbox without picking a model
+              produces a config identical to a hand-edit.
+            -->
+            <label class="voice-toggle">
+              <input
+                type="checkbox"
+                bind:checked={$hoisted.edit_voice_enabled}
+                data-testid="voice-toggle"
+                aria-label="Enable voice capture"
+              />
+              Enable voice capture
+            </label>
+            <span class="voice-model-row">
+              <label for="voice-model">Model:</label>
+              <select
+                id="voice-model"
+                bind:value={$hoisted.edit_voice_model}
+                data-testid="voice-model"
+                aria-label="Whisper model size"
+              >
+                <option value="tiny.en">tiny.en</option>
+                <option value="base.en">base.en</option>
+                <option value="small.en">small.en</option>
+              </select>
+            </span>
+            <span class="hint">
+              Microphone permission is requested the first time
+              you start a capture (System Settings → Privacy →
+              Microphone).
+            </span>
+          {:else if !answers.voice?.enabled}
             <em>disabled</em>
             <button
               type="button"

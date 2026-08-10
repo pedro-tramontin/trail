@@ -82,6 +82,13 @@
     edit_claude_paths: "",
     edit_github_repos: "",
     review_hhmm_local: "18:00",
+    // PR #216 — voice-capture toggle lives in Edit mode.
+    // `false` keeps the pre-PR behavior (LLM-disabled → write
+    // voice=None). The default model matches the fallback in
+    // config_writer.rs so flipping the toggle produces a config
+    // entry that's identical to a hand-edited one.
+    edit_voice_enabled: false,
+    edit_voice_model: "base.en",
   });
 
   // Step 3 (Transport) — VPS connection details + key

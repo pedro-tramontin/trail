@@ -224,6 +224,17 @@ export interface StepAskState {
   /** Local review time, "HH:MM" 24h. Translated to UTC hour on
    *  Next (the Rust scheduler parses UTC). */
   review_hhmm_local: string;
+  /** Local edit state for the Voice capture checkbox (mirrors the
+   *  github/claude row pattern). Default false preserves the
+   *  pre-PR behavior (LLM-disables → wizard writes voice=None).
+   *  Hoisted so a Back-from-Install round-trip preserves the
+   *  user's choice. */
+  edit_voice_enabled: boolean;
+  /** Model the user picks on the Voice capture row when in Edit
+   *  mode. Defaults match `config_writer.rs` so the on-disk
+   *  fallback chain produces the same result whether the LLM
+   *  set it or the wizard inferred it. */
+  edit_voice_model: string;
 }
 
 /** Step 3 (Transport) state. All fields are user-visible
