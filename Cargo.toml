@@ -62,7 +62,7 @@ rubato = "0.15"
 # Phase 5 §5.3 — global-hotkey for the push-to-talk shortcut. Gated to
 # macOS in src-tauri/Cargo.toml (Linux builds don't need it; the parser
 # + tests run on Linux against a stub).
-global-hotkey = "0.7"
+global-hotkey = "0.8.0"
 # Phase 5 §5.4 — CancellationToken for the tray-icon blink loop.
 tokio-util = "0.7.19"
 # Phase 5 §5.5 — parking_lot::Mutex wraps the lazy whisper context
