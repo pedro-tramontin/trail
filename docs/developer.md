@@ -87,6 +87,41 @@ The `Makefile` is the single source of truth for build orchestration. The
 `release.yml` workflow runs the same `make` targets, so what works locally will
 work in CI.
 
+## Running a built `.app` on your own Mac (Gatekeeper / unsigned)
+
+Both the local `cargo run` path and the `.dmg` you download from
+`Releases` produce `.app` bundles signed **ad-hoc** (Tauri's
+`signingIdentity: "-"` in `src-tauri/tauri.conf.json` + a defensive
+`codesign --force --deep --sign` step in `promote.yml` / `release.yml`).
+Ad-hoc signing satisfies Gatekeeper enough for the bundle to **launch on
+the same machine**, but a downloaded bundle still trips "this was
+downloaded from the internet" on first launch. Strip the quarantine
+attribute before opening:
+
+```bash
+# Debug bundle built locally
+xattr -dr com.apple.quarantine src-tauri/target/debug/bundle/macos/Trail.app
+
+# Release .dmg artifact from the GitHub Release
+xattr -dr com.apple.quarantine /Applications/Trail.app
+
+# Then open
+open src-tauri/target/debug/bundle/macos/Trail.app
+```
+
+Older macOS (Sonoma and earlier) reports this as **"Trail.app is damaged
+and can't be opened"**. The fix is the same — `xattr -cr <path>` clears
+all extended attributes at once. If you'd rather click through GUI:
+right-click → Open → confirm the "Open anyway" dialog once, and macOS
+remembers your approval for that bundle.
+
+Why this isn't a re-signing problem: CI's `codesign --force --deep
+--sign "Pedro Tramontin"` step refreshes the ad-hoc signature every
+build, so a freshly-extracted bundle is already signed. The only thing
+the quarantine flag does is tell Gatekeeper "ask the user first." A
+notarized + Developer-ID-signed build (the long-term fix on the
+release-pipeline roadmap) would skip this prompt entirely.
+
 ## Inner dev loop
 
 For UI work, use Vite's HMR. For Rust work, the cycle is `cargo check` → `cargo test`
