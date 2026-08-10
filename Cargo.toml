@@ -48,8 +48,8 @@ humantime = "2.4.0"
 wiremock = "0.6.5"
 sha2 = "0.10"
 # Phase 5 §5.1 — whisper model download + audio capture.
-whisper-rs = "0.13"
-hound = "3"
+whisper-rs = "0.16.0"
+hound = "3.5.1"
 # dirs 5 → 6: dirs 5 used `dirs-sys 0.4` which still pulls in
 # `redox_users 0.4` (via the implicit `dirs-sys` chain); mainline has
 # moved to `dirs 6` (single version) and we adopt that here to avoid
@@ -57,8 +57,8 @@ hound = "3"
 dirs = "6"
 # Phase 5 §5.2 — cpal microphone capture (macOS) + cross-platform rubato
 # resampler to 16 kHz mono for whisper.
-cpal = "0.15"
-rubato = "0.15"
+cpal = "0.18.1"
+rubato = "0.16.2"
 # Phase 5 §5.3 — global-hotkey for the push-to-talk shortcut. Gated to
 # macOS in src-tauri/Cargo.toml (Linux builds don't need it; the parser
 # + tests run on Linux against a stub).
