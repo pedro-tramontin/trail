@@ -371,7 +371,7 @@ jobs:
           # `cache: pnpm` configures the pnpm store as a cache target
           # — pnpm MUST already be installed (above step) or this
           # fails with "Unable to locate executable file: pnpm".
-          node-version: "22"
+          node-version: "22.23.2"
           cache: pnpm
 
       - name: Install frontend deps
@@ -455,7 +455,7 @@ jobs:
       - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.2"
           cache: pnpm
 
       - name: Install frontend deps
@@ -551,7 +551,7 @@ jobs:
       - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.2"
           cache: pnpm
 
       - name: Install frontend deps
@@ -797,7 +797,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install frontend deps + build
@@ -878,7 +878,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install frontend deps + build
@@ -939,7 +939,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install frontend deps + build

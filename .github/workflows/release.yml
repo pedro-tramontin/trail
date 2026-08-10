@@ -116,7 +116,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install UI deps + build
@@ -165,7 +165,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install UI deps + build
@@ -272,7 +272,7 @@ jobs:
           version: 10.18.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       - name: Install UI deps + build
