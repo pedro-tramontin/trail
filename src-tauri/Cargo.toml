@@ -54,7 +54,7 @@ tokio-cron-scheduler = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = { workspace = true }
 once_cell = { workspace = true }
-notify-rust = "4"
+notify-rust = "4.18.0"
 humantime = "2.4.0"
 # Phase 5 §5.1 — whisper model download verification.
 sha2 = { workspace = true }
