@@ -279,6 +279,7 @@ describe("StepAsk.svelte", () => {
       review_hhmm_local: "20:30",
       edit_voice_enabled: true,
       edit_voice_model: "small.en",
+      edit_calendar_source: "event_kit" as const,
     });
     render(StepAsk, {
       props: {

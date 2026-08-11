@@ -78,7 +78,7 @@ fn synth_eventkit(
     cfg: &CollectorLaptopConfig,
     today: chrono::NaiveDate,
 ) -> Result<serde_json::Value> {
-    use objc2::{class, msg_send, ClassType};
+    use objc2::{class, msg_send};
     use objc2_event_kit::EKAuthorizationStatus;
     use objc2_foundation::{NSArray, NSDate, NSString};
 

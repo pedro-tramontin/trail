@@ -613,49 +613,38 @@ fn calendar_eventkit_tcc_status() -> Option<CalendarEventKitTcc> {
     // than refactoring `voice/permission.rs` into a generic
     // "macOS TCC probe" helper) because the surface is small
     // and the two callers have different enum mappings.
-    use objc2::{class, msg_send, ClassType};
-    use objc2::runtime::{AnyObject, AnyClass};
-    use objc2_event_kit::{EKEventStore, EKAuthorizationStatus};
-    use objc2_event_kit::EKAuthorizationStatus as AuthStatus;
+    use objc2::{class, msg_send};
+    use objc2_event_kit::EKAuthorizationStatus;
     unsafe {
         // `EKEventStore` is registered at process load (it's
         // a class in `EventKit.framework`, linked via the
-        // crate's Cargo.toml + build.rs).
-        let cls: &AnyClass = class!(EKEventStore);
-        if cls.is_null() {
-            return None;
-        }
+        // crate's Cargo.toml + build.rs). The `class!` macro
+        // returns a non-null `&'static AnyClass` — objc2 0.6
+        // dropped the typed wrapper's `is_null` method, so we
+        // rely on the macro's invariant. Same convention as
+        // `voice/permission.rs::authorization_status`.
         // `+authorizationStatusForEntityType:` is a class
         // method that returns `EKAuthorizationStatus`
         // (an NSInteger enum). The argument is the entity
         // type — `.event` (value 0) for calendars. objc2
-        // exposes the constants as `EKEventStore.requestFullAccess`
-        // + friends; the integer value is the historical
-        // Apple enum value (0 = Event).
-        let raw: isize = msg_send![cls, authorizationStatusForEntityType: 0isize];
-        let status = AuthStatus(raw as i64);
+        // exposes the constants as associated constants on
+        // `EKAuthorizationStatus` (`FullAccess`, `Denied`,
+        // etc., each of which is `Self(N)` for the historical
+        // Apple enum value). We pattern-match the `status`
+        // value directly — no inner-construction needed.
+        let status: EKAuthorizationStatus =
+            msg_send![class!(EKEventStore), authorizationStatusForEntityType: 0isize];
         match status {
-            AuthStatus(EKAuthorizationStatus::FullAccess) => Some(CalendarEventKitTcc::FullAccess),
-            AuthStatus(EKAuthorizationStatus::Authorized) => Some(CalendarEventKitTcc::FullAccess),
-            AuthStatus(EKAuthorizationStatus::NotDetermined) => Some(CalendarEventKitTcc::NotDetermined),
-            AuthStatus(EKAuthorizationStatus::Denied)
-            | AuthStatus(EKAuthorizationStatus::Restricted)
-            | AuthStatus(EKAuthorizationStatus::WriteOnly) => Some(CalendarEventKitTcc::Denied),
+            EKAuthorizationStatus::FullAccess => Some(CalendarEventKitTcc::FullAccess),
+            EKAuthorizationStatus::Authorized => Some(CalendarEventKitTcc::FullAccess),
+            EKAuthorizationStatus::NotDetermined => Some(CalendarEventKitTcc::NotDetermined),
+            EKAuthorizationStatus::Denied
+            | EKAuthorizationStatus::Restricted
+            | EKAuthorizationStatus::WriteOnly => Some(CalendarEventKitTcc::Denied),
             _ => None,
         }
     }
 }
-
-/// The non-macOS stub for `calendar_eventkit_tcc_status` is
-/// absent on purpose. The function is `#[cfg]`-gated to
-/// macOS, and the only call site (`scan_calendar`'s
-/// `Platform::Macos` arm) is also `#[cfg]`-gated. A
-/// non-macOS stub would need a placeholder return type
-/// (the `CalendarEventKitTcc` enum doesn't exist on Linux)
-/// and that's strictly worse than the current "function
-/// doesn't exist outside macOS" model. The compiler
-/// will reject any future call site that doesn't carry
-/// the same `#[cfg]` gate, which is the right behaviour.
 
 /// Claude sessions: any of `~/.claude/projects/` or `~/.claude/sessions/`.
 /// File evidence (DirExists) only — we never peek inside.
