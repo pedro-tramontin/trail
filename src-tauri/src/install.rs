@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tauri::Manager;
 
 use crate::config::{Config, TransportConfig};
 
@@ -73,10 +74,24 @@ pub fn collector_script_path() -> PathBuf {
 }
 
 /// Path the install-wizard uses to round-trip the user's
-/// `config.json`. Mirrors `onboarding::config_writer::config_path()`
-/// so the three Phase 6 §6.x Tauri commands all see the same file.
-pub fn user_config_path() -> PathBuf {
-    crate::onboarding::config_writer::config_path()
+/// `config.json`. Mirrors the path that `write_onboarding_config`
+/// writes to (`app.path().app_config_dir()` — the platform-correct
+/// per-user config dir on a real `.app` install, falling back to
+/// `~/.trail/` for headless dev / `cargo test`). Keeping the two
+/// paths aligned is load-bearing: if the install wizard reads from
+/// `~/.trail/config.json` while the writer wrote to
+/// `~/Library/Application Support/.../config.json`, the user gets
+/// a misleading "file not found" error from
+/// `crate::config::load_config`.
+pub fn user_config_path(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
+        ).join(".trail"))
+        .join("config.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -378,8 +393,44 @@ pub struct InstallReport {
 /// dry-run path always has something to render.
 #[tauri::command]
 pub async fn install_vps_collector(
+    app: tauri::AppHandle,
     target: VpsInstallTarget,
     dry_run: bool,
+) -> Result<VpsInstallReport, String> {
+    let cfg_path = user_config_path(&app);
+    install_vps_collector_inner(&target, dry_run, &cfg_path).await
+}
+
+/// Inner implementation — `pub` so the test in
+/// `tests/onboarding_e2e.rs` can drive it without a real
+/// `AppHandle`. Pre-refactor the test called the
+/// `#[tauri::command]` directly; that worked only because
+/// the command didn't take `app`. After PR #219 added the
+/// `app` param so `user_config_path()` could use
+/// `app_config_dir()`, the test had to be re-routed through
+/// this inner helper. The split keeps the test's port
+/// round-tripping logic intact (it pre-dates the AppHandle
+/// addition).
+///
+/// Takes a pre-resolved `cfg_path` rather than an
+/// `AppHandle` so the signature stays runtime-agnostic —
+/// the production Tauri command computes `cfg_path` via
+/// `user_config_path(&app)`; the test computes it directly
+/// from `$HOME` so the inner function doesn't have to be
+/// generic over `tauri::Runtime` (which would force the test
+/// to thread a `MockRuntime`-typed handle through every
+/// helper, vs. just passing a `PathBuf`).
+///
+/// `pub` (not `pub(crate)`) because the integration test in
+/// `tests/onboarding_e2e.rs` lives in a separate crate
+/// (`cargo test` compiles each `tests/*.rs` as its own
+/// crate-root binary). Marking it `pub` keeps the test's
+/// direct-call pattern intact without forcing the test
+/// through `mock_app`.
+pub async fn install_vps_collector_inner(
+    target: &VpsInstallTarget,
+    dry_run: bool,
+    cfg_path: &Path,
 ) -> Result<VpsInstallReport, String> {
     if dry_run {
         // Build a synthetic plan from the target's user/host. This
@@ -413,8 +464,7 @@ pub async fn install_vps_collector(
         // `scripts/install-collector.sh` shell driver for the
         // actual ssh2 work. Surfacing a clear error keeps the
         // wizard honest about which path it took.
-        let cfg_path = user_config_path();
-        let cfg = crate::config::load_config(&cfg_path).map_err(|e| e.to_string())?;
+        let cfg = crate::config::load_config(cfg_path).map_err(|e| e.to_string())?;
         let plan = render_install_plan(&cfg, &target.user).map_err(|e| e.to_string())?;
         // The real-VPS path is intentionally a no-op stub here:
         // Phase 1 §1.10's `scripts/install-collector.sh` is the
@@ -460,8 +510,11 @@ pub async fn open_collector_script() -> Result<String, String> {
 /// The wizard's "do this later" button survives a restart because
 /// the flag lives on disk.
 #[tauri::command]
-pub async fn mark_pending_install(collector_id: String) -> Result<(), String> {
-    let p = user_config_path();
+pub async fn mark_pending_install(
+    app: tauri::AppHandle,
+    collector_id: String,
+) -> Result<(), String> {
+    let p = user_config_path(&app);
     mark_pending_install_inner(&p, &collector_id).map_err(|e| e.to_string())
 }
 
@@ -656,7 +709,23 @@ mod tests {
         };
         let collector_id = local.collector_id.clone();
         let target = local.to_target("vps_user");
-        let report = install_vps_collector(target, true)
+        // 2026-08-11 (PR #219) — `install_vps_collector`
+        // now takes a `tauri::AppHandle` so the real-VPS
+        // branch can call `user_config_path(&app)`. The
+        // dry-run branch doesn't touch the config, so
+        // pass any reasonable path (we point at a
+        // non-existent temp path; `load_config` errors
+        // out if the real-VPS branch runs, but the
+        // dry-run branch never reaches it). Using a
+        // pre-resolved `PathBuf` keeps the inner helper
+        // runtime-agnostic — see the `install_vps_collector_inner`
+        // doc for why.
+        let fake_cfg_path = std::env::temp_dir().join(format!(
+            "trail-fake-cfg-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let report = install_vps_collector_inner(&target, true, &fake_cfg_path)
             .await
             .expect("install_vps_collector dry-run should succeed");
 
