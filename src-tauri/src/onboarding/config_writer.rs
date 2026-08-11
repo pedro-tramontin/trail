@@ -582,6 +582,12 @@ mod tests {
                 ics_paths: vec!["~/Calendars/work.ics".to_string()],
                 calendar_app_id: None,
             }),
+            // 2026-08-11 — browser-history picker. The
+            // test fixtures don't exercise the picker, so
+            // the full-answers variant carries a
+            // representative pick list and the
+            // all-disabled variant carries `None`.
+            browser_history: Some(vec!["chrome".to_string()]),
             voice: Some(VoiceConfig {
                 enabled: true,
                 model: "base".to_string(),
@@ -608,6 +614,8 @@ mod tests {
             claude_sessions_paths: Vec::new(),
             github: None,
             calendar_ics: None,
+            // 2026-08-11 — see full_answers() comment.
+            browser_history: None,
             voice: None,
             review_time: ReviewTimeConfig {
                 cadence: "morning".to_string(),

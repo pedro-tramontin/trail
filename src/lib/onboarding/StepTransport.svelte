@@ -34,8 +34,8 @@
    * ## "Use existing key" affordance (PR #193)
    *
    * Two paths to attach a key:
-   *   1. **Generate** — clicks the original "Generate SSH key"
-   *      button. Calls `generate_ssh_key`, which is idempotent
+   *   1. **Generate** — clicks the "Generate SSH key" button.
+   *      Calls `generate_ssh_key`, which is idempotent
    *      (re-running returns the existing public key in the
    *      keychain). First-run path.
    *   2. **Use existing** — clicks "Use existing key in
@@ -50,6 +50,27 @@
    * tag is cosmetic (for the UI hint about which path was
    * used); it doesn't affect the Next-button enable logic.
    *
+   * ## "Always-editable key" UX (PR #219, 2026-08-11)
+   *
+   * The pre-PR behaviour hid the Generate / Use existing
+   * buttons once a key was attached — only the key path was
+   * shown. If the user picked the wrong key (e.g. ran "Use
+   * existing" before generating and now wants to switch), they
+   * had to leave the screen and come back, which made the
+   * "test connection → see failure → switch key → test again"
+   * loop impossible to do in one session. The new behaviour:
+   *   - Generate + Use existing buttons are ALWAYS rendered
+   *     (regardless of `ssh_key_path`).
+   *   - The currently-attached key path is shown BELOW the
+   *     buttons as info text, not as a replacement for them.
+   *   - Clicking Generate when a key is already set
+   *     re-runs `generate_ssh_key` (idempotent — same path
+   *     returned) or rotates to a new key on the same
+   *     `ssh_key_path` slot. The user can click as many
+   *     times as they want.
+   *   - Clicking Use existing overwrites `ssh_key_path` with
+   *     whatever's in the keychain right now.
+   *
    * ## "Test connection" button (PR #193)
    *
    * Calls the `test_ssh_connection` Tauri command (added in
@@ -62,6 +83,11 @@
    * on the result — it's informational, so the user can still
    * advance with a misconfigured VPS if they want (e.g. to
    * write the config now and fix the transport later).
+   *
+   * The Test button is gated on the host / user / port being
+   * valid (NOT on a key being attached) — even without a key
+   * the user can press it, see the auth error, then attach a
+   * key and test again, all on the same screen.
    */
 
   let {
@@ -83,8 +109,18 @@
   const port_valid = $derived(
     Number.isInteger($state.port) && $state.port >= 1 && $state.port <= 65535,
   );
+  // 2026-08-11 — the Test-connection button gates on
+  // inputs only (not on a key being attached). Pre-PR it
+  // inherited `can_advance`, which requires
+  // `ssh_key_path !== null`. That was wrong UX: a user
+  // with no key picked can't even try the test, so they
+  // can't see the auth error message that would tell
+  // them "you need a key attached." Allowing them to
+  // test without a key surfaces that exact error from
+  // the backend, which is informative.
+  const inputs_valid = $derived(host_valid && user_valid && port_valid);
   const can_advance = $derived(
-    host_valid && user_valid && port_valid && $state.ssh_key_path !== null,
+    inputs_valid && $state.ssh_key_path !== null,
   );
 
   async function generate_key(): Promise<void> {
@@ -224,37 +260,51 @@
 
     <div class="field">
       <span class="label-text">SSH key</span>
+      <!--
+        2026-08-11 — always render the Generate + Use
+        existing buttons so the user can switch keys
+        without leaving the screen (pre-PR the buttons
+        disappeared once `ssh_key_path` was set, which
+        made the "test → fail → switch key → test again"
+        loop impossible). The currently-attached key is
+        shown BELOW as info text — never replacing the
+        buttons.
+      -->
+      <div class="key-actions">
+        <button
+          type="button"
+          class="secondary"
+          data-testid="transport-generate-key"
+          disabled={$state.generating}
+          onclick={() => {
+            void generate_key();
+          }}
+        >
+          {$state.generating ? "Working…" : "Generate SSH key"}
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          data-testid="transport-use-existing-key"
+          disabled={$state.generating}
+          onclick={() => {
+            void use_existing_key();
+          }}
+        >
+          Use existing key in keychain
+        </button>
+      </div>
       {#if $state.ssh_key_path}
         <p class="muted" data-testid="transport-key-path">
-          ✅ {$state.ssh_key_source === "existing"
-            ? "Using existing key from"
-            : "Generated and stored in"} Keychain — <code>{$state.ssh_key_path}</code>
+          ✅ Currently attached: {$state.ssh_key_source === "existing"
+            ? "existing key from"
+            : "generated key in"} Keychain — <code>{$state.ssh_key_path}</code>
         </p>
       {:else}
-        <div class="key-actions">
-          <button
-            type="button"
-            class="secondary"
-            data-testid="transport-generate-key"
-            disabled={$state.generating}
-            onclick={() => {
-              void generate_key();
-            }}
-          >
-            {$state.generating ? "Working…" : "Generate SSH key"}
-          </button>
-          <button
-            type="button"
-            class="secondary"
-            data-testid="transport-use-existing-key"
-            disabled={$state.generating}
-            onclick={() => {
-              void use_existing_key();
-            }}
-          >
-            Use existing key in keychain
-          </button>
-        </div>
+        <p class="hint" data-testid="transport-key-hint">
+          No key attached yet. Pick one above — Next stays disabled until a
+          key is attached.
+        </p>
       {/if}
       {#if $state.key_error}
         <p class="hint hint-error" data-testid="transport-key-error">
@@ -270,7 +320,7 @@
           type="button"
           class="secondary"
           data-testid="transport-test-connection"
-          disabled={!can_advance || $state.test_state === "testing"}
+          disabled={!inputs_valid || $state.test_state === "testing"}
           onclick={() => {
             void test_connection();
           }}

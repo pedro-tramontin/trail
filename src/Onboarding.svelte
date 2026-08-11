@@ -103,6 +103,28 @@
     // value; StepAsk.svelte's `edit_mode` template selects the
     // matching arm at mount time.
     edit_calendar_source: "event_kit",
+    // 2026-08-11 — the .ics file paths the user enters on
+    // the Calendar row when `edit_calendar_source === "ics"`.
+    // Empty by default; the user types one path per line.
+    // `build_edited_answers` reads this into
+    // `answers.calendar_ics.ics_paths`. Previously the
+    // Ask-step had no input element for this, so picking
+    // "Custom .ics file" silently produced an empty
+    // `ics_paths` list on disk (collector emitted an empty
+    // calendar.json). The textarea is rendered inside the
+    // calendar row, conditional on
+    // `edit_calendar_source === "ics"`.
+    edit_ics_paths: "",
+    // 2026-08-11 — Browser-history pick list. Empty by
+    // default (no browsers selected — the user must opt
+    // in). The new Browser-history row in StepAsk renders
+    // five checkboxes (chrome / brave / firefox / opera /
+    // safari); each checked ID lands in `answers.browser_history`
+    // (a `string[]`). The actual collector that reads the
+    // SQLite / `places.sqlite` / `History.db` files is
+    // built in a follow-up PR; for now this is captured
+    // but not consumed by Phase C.
+    edit_browser_history: "",
   });
 
   // Step 3 (Transport) — VPS connection details + key

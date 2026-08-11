@@ -120,6 +120,14 @@ export interface OnboardingAnswers {
   claude_sessions_paths: string[];
   github: GitHubConfig | null;
   calendar_ics: CalendarConfig | null;
+  /** 2026-08-11 — list of browser IDs the user picked on the
+   *  Ask step (`chrome`, `brave`, `firefox`, `opera`,
+   *  `safari`). Empty list ⇒ no browser history captured.
+   *  Mirrors `calendar_ics`'s nullable shape (LLM may
+   *  pre-fill, Edit-mode may add/remove). The collector that
+   *  reads these files is built in a follow-up PR; for now
+   *  this is captured but not consumed. */
+  browser_history: string[] | null;
   voice: VoiceConfig | null;
   review_time: ReviewTimeConfig;
   summarizer: SummarizerConfig;
@@ -187,6 +195,13 @@ export interface OnboardingEnvelope {
   claude_sessions_paths: AnswerFieldBool;
   github: AnswerFieldBool;
   calendar_ics: AnswerFieldBool;
+  /** 2026-08-11 — browser-history pick list. The LLM may
+   *  pre-fill it (e.g. "you have Chrome installed, enable
+   *  chrome_history"); the user can edit it on the Ask
+   *  step. Same `AnswerFieldBool` shape as the other
+   *  data-source rows so the wizard's per-row tooltip
+   *  reasoning keeps working. */
+  browser_history: AnswerFieldBool;
   voice: AnswerFieldVoice;
   review_time: AnswerFieldReviewTime;
   summarizer: AnswerFieldSummarizer;
@@ -251,6 +266,40 @@ export interface StepAskState {
    *  committed to the `answers.calendar_ics` field via
    *  `build_edited_answers`. */
   edit_calendar_source: "event_kit" | "ics";
+  /** Local edit buffer for the Calendar .ics file paths. Only
+   *  shown when `edit_calendar_source === "ics"`. Mirrors the
+   *  `edit_claude_paths` / `edit_github_repos` pattern: a
+   *  newline-separated list rendered as a `<textarea>`. The
+   *  `build_edited_answers` commit reads this into
+   *  `answers.calendar_ics.ics_paths` when the user picks the
+   *  "Custom .ics file" radio. Pre-populated from
+   *  `answers.calendar_ics.ics_paths` (or empty when
+   *  `calendar_ics` is null) so Edit-mode preserves prior edits.
+   *
+   *  2026-08-11 — added to fix the missing-file-picker bug:
+   *  the user picks "Custom .ics file" but there's no input
+   *  to enter the path. The collector previously got an empty
+   *  `ics_paths` list and emitted an empty calendar.json. */
+  edit_ics_paths: string;
+  /** Local edit buffer for the Browser-history pick list
+   *  (mirrors the github row pattern). The user picks one or
+   *  more browser IDs (`chrome`, `brave`, `firefox`,
+   *  `opera`, `safari`) via checkboxes; the rendered list is
+   *  newline-separated. Default: empty (none selected — the
+   *  user must opt in).
+   *
+   *  2026-08-11 — added so the Ask step mirrors the scanner's
+   *  browser-history probes. The scanner now reports
+   *  `chrome_history` / `brave_history` / `firefox_history` /
+   *  `opera_history` / `safari_history` candidates; the Ask
+   *  step lets the user pick which ones to enable. The actual
+   *  data collector is built in a follow-up PR — for now,
+   *  the picker is captured in `answers.browser_history` (a
+   *  `string[]` of browser IDs) and the config writer
+   *  no-ops on it. The PR that builds the collector will
+   *  add the corresponding `BrowserSource` enum on
+   *  `CollectorLaptopConfig`. */
+  edit_browser_history: string;
 }
 
 /** Step 3 (Transport) state. All fields are user-visible
@@ -335,6 +384,10 @@ export const MOCK_ANSWERS: OnboardingAnswers = {
   claude_sessions_paths: ["/Users/test/.claude/projects"],
   github: { enabled: true, repos: [], include_private: false },
   calendar_ics: null,
+  // 2026-08-11 — browser-history picker. Default null in
+  // MOCK so the new "Browser history" row shows the
+  // "disabled" state in tests (no LLM pre-fill).
+  browser_history: null,
   voice: null,
   review_time: { cadence: "evening", hour_utc: 18 },
   summarizer: { backend: "stub", model: "stub" },

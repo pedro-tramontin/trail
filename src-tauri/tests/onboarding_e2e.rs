@@ -63,6 +63,19 @@ fn fixture_envelope() -> serde_json::Value {
             "notes": "",
             "evidence_refs": []
         },
+        // 2026-08-11 (PR #219) — the LLM envelope now
+        // requires a `browser_history` field (it was
+        // added so the Ask step can mirror the
+        // scanner's browser-history probes). The e2e
+        // fixture mirrors the same shape — `selected
+        // = false` (the scan didn't find any browser
+        // candidates; the user can opt in via the
+        // wizard's checkboxes).
+        "browser_history": {
+            "selected": false,
+            "notes": "",
+            "evidence_refs": []
+        },
         "voice": {
             "selected": false,
             "model": "base",
@@ -457,7 +470,21 @@ async fn phase_a_through_phase_d_walkthrough() {
         port,
         user: "vps_user".to_string(),
     };
-    let report_install = trail_lib::install::install_vps_collector(target, true)
+    // 2026-08-11 (PR #219) — `install_vps_collector`
+    // now takes a `tauri::AppHandle` so the real-VPS
+    // branch can resolve the config via `app_config_dir`.
+    // The dry-run branch (which is what this e2e test
+    // exercises) never reads the config — pass a
+    // placeholder temp path. See
+    // `install_vps_collector_inner`'s doc for the
+    // rationale (the inner helper stays
+    // runtime-agnostic).
+    let fake_cfg_path = std::env::temp_dir().join(format!(
+        "trail-e2e-fake-cfg-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let report_install = trail_lib::install::install_vps_collector_inner(&target, true, &fake_cfg_path)
         .await
         .expect("install_vps_collector dry-run should succeed against mock-ssh-server");
     assert!(

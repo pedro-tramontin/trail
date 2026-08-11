@@ -272,14 +272,32 @@ fn greet(name: &str) -> String {
 /// Svelte wizard can render them directly.
 #[tauri::command]
 async fn write_onboarding_config(
+    app: tauri::AppHandle,
     answers: onboarding::OnboardingAnswers,
     ssh_key_generated: bool,
 ) -> Result<String, String> {
     // 1. Convert.
     let cfg = onboarding::config_writer::answers_to_config(&answers, ssh_key_generated);
 
-    // 2. Atomic write to `~/.trail/config.json`.
-    let dest = onboarding::config_writer::config_path();
+    // 2. Resolve the destination via the platform-correct per-app
+    //    config dir (`app_config_dir()`) so the path matches the
+    //    reader (`start_collectors`) and the wizard-gate
+    //    (`config_exists`). Pre-PR bug: we used
+    //    `config_writer::config_path()` which always returns
+    //    `$HOME/.trail/config.json` — that's correct for `cargo
+    //    test` / headless dev but WRONG for a real macOS install,
+    //    where `app_config_dir()` returns
+    //    `~/Library/Application Support/com.<bundle-id>/config.json`.
+    //    The wizard said "Config written to ~/.trail/config.json"
+    //    while the rest of the app looked in
+    //    `~/Library/Application Support/.../config.json`, so the
+    //    user could `cat` the displayed path and find no file,
+    //    and the wizard gate never advanced.
+    let dest = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("resolve app_config_dir: {e}"))?
+        .join("config.json");
     let serialised =
         serde_json::to_string_pretty(&cfg).map_err(|e| format!("serialise config: {e}"))?;
     onboarding::config_writer::write_config(&cfg, &dest)

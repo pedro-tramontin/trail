@@ -205,4 +205,88 @@ describe("StepTransport.svelte", () => {
       user: "pedro",
     });
   });
+
+  // PR #219, 2026-08-11 — "always-editable key" UX.
+  // Pre-PR: Generate + Use existing buttons disappeared
+  // once a key was attached. The user had no way to switch
+  // keys from the same screen. This test asserts the new
+  // contract: both buttons remain visible even after a
+  // key is set, and clicking Use existing overwrites the
+  // current selection with whatever's in the keychain.
+  it("(k) the Generate + Use existing buttons stay visible after a key is attached", async () => {
+    const state = fresh_state();
+    render(StepTransport, { props: { state, on_next: () => {} } });
+    // Pick a key.
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    // Wait for the path to show.
+    await screen.findByTestId("transport-key-path");
+    // The buttons are still present.
+    expect(screen.getByTestId("transport-generate-key")).toBeTruthy();
+    expect(screen.getByTestId("transport-use-existing-key")).toBeTruthy();
+  });
+
+  it("(l) clicking 'Use existing' after a key is already attached overwrites the selection", async () => {
+    const OTHER_PUB = "ssh-ed25519 AAAAC3... OTHER@example.com";
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "generate_ssh_key") return Promise.resolve(MOCK_KEY_PATH);
+      if (cmd === "get_ssh_public_key") return Promise.resolve(OTHER_PUB);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    const state = fresh_state();
+    render(StepTransport, { props: { state, on_next: () => {} } });
+    // Step 1 — generate.
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    await waitFor(() => {
+      let resolved: StepTransportState | undefined;
+      state.subscribe((s) => (resolved = s))();
+      expect(resolved!.ssh_key_path).toBe(MOCK_KEY_PATH);
+    });
+    // Step 2 — switch to "Use existing". The buttons must
+    // still be visible (pre-PR bug: they were gone).
+    await fireEvent.click(screen.getByTestId("transport-use-existing-key"));
+    await waitFor(() => {
+      let resolved: StepTransportState | undefined;
+      state.subscribe((s) => (resolved = s))();
+      expect(resolved!.ssh_key_path).toBe(OTHER_PUB);
+      expect(resolved!.ssh_key_source).toBe("existing");
+    });
+    // The key-path display reflects the new value.
+    const path_el = screen.getByTestId("transport-key-path");
+    expect(path_el.textContent).toContain(OTHER_PUB);
+  });
+
+  it("(m) 'Test connection' is enabled without a key (informational only)", async () => {
+    // PR #219 — pre-PR the Test button was disabled until a
+    // key was attached, which meant the user with no key
+    // couldn't even see the auth-error message. Now the
+    // button is gated on host/user/port only — clicking it
+    // without a key surfaces the backend's auth error
+    // (informative).
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(new Error("no key attached (auth failed)"));
+      }
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    // Fill host + user only (no key).
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "vps.example.com" },
+    });
+    await fireEvent.input(screen.getByTestId("transport-user"), {
+      target: { value: "pedro" },
+    });
+    // The Test button is enabled even with no key.
+    const test = screen.getByTestId("transport-test-connection") as HTMLButtonElement;
+    expect(test.disabled).toBe(false);
+    // Clicking it shows the error from the backend.
+    await fireEvent.click(test);
+    expect(await screen.findByTestId("transport-test-error")).toBeTruthy();
+    // Next stays disabled (no key → can't advance) — this
+    // matches the user's spec: "Next disabled until key
+    // attached; test is informational."
+    expect(
+      (screen.getByTestId("transport-next") as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
 });
