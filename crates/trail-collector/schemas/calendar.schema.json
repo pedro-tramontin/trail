@@ -18,7 +18,6 @@
           "items": {
             "type": "object",
             "required": ["uid", "summary", "start", "duration_minutes", "attendees"],
-            "additionalProperties": false,
             "properties": {
               "uid":              { "type": "string" },
               "summary":          { "type": "string" },
@@ -27,7 +26,19 @@
               "attendees":        { "type": "array", "items": { "type": "string" } },
               "organizer":        { "type": ["string", "null"] },
               "location":         { "type": ["string", "null"] },
-              "notes":            { "type": "string" }
+              "notes":            { "type": ["string", "null"] },
+              "description":      { "type": ["string", "null"] },
+              "comment":          { "type": ["string", "null"] },
+              "x_alt_desc":       { "type": ["string", "null"] },
+              "url":              { "type": ["string", "null"] },
+              "alarms": {
+                "type": ["array", "null"],
+                "items": { "type": "object" }
+              },
+              "recurrence_rules": {
+                "type": ["array", "null"],
+                "items": { "type": "object" }
+              }
             }
           }
         }

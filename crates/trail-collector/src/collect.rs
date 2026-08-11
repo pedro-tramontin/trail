@@ -173,6 +173,7 @@ mod tests {
             calendar_names: None,
             raw_root: tmp.join("raw"),
             schema_path: schema,
+            browser_history: Default::default(),
         }
     }
 

@@ -19,13 +19,18 @@
 // `mod.rs` in the parent `collectors/` module for the migration
 // shim).
 //
-// **Privacy rule (Phase 2 §2.4 / design doc §2):** the synthesizer
-// only emits `uid`, `summary`, `start`, `duration_minutes`,
-// `attendees`, `organizer`, `location`, and (macOS EventKit only,
-// post-anonymize) `notes`. The EventKit reader never asks for
-// `EKEvent.description` / `EKEvent.comments` / `.ics DESCRIPTION` /
-// `.ics COMMENT` / `.ics X-ALT-DESC`. The schema reflects this
-// allowlist.
+// **Privacy posture (post-PR #219 + plan
+// `.hermes/plans/2026-08-11_browser-history-collector.md` §D5):** the
+// synthesizer captures every field the source exposes —
+// `uid`, `summary`, `start`, `duration_minutes`, `attendees`,
+// `organizer`, `location`, `description`, `comment`, `x_alt_desc`,
+// `url`, and the EventKit-only `notes` / `alarms` /
+// `recurrence_rules`. PII scrubbing is the downstream
+// `src-tauri/src/anonymizer.rs::anonymize` pass's job, running on
+// the laptop before the payload reaches the VPS. This matches the
+// new capture-then-anonymize posture the user confirmed for the
+// browser-history collector (same plan §D1) and is the same
+// privacy architecture PR #217 set up for `EKEvent.notes`.
 
 use anyhow::Result;
 
@@ -122,11 +127,18 @@ mod tests {
         assert_eq!(events[1]["duration_minutes"], 30, "16:00–16:30Z = 30 min");
     }
 
-    /// Test 3 — attendees are extracted (multi-property) and the
-    /// privacy rule holds: `DESCRIPTION` content from each event's ICS
-    /// body is NOT present in the resulting JSON.
+    /// Test 3 — attendees are extracted (multi-property). Pre-PR this
+    /// test also asserted the privacy rule (DESCRIPTION bodies not
+    /// captured); per plan §D5 the privacy guarantee moved from the
+    /// capture layer to the downstream LLM anonymizer, so the bodies
+    /// ARE captured here. The new fields (`description`, `comment`,
+    /// `x_alt_desc`, `url`) are checked for being null (no such
+    /// properties in the fixture) or for matching the fixture text
+    /// (when present in the fixture). See the
+    /// `synthesize_captures_description_when_present` test below for
+    /// the positive coverage of the D5 widening.
     #[test]
-    fn synthesize_extracts_attendees_and_does_not_capture_body() {
+    fn synthesize_extracts_attendees_and_widens_to_all_schema_fields() {
         let today = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
         let out = synth_calendar::synthesize(ICS_FIXTURE, today, Utc::now()).unwrap();
         let events = out["events"].as_array().unwrap();
@@ -144,27 +156,67 @@ mod tests {
             "fixture event 2 has 1 attendee"
         );
 
-        // Privacy rule — serialize each event and assert that the bodies
-        // ("Discuss the wizard variants", "Discuss career goals and
-        // feedback") never appear in the raw output, nor do the
-        // case-insensitive substrings of either.
-        let payload_str = serde_json::to_string(&out).unwrap();
-        assert!(
-            !payload_str.contains("Discuss the wizard variants"),
-            "DESCRIPTION body must NOT leak: got {payload_str}"
+        // D5 widening check: every new capture-then-anonymize field
+        // is present (possibly null) on each event so the schema's
+        // optional fields resolve. The fixture's .ics file has no
+        // DESCRIPTION / COMMENT / X-ALT-DESC / URL properties, so
+        // these will all be null — that's the correct behavior, the
+        // absence of a property is `None`.
+        for ev in events {
+            assert!(ev.get("description").is_some(), "description key present");
+            assert!(ev.get("comment").is_some(), "comment key present");
+            assert!(ev.get("x_alt_desc").is_some(), "x_alt_desc key present");
+            assert!(ev.get("url").is_some(), "url key present");
+            assert!(ev.get("notes").is_some(), "notes key present (null for .ics)");
+            assert!(ev.get("alarms").is_some(), "alarms key present (null for .ics)");
+            assert!(
+                ev.get("recurrence_rules").is_some(),
+                "recurrence_rules key present (null for .ics)"
+            );
+        }
+    }
+
+    /// Test 3b (added 2026-08-11, plan §D5) — when a VEVENT has a
+    /// DESCRIPTION / COMMENT / X-ALT-DESC / URL property, the
+    /// synthesizer captures them. The fixture's
+    /// `tests/fixtures/calendar/with_bodies.ics` has all four on one
+    /// event; we assert each captured field matches the source text
+    /// verbatim (the downstream anonymizer is responsible for the
+    /// scrub, the capture layer is byte-faithful).
+    #[test]
+    fn synthesize_captures_description_when_present() {
+        const WITH_BODIES: &str =
+            include_str!("../../../tests/fixtures/calendar/with_bodies.ics");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let out = synth_calendar::synthesize(WITH_BODIES, today, Utc::now()).unwrap();
+        let events = out["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "fixture has one event on 2026-08-15");
+
+        let ev = &events[0];
+        assert_eq!(
+            ev["description"].as_str(),
+            Some("Weekly sync — discuss roadmap and any blockers."),
+            "DESCRIPTION captured verbatim"
         );
-        assert!(
-            !payload_str.contains("Discuss career goals"),
-            "DESCRIPTION body must NOT leak: got {payload_str}"
+        assert_eq!(
+            ev["comment"].as_str(),
+            Some("Moved from Tuesday."),
+            "COMMENT captured verbatim"
         );
-        assert!(
-            !payload_str.to_lowercase().contains("wizard"),
-            "case-insensitive DESCRIPTION leak check: got {payload_str}"
+        assert_eq!(
+            ev["x_alt_desc"].as_str(),
+            Some("HTML alt description for Outlook."),
+            "X-ALT-DESC captured verbatim"
         );
-        assert!(
-            !payload_str.contains("Should not appear"),
-            "filtered event's DESCRIPTION body must NOT appear either: got {payload_str}"
+        assert_eq!(
+            ev["url"].as_str(),
+            Some("https://example.com/event/12345"),
+            "URL captured verbatim"
         );
+        // EventKit-only fields are null on the .ics path.
+        assert!(ev["notes"].is_null());
+        assert!(ev["alarms"].is_null());
+        assert!(ev["recurrence_rules"].is_null());
     }
 
     /// Test 4 — the payload validates against the bundled schema

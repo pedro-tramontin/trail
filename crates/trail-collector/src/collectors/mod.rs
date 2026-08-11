@@ -22,6 +22,16 @@ pub enum Source {
     #[clap(name = "claude-sessions")]
     ClaudeSessions,
     Calendar,
+    /// Browser history (Chrome, Brave, Opera, Firefox, Safari).
+    /// CLI flag is `browser-history`; serde + raw-output use
+    /// `browser_history`. See plan
+    /// `.hermes/plans/2026-08-11_browser-history-collector.md` for
+    /// the architecture. The single collector subprocess reads
+    /// every picked browser (configured via
+    /// `CollectorLaptopConfig::browser_history`) and emits a
+    /// unified `browser_history.json` payload.
+    #[clap(name = "browser-history")]
+    BrowserHistory,
 }
 
 impl Source {
@@ -32,6 +42,7 @@ impl Source {
             Self::Github => "github",
             Self::ClaudeSessions => "claude_sessions",
             Self::Calendar => "calendar",
+            Self::BrowserHistory => "browser_history",
         }
     }
 
@@ -43,6 +54,7 @@ impl Source {
             Self::Github => "github.schema.json",
             Self::ClaudeSessions => "claude_sessions.schema.json",
             Self::Calendar => "calendar.schema.json",
+            Self::BrowserHistory => "browser_history.schema.json",
         }
     }
 
@@ -55,6 +67,7 @@ impl Source {
             "github" => Some(Self::Github),
             "claude_sessions" => Some(Self::ClaudeSessions),
             "calendar" => Some(Self::Calendar),
+            "browser_history" => Some(Self::BrowserHistory),
             _ => None,
         }
     }
@@ -138,6 +151,14 @@ pub struct CollectorLaptopConfig {
     pub calendar_names: Option<Vec<String>>,
     pub raw_root: std::path::PathBuf,
     pub schema_path: std::path::PathBuf,
+    /// Browser-history collector input — which browsers the user
+    /// picked (intersected with the scanner's `Available` set),
+    /// plus the resolved DB paths from the scanner. Set to an
+    /// empty `BrowserHistoryInput` (default) when the source is
+    /// not `BrowserHistory`. See plan
+    /// `.hermes/plans/2026-08-11_browser-history-collector.md`.
+    #[serde(default)]
+    pub browser_history: browser_history::BrowserHistoryInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -155,9 +176,11 @@ pub fn dispatch(cfg: &CollectorLaptopConfig) -> Result<RawOutput> {
         Source::Github => github::run(cfg),
         Source::ClaudeSessions => claude_sessions::run(cfg),
         Source::Calendar => calendar::run(cfg),
+        Source::BrowserHistory => browser_history::run(&cfg.browser_history),
     }
 }
 
+pub mod browser_history;
 pub mod calendar;
 pub mod claude_sessions;
 pub mod github;
@@ -169,6 +192,8 @@ pub mod github;
 // library's public surface.
 #[allow(unused_imports, dead_code)]
 pub(crate) mod synth_calendar;
+#[allow(unused_imports, dead_code)]
+pub(crate) mod synth_browser_history;
 #[allow(unused_imports, dead_code)]
 pub(crate) mod synth_claude;
 #[allow(unused_imports, dead_code)]

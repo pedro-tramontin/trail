@@ -1,0 +1,17 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Fixture//EN
+BEGIN:VEVENT
+UID:with-bodies@trail-fixture
+SUMMARY:Weekly sync
+DTSTART:20260815T100000Z
+DTEND:20260815T103000Z
+DESCRIPTION:Weekly sync — discuss roadmap and any blockers.
+COMMENT:Moved from Tuesday.
+X-ALT-DESC:HTML alt description for Outlook.
+URL:https://example.com/event/12345
+ORGANIZER;CN=Host:mailto:host@example.com
+ATTENDEE;CN=Alice:mailto:alice@example.com
+ATTENDEE;CN=Bob:mailto:bob@example.com
+END:VEVENT
+END:VCALENDAR
