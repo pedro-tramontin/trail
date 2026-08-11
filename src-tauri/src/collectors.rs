@@ -359,12 +359,11 @@ fn find_resources_dir() -> Result<PathBuf> {
 ///
 /// The `calendar_source` field mirrors the collector's
 /// `CalendarSourceChoice` (the lowercase form: `ics` or `event_kit`).
-/// Today the Tauri side only ever emits `ics` because the EventKit
-/// path is a stub on the collector side (see
-/// `crates/trail-collector/src/collectors/calendar/eventkit.rs`).
-/// Once that stub is replaced with a real `EKEventStore` read in
-/// a follow-up commit, the wizard can flip this to `"event_kit"`
-/// on macOS via the Ask step's Calendar-source radio.
+/// On macOS the Tauri side emits `event_kit` when the user picks
+/// Calendar.app in the wizard (the EventKit reader is wired up in
+/// `crates/trail-collector/src/collectors/calendar/eventkit.rs`); on
+/// Linux (or when the user picks the legacy .ics file option) it
+/// emits `ics`.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct LaptopCfg {
     source: String,
@@ -376,7 +375,14 @@ struct LaptopCfg {
     /// `calendar_source == "ics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     calendar_ics: Option<PathBuf>,
+    /// Optional calendar-name filter for the EventKit source.
+    /// `None` ⇒ all calendars the user granted access to. The
+    /// EventKit reader on macOS only (the Ics path ignores it).
+    /// Maps to `CollectorLaptopConfig.calendar_names`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calendar_names: Option<Vec<String>>,
     raw_root: PathBuf,
+    #[serde(skip)]
     schema_path: PathBuf,
 }
 
@@ -421,9 +427,11 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
     // `EventKit { calendars }`; the `as_str` mapping below is the
     // single source of truth for the wire format the collector
     // parses.
-    let (calendar_source_str, calendar_ics_path) = match &cfg.calendar {
-        crate::config::CalendarSource::Ics { path } => ("ics", Some(path.clone())),
-        crate::config::CalendarSource::EventKit { .. } => ("event_kit", None),
+    let (calendar_source_str, calendar_ics_path, calendar_names) = match &cfg.calendar {
+        crate::config::CalendarSource::Ics { path } => ("ics", Some(path.clone()), None),
+        crate::config::CalendarSource::EventKit { calendars } => {
+            ("event_kit", None, calendars.clone())
+        }
     };
     let sources: &[(&str, Vec<PathBuf>, &'static str)] = &[
         ("github", vec![], "github.schema.json"),
@@ -442,6 +450,7 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
                 claude_sessions_paths: paths.clone(),
                 calendar_source: calendar_source_str.to_string(),
                 calendar_ics: calendar_ics_path,
+                calendar_names,
                 raw_root,
                 schema_path: PathBuf::new(),
             };

@@ -127,6 +127,15 @@ pub struct CollectorLaptopConfig {
     /// when the source is `Ics`, so the legacy blob path still
     /// works.
     pub calendar_ics: std::path::PathBuf,
+    /// Optional calendar-name filter for the EventKit source.
+    /// `None` ⇒ all calendars the user granted access to. A
+    /// `Some(vec)` ⇒ only events whose `EKCalendar.title()`
+    /// matches one of the names. Used by `collectors/calendar/eventkit.rs`
+    /// on macOS only; the Ics path ignores it (the .ics
+    /// already contains the calendar name in its `X-WR-CALNAME`
+    /// header).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_names: Option<Vec<String>>,
     pub raw_root: std::path::PathBuf,
     pub schema_path: std::path::PathBuf,
 }

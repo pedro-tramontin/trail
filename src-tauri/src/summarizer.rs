@@ -186,21 +186,26 @@ pub async fn run(
     //    prompt-iteration debugging tractable.
     let by_source: BTreeMap<String, serde_json::Value> = raw_payloads.into_iter().collect();
     let raw_data_json = serde_json::to_string_pretty(&by_source)?;
-    // 2026-08-11 — anonymize the *input* payload too, not just the
-    // model's response. The calendar collector's macOS EventKit
-    // path now includes a `notes` field (per the user decision:
-    // capture notes, run them through anonymize, do NOT exclude).
-    // Without this input-side scrub, a notes string carrying
-    // customer names or healthcare context would land in the
-    // prompt verbatim. The output-side scrub on the LLM response
-    // is unchanged — it scrubs the model's generated text, not
-    // what we fed it. The input-side scrub uses the same
-    // `strictness` + `rules` knobs the user already configured
-    // (no new config field). The serialized JSON is a valid
-    // string for `anonymize` (the regex scrubber matches substrings,
-    // which is what we want for a JSON blob — the JSON syntax
-    // doesn't include any of the company/tool/url/email patterns).
-    let raw_data_json = anonymize(&raw_data_json, strictness, rules);
+    // 2026-08-11 — DO NOT anonymize the *input* payload.
+    // Privacy is enforced by:
+    //   1. The collector-side allowlist (only the schema's
+    //      declared fields are captured; `DESCRIPTION`/`COMMENT`
+    //      /`X-ALT-DESC` and `EKEvent.notes`-too-sensitive are
+    //      never read or are routed through the LLM's own
+    //      judgment).
+    //   2. The *local* LLM (Ollama) is the trusted anonymizer —
+    //      it sees the raw payload and is instructed by the
+    //      system prompt to redact PII (names, emails, phone
+    //      numbers) before emitting the five required sections.
+    //      The summarizer's only post-LLM scrub is the output
+    //      regex pass on `anonymize(&raw_response, ...)`.
+    //   3. The summarizer's output-side `anonymize` catches any
+    //      patterns the LLM failed to redact (defense in depth).
+    // Adding an input-side scrub here would hide content from
+    // the LLM that it might legitimately need (e.g. an
+    // event summary that itself names the people involved),
+    // reducing summary quality without improving privacy —
+    // the LLM already has the raw input.
     // Render the learner bootstrap as a Markdown block. Returns `None`
     // when the file is missing or the rules list is empty; in both
     // cases the placeholder collapses to the empty string, preserving

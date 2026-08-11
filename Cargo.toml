@@ -91,9 +91,11 @@ block2 = "0.6.2"
 # per-crate deps for the rationale). Callers can opt out via
 # `default-features = false` at the per-crate layer.
 objc2-event-kit = { version = "0.3.2", default-features = false, features = [
+    "EKCalendar",
     "EKEvent",
     "EKEventStore",
     "EKObject",
+    "EKParticipant",
     "EKTypes",
 ] }
 
