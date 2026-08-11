@@ -80,6 +80,22 @@ uuid = { version = "1.24.0", features = ["v4"] }
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 block2 = "0.6.2"
+# macOS EventKit binding for the calendar collector's macOS binary
+# build. Pinned to 0.3.2 (the current as of 2026-08-11) which is
+# the series that pairs with `objc2 0.6.x`. The 0.3.x line of
+# `objc2-event-kit` matches the `objc2 0.6.4` + `objc2-foundation
+# 0.3.2` + `block2 0.6.2` stack already pinned at the workspace
+# level. We declare the minimal feature set at the workspace
+# level (so `cargo add` / `cargo update` see the right defaults
+# and we don't pull `objc2-app-kit` transitively — see the
+# per-crate deps for the rationale). Callers can opt out via
+# `default-features = false` at the per-crate layer.
+objc2-event-kit = { version = "0.3.2", default-features = false, features = [
+    "EKEvent",
+    "EKEventStore",
+    "EKObject",
+    "EKTypes",
+] }
 
 [profile.release]
 opt-level = 3

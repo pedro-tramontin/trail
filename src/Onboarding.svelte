@@ -77,25 +77,39 @@
   // for the same reason as step_transport_state — see that
   // block's comment for the Svelte 5.56 deep-reactivity
   // rationale.
+  //
+  // 2026-08-11 — voice defaults flipped to ON + `base.en` per
+  // the user feedback: "it would be nice to have it enabled by
+  // default with the best settings for it." The previous
+  // pre-PR-216 default was `false` (the toggle was opt-in). Now
+  // the wizard starts with voice enabled, the model picker
+  // pre-selected at `base.en` (the "best" v1 default — `tiny.en`
+  // is too lossy for daily summarization, `small.en` is too
+  // slow for an always-on capture loop), and the toggle's
+  // post-edit state is reflected back into the answer
+  // display (see StepAsk.svelte's `editing → Save & continue`
+  // branch).
   const step_ask_state: Writable<StepAskState> = writable({
     editing: false,
     edit_claude_paths: "",
     edit_github_repos: "",
     review_hhmm_local: "18:00",
-    // PR #216 — voice-capture toggle lives in Edit mode.
-    // `false` keeps the pre-PR behavior (LLM-disabled → write
-    // voice=None). The default model matches the fallback in
-    // config_writer.rs so flipping the toggle produces a config
-    // entry that's identical to a hand-edited one.
-    edit_voice_enabled: false,
+    edit_voice_enabled: true,
     edit_voice_model: "base.en",
+    // Calendar source radio. Default `event_kit` on macOS
+    // (the new path), `ics` on Linux (the only path the
+    // collector compiles there). The platform detection
+    // happens client-side via the `tauri-plugin-os` `platform`
+    // value; StepAsk.svelte's `edit_mode` template selects the
+    // matching arm at mount time.
+    edit_calendar_source: "event_kit",
   });
 
   // Step 3 (Transport) — VPS connection details + key
   // material + test-connection transient state. Hoisted so
-  // the user's typed values (and the "key already in
-  // keychain" choice) persist when they navigate back from
-  // step 4 (Install).
+  // the user's typed values (and the "key already in keychain"
+  // choice) persist when they navigate back from step 4
+  // (Install).
   //
   // We use a Svelte writable store here (not a $state object)
   // because Svelte 5's $state proxies are not transparently

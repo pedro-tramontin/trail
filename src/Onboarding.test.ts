@@ -197,6 +197,17 @@ describe("Onboarding.svelte (root)", () => {
       expect.objectContaining({
         answers: expect.objectContaining({
           ...MOCK_ANSWERS,
+          // 2026-08-11 — voice now uses the wizard's default
+          // (enabled: true, base.en, en) instead of the LLM's
+          // `null`. Pre-PR, the LLM's null was the source of
+          // truth and the wizard passed it through. Post-PR,
+          // the wizard applies its default on first render
+          // (see StepAsk.svelte's `run_ask` `with_defaults`).
+          voice: {
+            enabled: true,
+            model: "base.en",
+            language: "en",
+          },
           review_time: {
             ...MOCK_ANSWERS.review_time,
             hour_utc: expected_hour_utc,

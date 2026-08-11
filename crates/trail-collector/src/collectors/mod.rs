@@ -60,6 +60,40 @@ impl Source {
     }
 }
 
+/// The calendar collector's per-invocation choice of data source.
+///
+/// `Ics` reads a `.ics` file path (today's behaviour, also the
+/// macOS fallback when EventKit TCC is denied).
+///
+/// `EventKit` is macOS-only: the collector initialises an
+/// `EKEventStore`, requests full-access to events (Sonoma+), and
+/// enumerates today's events via `predicateForEvents`. The tagged
+/// enum mirrors the on-disk `Config.calendar.kind` field — the
+/// Tauri side serialises one variant, the collector deserialises
+/// the same.
+///
+/// The `EventKit` arm is a no-op on non-macOS targets — the
+/// `calendar` module's `run` only matches the arm behind
+/// `#[cfg(target_os = "macos")]`. A user who picks EventKit on
+/// Linux is rejected at config-validation time before the
+/// collector subprocess even spawns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarSourceChoice {
+    Ics,
+    EventKit,
+}
+
+impl Default for CalendarSourceChoice {
+    /// Default to `Ics` for both Linux (only choice) and macOS
+    /// legacy configs. The wizard flips the macOS default to
+    /// `EventKit` after the user explicitly opts in via the
+    /// Ask step's "Calendar source" radio.
+    fn default() -> Self {
+        Self::Ics
+    }
+}
+
 /// The per-source collector's structured output. Serialized as JSON before
 /// schema validation (and so before write). `Deserialize` lets the on-disk
 /// round-trip in the supervisor test (and is a no-cost derive — payload is
@@ -81,6 +115,17 @@ pub struct CollectorLaptopConfig {
     pub source: Source,
     pub github: GithubLaptopConfig,
     pub claude_sessions_paths: Vec<std::path::PathBuf>,
+    /// Calendar data source choice (Ics file path or macOS EventKit).
+    /// Defaults to `Ics` so legacy `LaptopCfg` blobs that don't carry
+    /// the new field still parse.
+    #[serde(default)]
+    pub calendar_source: CalendarSourceChoice,
+    /// Legacy single-path field, kept for back-compat with
+    /// `LaptopCfg` blobs the Tauri orchestrator wrote before
+    /// `calendar_source` landed. The dispatch in
+    /// `collectors/calendar/mod.rs` always reads `calendar_ics`
+    /// when the source is `Ics`, so the legacy blob path still
+    /// works.
     pub calendar_ics: std::path::PathBuf,
     pub raw_root: std::path::PathBuf,
     pub schema_path: std::path::PathBuf,

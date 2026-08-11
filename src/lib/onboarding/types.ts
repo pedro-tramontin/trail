@@ -225,16 +225,32 @@ export interface StepAskState {
    *  Next (the Rust scheduler parses UTC). */
   review_hhmm_local: string;
   /** Local edit state for the Voice capture checkbox (mirrors the
-   *  github/claude row pattern). Default false preserves the
-   *  pre-PR behavior (LLM-disables → wizard writes voice=None).
-   *  Hoisted so a Back-from-Install round-trip preserves the
-   *  user's choice. */
+   *  github/claude row pattern).
+   *
+   *  2026-08-11 — defaults flipped to `true` per user feedback:
+   *  "it would be nice to have it enabled by default with the
+   *  best settings for it." The model picker pre-selects
+   *  `base.en` (the "best" v1 default — `tiny.en` is too lossy,
+   *  `small.en` is too slow for an always-on capture loop). The
+   *  "Save & continue" path now reflects the post-edit state in
+   *  the answer row (the previous bug was: edit + flip on + Save
+   *  → row still showed "disabled"). */
   edit_voice_enabled: boolean;
   /** Model the user picks on the Voice capture row when in Edit
    *  mode. Defaults match `config_writer.rs` so the on-disk
    *  fallback chain produces the same result whether the LLM
    *  set it or the wizard inferred it. */
   edit_voice_model: string;
+  /** 2026-08-11 — Calendar source radio. `"event_kit"` for the
+   *  macOS Calendar.app path (new in this PR), `"ics"` for the
+   *  legacy `.ics` file path (Linux-only or macOS fallback).
+   *  Default depends on the host platform: `event_kit` on
+   *  macOS, `ics` on Linux. The Onboarding parent component
+   *  picks the default at mount time; StepAsk.svelte's edit
+   *  template binds a radio here. The post-edit state is
+   *  committed to the `answers.calendar_ics` field via
+   *  `build_edited_answers`. */
+  edit_calendar_source: "event_kit" | "ics";
 }
 
 /** Step 3 (Transport) state. All fields are user-visible

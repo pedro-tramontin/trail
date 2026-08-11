@@ -186,6 +186,21 @@ pub async fn run(
     //    prompt-iteration debugging tractable.
     let by_source: BTreeMap<String, serde_json::Value> = raw_payloads.into_iter().collect();
     let raw_data_json = serde_json::to_string_pretty(&by_source)?;
+    // 2026-08-11 — anonymize the *input* payload too, not just the
+    // model's response. The calendar collector's macOS EventKit
+    // path now includes a `notes` field (per the user decision:
+    // capture notes, run them through anonymize, do NOT exclude).
+    // Without this input-side scrub, a notes string carrying
+    // customer names or healthcare context would land in the
+    // prompt verbatim. The output-side scrub on the LLM response
+    // is unchanged — it scrubs the model's generated text, not
+    // what we fed it. The input-side scrub uses the same
+    // `strictness` + `rules` knobs the user already configured
+    // (no new config field). The serialized JSON is a valid
+    // string for `anonymize` (the regex scrubber matches substrings,
+    // which is what we want for a JSON blob — the JSON syntax
+    // doesn't include any of the company/tool/url/email patterns).
+    let raw_data_json = anonymize(&raw_data_json, strictness, rules);
     // Render the learner bootstrap as a Markdown block. Returns `None`
     // when the file is missing or the rules list is empty; in both
     // cases the placeholder collapses to the empty string, preserving

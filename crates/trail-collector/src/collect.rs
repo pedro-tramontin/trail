@@ -168,6 +168,7 @@ mod tests {
                 enabled: true,
             },
             claude_sessions_paths: vec![],
+            calendar_source: crate::collectors::CalendarSourceChoice::Ics,
             calendar_ics: PathBuf::from("/tmp/cal.ics"),
             raw_root: tmp.join("raw"),
             schema_path: schema,

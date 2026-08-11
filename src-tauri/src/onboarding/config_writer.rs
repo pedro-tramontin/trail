@@ -169,18 +169,36 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
         },
     };
 
-    // -------- calendar_ics ----------
-    // The frozen `Config.calendar_ics: PathBuf` is a single path; the
-    // typed onboarding answer carries a `Vec<String> ics_paths` for
-    // v2. We pick the first path (or an empty PathBuf) so the field
-    // stays valid. The new `calendar_paths` extra field carries the
-    // full list for the wizard to render.
-    let calendar_ics_pathbuf = answers
+    // -------- calendar (new) + calendar_ics (legacy shim) ----------
+    // The wizard passes `answers.calendar_ics.ics_paths[0]` as the
+    // `.ics` file path. If the user picked EventKit instead (macOS
+    // + the Ask step's "Calendar source" radio flipped to Calendar.app),
+    // the typed `answers.calendar_ics.kind` is `"event_kit"` and we
+    // emit `CalendarSource::EventKit { calendars: None }`. The legacy
+    // `Config.calendar_ics: Option<PathBuf>` shim field is left
+    // `None` so the round-trip JSON doesn't carry a dead field.
+    let calendar = if answers
         .calendar_ics
         .as_ref()
-        .and_then(|c| c.ics_paths.first().cloned())
-        .map(|s| expand_home(&s))
-        .unwrap_or_default();
+        .map(|c| matches!(c.calendar_app_id.as_deref(), Some("event_kit")))
+        .unwrap_or(false)
+    {
+        crate::config::CalendarSource::EventKit { calendars: None }
+    } else {
+        let path = answers
+            .calendar_ics
+            .as_ref()
+            .and_then(|c| c.ics_paths.first().cloned())
+            .map(|s| expand_home(&s))
+            .unwrap_or_default();
+        crate::config::CalendarSource::Ics { path }
+    };
+    let calendar_ics_shim = match &calendar {
+        crate::config::CalendarSource::Ics { path } if !path.as_os_str().is_empty() => {
+            Some(path.clone())
+        }
+        _ => None,
+    };
 
     // -------- voice ----------
     let voice = match &answers.voice {
@@ -277,7 +295,8 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
     Config {
         claude_sessions_paths,
         github,
-        calendar_ics: calendar_ics_pathbuf,
+        calendar,
+        calendar_ics: calendar_ics_shim,
         voice: voice.clone(),
         review_time,
         summarizer,
@@ -665,7 +684,10 @@ mod tests {
                 mode: "gh_cli".to_string(),
                 host: "github.com".to_string(),
             },
-            calendar_ics: PathBuf::from("/tmp/x.ics"),
+            calendar: crate::config::CalendarSource::Ics {
+                path: PathBuf::from("/tmp/x.ics"),
+            },
+            calendar_ics: Some(PathBuf::from("/tmp/x.ics")),
             voice: CfgVoiceConfig {
                 enabled: false,
                 hotkey: "ctrl+shift+space".to_string(),

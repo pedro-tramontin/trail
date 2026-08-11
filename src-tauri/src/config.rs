@@ -18,7 +18,29 @@ use crate::anonymizer::AnonymizationRule;
 pub struct Config {
     pub claude_sessions_paths: Vec<PathBuf>,
     pub github: GitHubConfig,
-    pub calendar_ics: PathBuf,
+    /// 2026-08-11 — calendar data source choice. The legacy
+    /// `calendar_ics: PathBuf` field is removed from the *type* but
+    /// the on-disk JSON can still carry it: `load_config` reads the
+    /// legacy shape and migrates it to `calendar = { kind: "ics",
+    /// path: ... }` before returning. The migration shim lives
+    /// in `load_config` below.
+    ///
+    /// `#[serde(default)]` keeps backwards-compat with on-disk
+    /// configs that haven't been touched since the PR landed —
+    /// serde will default the field to
+    /// `CalendarSource::default()` (an empty `Ics { path }`) when
+    /// the JSON omits the key, and `load_config`'s shim then
+    /// overwrites with the legacy `calendar_ics` value if the
+    /// shim is also present.
+    #[serde(default)]
+    pub calendar: CalendarSource,
+    /// Legacy `calendar_ics: PathBuf` shim. Optional in serde so
+    /// new configs don't write it. Read by `load_config` on
+    /// legacy blobs and remapped to `calendar` (Ics { path }).
+    /// Never written by `config_writer.rs` — the new field
+    /// `calendar` is the canonical source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_ics: Option<PathBuf>,
     pub voice: VoiceConfig,
     pub review_time: String,
     pub summarizer: SummarizerConfig,
@@ -34,8 +56,8 @@ pub struct Config {
     #[serde(default)]
     pub github_repos: Vec<String>,
     /// Calendar `.ics` file paths the calendar_ics collector should
-    /// watch. Phase C maps the first one to [`Config::calendar_ics`]
-    /// and carries the rest here.
+    /// watch. Phase C maps the first one to [`Config::calendar`]'s
+    /// `Ics { path }` variant and carries the rest here.
     #[serde(default)]
     pub calendar_paths: Vec<String>,
     /// Whisper model id (e.g. `"base.en"`). Mirrors
@@ -59,6 +81,44 @@ pub struct Config {
     /// the password slot.
     #[serde(default)]
     pub ssh_key_path: Option<PathBuf>,
+}
+
+/// The calendar collector's data source. `Ics` is the legacy
+/// `.ics`-file path (always available); `EventKit` is macOS-only
+/// and tells the laptop-side collector to read from Apple Calendar
+/// via the `EventKit.framework`. A user who picks `EventKit` on
+/// Linux (or any non-macOS target) is rejected by the Tauri
+/// side's `Config::validate` before the collector subprocess is
+/// ever spawned — the collector's `run` defensive `unreachable!`
+/// is the last-line guard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CalendarSource {
+    /// Apple Calendar.app via the `EventKit.framework`.
+    /// macOS only. The collector reads the user's calendars
+    /// directly; a TCC prompt is required once per install
+    /// (full-calendar-access on macOS 14+).
+    EventKit {
+        /// Calendars to include, by their `EKCalendar.title`.
+        /// `None` = "all calendars the user can see", which is
+        /// what most users want and is the v1 default.
+        calendars: Option<Vec<String>>,
+    },
+    /// Static `.ics` file path. Used on Linux (Evolution, etc.)
+    /// and as the macOS fallback when the user can't grant TCC.
+    Ics { path: PathBuf },
+}
+
+impl Default for CalendarSource {
+    /// The pre-2026-08-11 default for fresh configs: an empty
+    /// `.ics` path. The wizard's Ask step's first action is to
+    /// overwrite this with the user's real choice (EventKit on
+    /// macOS, Ics on Linux).
+    fn default() -> Self {
+        Self::Ics {
+            path: PathBuf::new(),
+        }
+    }
 }
 
 fn default_voice_language() -> String {
@@ -160,7 +220,34 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
         return Err(ConfigError::NotFound(path.to_path_buf()));
     }
     let contents = std::fs::read_to_string(path)?;
-    let config: Config = serde_json::from_str(&contents)?;
+    // 2026-08-11 — migration shim. The on-disk JSON may carry the
+    // legacy `calendar_ics: PathBuf` field (a flat string) instead
+    // of the new `calendar: { kind: "ics", path: ... }` enum. We
+    // accept both: serde's deserialise into `Config` will leave
+    // `calendar` defaulted (empty `Ics { path: "" }`) and the
+    // `calendar_ics` shim field populated with the legacy string.
+    // After deserialise, we read the shim, override `calendar` if
+    // the shim is set, and return. New configs (the wizard
+    // rewrites the file via `config_writer.rs`) populate `calendar`
+    // directly; the shim is `skip_serializing_if = "Option::is_none"`
+    // so it's never re-written. The migration runs in
+    // O(file-size) per load — no real cost.
+    let mut config: Config = serde_json::from_str(&contents)?;
+    if let Some(legacy_path) = config.calendar_ics.take() {
+        // `ref path` borrows the inner PathBuf instead of moving
+        // it, so the `matches!` guard below doesn't trigger
+        // E0382 (partial move) when we also need to read
+        // `config.calendar` again on the `Ok(config)` line.
+        if matches!(&config.calendar, CalendarSource::Ics { ref path } if path.as_os_str().is_empty())
+        {
+            config.calendar = CalendarSource::Ics { path: legacy_path };
+        }
+        // else: the new `calendar` field is already populated with
+        // a real value (e.g. an EventKit choice), and the legacy
+        // `calendar_ics` field is just leftover from a pre-PR
+        // wizard that didn't strip it. Drop it without overwriting
+        // the new field.
+    }
     Ok(config)
 }
 
@@ -193,6 +280,15 @@ mod tests {
         let cfg = load_config(f.path()).unwrap();
         assert_eq!(cfg.review_time, "18:00");
         assert_eq!(cfg.raw_retention_days, 7);
+        // 2026-08-11 — the legacy `calendar_ics` field is migrated
+        // to `CalendarSource::Ics { path }` by `load_config`.
+        assert_eq!(
+            cfg.calendar,
+            CalendarSource::Ics {
+                path: PathBuf::from("~/Library/Calendars/work.ics"),
+            }
+        );
+        assert!(cfg.calendar_ics.is_none(), "shim field is cleared post-migration");
         match &cfg.transport {
             TransportConfig::Ssh {
                 host,

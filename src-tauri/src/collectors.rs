@@ -107,7 +107,7 @@ impl CollectorOrchestrator {
             "claude_sessions".into(),
             mk(!cfg.claude_sessions_paths.is_empty()),
         );
-        toggles.insert("calendar".into(), mk(cfg.calendar_ics.exists()));
+        toggles.insert("calendar".into(), mk(calendar_collector_enabled(cfg)));
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 config_path,
@@ -356,14 +356,43 @@ fn find_resources_dir() -> Result<PathBuf> {
 /// a local struct so the Tauri side can evolve independently of the
 /// collector (and so we don't pull `trail-collector` in as a runtime
 /// dep — it's an external process).
+///
+/// The `calendar_source` field mirrors the collector's
+/// `CalendarSourceChoice` (the lowercase form: `ics` or `event_kit`).
+/// Today the Tauri side only ever emits `ics` because the EventKit
+/// path is a stub on the collector side (see
+/// `crates/trail-collector/src/collectors/calendar/eventkit.rs`).
+/// Once that stub is replaced with a real `EKEventStore` read in
+/// a follow-up commit, the wizard can flip this to `"event_kit"`
+/// on macOS via the Ask step's Calendar-source radio.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct LaptopCfg {
     source: String,
     github: GithubLaptopCfg,
     claude_sessions_paths: Vec<PathBuf>,
-    calendar_ics: PathBuf,
+    calendar_source: String, // "ics" or "event_kit" — mirrors CalendarSourceChoice
+    /// Legacy single-path field, kept for back-compat with older
+    /// `LaptopCfg` blobs. The collector still reads it when
+    /// `calendar_source == "ics"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calendar_ics: Option<PathBuf>,
     raw_root: PathBuf,
     schema_path: PathBuf,
+}
+
+/// True when the calendar collector should appear enabled in the
+/// Settings UI's per-source toggles. The collector is considered
+/// "enabled" when the user has picked ANY calendar source
+/// (EventKit on macOS, or a non-empty `.ics` path) — the
+/// collector will fail at run-time if the source is misconfigured
+/// (e.g. a stale `.ics` path), and the Settings UI shows the
+/// error from the last run. The toggle is about "did the user
+/// express a preference", not "is the current config valid".
+fn calendar_collector_enabled(cfg: &Config) -> bool {
+    match &cfg.calendar {
+        crate::config::CalendarSource::EventKit { .. } => true,
+        crate::config::CalendarSource::Ics { path } => !path.as_os_str().is_empty(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -387,6 +416,15 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
     )
     .join(".trail")
     .join("raw");
+    // The collector expects lowercase `"ics"` / `"event_kit"`. The
+    // Tauri config enum is `CalendarSource::Ics { path }` /
+    // `EventKit { calendars }`; the `as_str` mapping below is the
+    // single source of truth for the wire format the collector
+    // parses.
+    let (calendar_source_str, calendar_ics_path) = match &cfg.calendar {
+        crate::config::CalendarSource::Ics { path } => ("ics", Some(path.clone())),
+        crate::config::CalendarSource::EventKit { .. } => ("event_kit", None),
+    };
     let sources: &[(&str, Vec<PathBuf>, &'static str)] = &[
         ("github", vec![], "github.schema.json"),
         (
@@ -402,7 +440,8 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
                 source: (*name).to_string(),
                 github: gh,
                 claude_sessions_paths: paths.clone(),
-                calendar_ics: cfg.calendar_ics.clone(),
+                calendar_source: calendar_source_str.to_string(),
+                calendar_ics: calendar_ics_path,
                 raw_root,
                 schema_path: PathBuf::new(),
             };
@@ -433,7 +472,10 @@ mod tests {
                 mode: "gh_cli".into(),
                 host: "github.com".into(),
             },
-            calendar_ics: tmp.join("cal.ics"),
+            calendar: crate::config::CalendarSource::Ics {
+                path: tmp.join("cal.ics"),
+            },
+            calendar_ics: Some(tmp.join("cal.ics")),
             voice: VoiceConfig {
                 enabled: true,
                 hotkey: "ctrl+shift+space".into(),
