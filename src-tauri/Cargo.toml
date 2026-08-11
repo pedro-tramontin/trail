@@ -100,6 +100,17 @@ global-hotkey = { workspace = true }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 block2 = { workspace = true }
+# 2026-08-11 — macOS EventKit for the calendar collector. The
+# `objc2-event-kit` 0.3.x series pairs with `objc2 0.6.4`. The
+# minimal feature set (`EKEvent` / `EKEventStore` / `EKObject` /
+# `EKTypes`) keeps us off `objc2-app-kit` (which would force
+# AppKit on the collector subprocess) and is the surface the
+# calendar reader needs. The workspace dep already declares
+# `default-features = false`; we re-declare it here for
+# explicitness — Cargo would otherwise warn that the per-crate
+# `default-features` is "ignored" because the workspace version
+# already provides one.
+objc2-event-kit = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

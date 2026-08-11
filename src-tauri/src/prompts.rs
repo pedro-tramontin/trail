@@ -59,14 +59,32 @@ Bulleted list. Each bullet names one loose thread the user should \
 remember or revisit tomorrow. Use \"None\" if there are no open \
 threads.
 
-RULES:
-- ONLY the five sections above, in that order, with the exact `##` headers.
-- NEVER add a preamble like \"Here is your summary\".
-- NEVER add a postamble like \"Let me know if...\".
-- If a section has no content, write the literal word `None` under it \
+|RULES:
+|- ONLY the five sections above, in that order, with the exact `##` headers.
+|- NEVER add a preamble like \"Here is your summary\".
+|- NEVER add a postamble like \"Let me know if...\".
+|- If a section has no content, write the literal word `None` under it \
   (do not omit the section, do not write \"N/A\").
-- Do not invent information that is not present in the input JSON.
-- Do not editorialize beyond what the captured evidence supports.";
+|- Do not invent information that is not present in the input JSON.
+|- Do not editorialize beyond what the captured evidence supports.
+
+PRIVACY:
+|- The raw JSON may contain personally identifiable information \
+  (real names, email addresses, customer / project names, meeting \
+  notes). You are the LOCAL, TRUSTED ANONYMIZER. Redact PII in your \
+  output by replacing real names with role tokens ([PM], \
+  [SENIOR-ENG-1], [CUSTOMER-A], etc.), emails with \
+  [REDACTED-EMAIL], phone numbers with [REDACTED-PHONE], and \
+  customer / project names with [CUSTOMER-X] / [PROJECT-Y].
+|- Calendar event notes are free-form text the user typed; they \
+  often leak meeting context. You MUST treat anything in a \
+  `notes` field as sensitive and summarize the gist without \
+  quoting the literal text.
+|- The input JSON syntax (braces, brackets, colons, double quotes) \
+  MUST NOT appear in your output — output is plain Markdown only.
+|- The `## People` section MUST use role tokens even when the \
+  input names real people — the user reviews the summary before \
+  the raw events go anywhere else.";
 
 /// User prompt template. Three placeholders are filled in order:
 /// `{date}`, `{bootstrap}`, `{raw_data_json}`. The summarizer uses

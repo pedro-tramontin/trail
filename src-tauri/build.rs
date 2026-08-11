@@ -27,6 +27,13 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=CoreMedia");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        // 2026-08-11 — EventKit for the calendar collector. The
+        // `EKEventStore` class lives in `EventKit.framework`; the
+        // macOS build of `trail-collector` resolves the same
+        // framework link (the binary inherits the link list from
+        // the parent crate's build.rs because we `link` it from
+        // `src-tauri/Cargo.toml`'s target-conditional deps).
+        println!("cargo:rustc-link-lib=framework=EventKit");
     }
 
     // Resolve the workspace root by walking up from CARGO_MANIFEST_DIR

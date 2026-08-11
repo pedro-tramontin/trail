@@ -182,6 +182,7 @@ mod tests {
             "claude_sessions_paths": [],
             "github": {"mode": "gh_cli", "host": "github.com"},
             "calendar_ics": "/nonexistent.ics",
+            "calendar": {"kind": "ics", "path": "/nonexistent.ics"},
             "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
             "review_time": "18:00",
             "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},

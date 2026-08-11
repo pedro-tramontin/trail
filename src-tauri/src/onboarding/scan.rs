@@ -399,9 +399,96 @@ fn scan_github(home: &Path, _platform: &Platform) -> CollectorCandidate {
 /// saved-state files. Linux fallback: `~/.config/evolution/` or
 /// `~/.local/share/evolution/` (GNOME Evolution). On other OSes we
 /// report Unavailable with a `notes` explaining the platform skip.
+///
+/// 2026-08-11 — added the EventKit TCC probe (when the
+/// `calendar_event_kit_tcc` feature is enabled, macOS only).
+/// The probe calls `EKEventStore.authorizationStatusForEntityType`
+/// to read the current TCC state without prompting. We
+/// return `Available` with strong evidence on
+/// `EKAuthorizationStatusFullAccess` (Sonoma+), `Available`
+/// with a "Run the wizard" note on `.notDetermined` (the
+/// user hasn't seen the TCC dialog yet), and `Unavailable`
+/// with a "denied" note on `.denied` /
+/// `.writeOnlyAccessDenied` / `.restricted`. The probe is
+/// the authoritative answer; the saved-state and
+/// Calendar.app bundle probes are the fallbacks when
+/// EventKit is not available (or the user is on Linux).
 fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
     match platform {
         Platform::Macos => {
+            // 2026-08-11 — prefer the EventKit TCC probe when
+            // it's available. The probe reads
+            // `EKEventStore.authorizationStatusForEntityType`
+            // which does NOT trigger a TCC dialog (it's
+            // read-only). The returned `EKAuthorizationStatus`
+            // is the same value the wizard reads later, so
+            // the scan and the wizard agree on the user's
+            // permission state.
+            //
+            // The probe + enum are `#[cfg(target_os = "macos")]`-gated
+            // — on Linux the function is absent entirely, so
+            // this branch is also `#[cfg]`-gated. The dispatch
+            // for Linux is the existing evolution path below.
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(tcc_state) = calendar_eventkit_tcc_status() {
+                    match tcc_state {
+                        CalendarEventKitTcc::FullAccess => {
+                            return finalize(
+                                "calendar",
+                                "Calendar events",
+                                CollectorStatus::Available,
+                                EvidenceKind::MacosAppBundle {
+                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    bundle_id: "com.apple.iCal".to_string(),
+                                },
+                                Some(
+                                    "EventKit full-calendar access granted; \
+                                     Calendar.app is ready to read"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                        CalendarEventKitTcc::NotDetermined => {
+                            return finalize(
+                                "calendar",
+                                "Calendar events",
+                                CollectorStatus::Available,
+                                EvidenceKind::MacosAppBundle {
+                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    bundle_id: "com.apple.iCal".to_string(),
+                                },
+                                Some(
+                                    "EventKit permission not yet requested; \
+                                     run the wizard to enable Calendar \
+                                     capture (System Settings → Privacy \
+                                     → Calendars)"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                        CalendarEventKitTcc::Denied => {
+                            return finalize(
+                                "calendar",
+                                "Calendar events",
+                                CollectorStatus::Unavailable,
+                                EvidenceKind::FileExists { path: PathBuf::new() },
+                                Some(
+                                    "EventKit access denied. Open System \
+                                     Settings → Privacy & Security → \
+                                     Calendars and grant Trail full access"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            // Fallback: the saved-state probe. The
+            // `~/Library/Calendars/Calendar.savedState`
+            // directory only exists after Calendar.app has
+            // been launched at least once, so a fresh
+            // install may legitimately not have it.
             let saved = home
                 .join("Library")
                 .join("Calendars")
@@ -471,6 +558,94 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
             unavailable_evidence(),
             Some(format!("calendar collector not yet supported on {os}")),
         ),
+    }
+}
+
+/// The tri-state answer the EventKit TCC probe returns. Mirrors
+/// `EKAuthorizationStatus` from the EventKit framework. The
+/// values are documented in Apple's
+/// `EKAuthorizationStatus` enum reference.
+///
+/// The enum is `#[cfg(target_os = "macos")]`-gated along with
+/// the probe function. The call site (`scan_calendar`)
+/// pattern-matches on the probe's return type which is
+/// `Option<CalendarEventKitTcc>` only on macOS — on Linux the
+/// function is absent entirely (the dispatch in
+/// `scan_calendar` is `#[cfg]`'d accordingly). See
+/// `calendar_eventkit_tcc_status` below for the macOS-side
+/// implementation.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalendarEventKitTcc {
+    /// `.fullAccess` (Sonoma+) or legacy `.authorized`.
+    /// The collector can read all events.
+    FullAccess,
+    /// `.notDetermined`. The user has never seen the TCC
+    /// dialog. The wizard's first capture will trigger it.
+    NotDetermined,
+    /// `.denied` / `.writeOnlyAccessDenied` / `.restricted`.
+    /// The collector cannot read events; the user must
+    /// change System Settings.
+    Denied,
+}
+
+/// Read-only EventKit TCC probe. Returns `None` when EventKit
+/// is not available (non-macOS, or the objc2 binding isn't
+/// compiled in) so the caller can fall through to the
+/// filesystem-based probes. The probe does NOT prompt the
+/// user — `authorizationStatusForEntityType:` is a cheap
+/// read-only TCC query.
+///
+/// `#[cfg(target_os = "macos")]` gates the function and the
+/// return-type enum together. On non-macOS targets, the
+/// function is `unreachable!()` (the call site in
+/// `scan_calendar` is also `#[cfg]`-gated, so this branch
+/// is dead code at runtime). The `Option<CalendarEventKitTcc>`
+/// signature on the non-macOS arm intentionally fails to
+/// compile — it's a phantom that catches any future
+/// refactor that tries to call the probe from a non-macOS
+/// call site.
+#[cfg(target_os = "macos")]
+fn calendar_eventkit_tcc_status() -> Option<CalendarEventKitTcc> {
+    // The TCC probe lives in `voice/permission.rs` (a sibling
+    // module) — the same `objc2` + `EKEventStore` plumbing
+    // applies here. We re-implement the probe inline (rather
+    // than refactoring `voice/permission.rs` into a generic
+    // "macOS TCC probe" helper) because the surface is small
+    // and the two callers have different enum mappings.
+    use objc2::{class, msg_send};
+    use objc2_event_kit::EKAuthorizationStatus;
+    unsafe {
+        // `EKEventStore` is registered at process load (it's
+        // a class in `EventKit.framework`, linked via the
+        // crate's Cargo.toml + build.rs). The `class!` macro
+        // returns a non-null `&'static AnyClass` — objc2 0.6
+        // dropped the typed wrapper's `is_null` method, so we
+        // rely on the macro's invariant. Same convention as
+        // `voice/permission.rs::authorization_status`.
+        // `+authorizationStatusForEntityType:` is a class
+        // method that returns `EKAuthorizationStatus`
+        // (an NSInteger enum). The argument is the entity
+        // type — `.event` (value 0) for calendars. objc2
+        // exposes the constants as associated constants on
+        // `EKAuthorizationStatus` (`FullAccess`, `Denied`,
+        // etc., each of which is `Self(N)` for the historical
+        // Apple enum value). We pattern-match the `status`
+        // value directly — no inner-construction needed.
+        let status: EKAuthorizationStatus =
+            msg_send![class!(EKEventStore), authorizationStatusForEntityType: 0isize];
+        match status {
+            // `Authorized` is deprecated and an alias for
+            // `FullAccess` (`Self = Self(FullAccess.0)` per
+            // objc2-event-kit 0.3.2's EKTypes.rs), so we don't
+            // need a separate arm — `FullAccess` covers both.
+            EKAuthorizationStatus::FullAccess => Some(CalendarEventKitTcc::FullAccess),
+            EKAuthorizationStatus::NotDetermined => Some(CalendarEventKitTcc::NotDetermined),
+            EKAuthorizationStatus::Denied
+            | EKAuthorizationStatus::Restricted
+            | EKAuthorizationStatus::WriteOnly => Some(CalendarEventKitTcc::Denied),
+            _ => None,
+        }
     }
 }
 
@@ -925,6 +1100,7 @@ mod tests {
                 "claude_sessions_paths": [],
                 "github": {"mode":"gh_cli","host":"github.com"},
                 "calendar_ics":"x",
+                "calendar":{"kind":"ics","path":"x"},
                 "voice":{"enabled":false,"hotkey":"x","transcriber":"x","model":"x"},
                 "review_time":"18:00",
                 "summarizer":{"model":"x","model_provider":"local","anonymization_strictness":"aggressive","use_generic_categories":false},

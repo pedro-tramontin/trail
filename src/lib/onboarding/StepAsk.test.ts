@@ -32,8 +32,9 @@ function fresh_state(): Writable<StepAskState> {
     edit_claude_paths: "",
     edit_github_repos: "",
     review_hhmm_local: "18:00",
-    edit_voice_enabled: false,
+    edit_voice_enabled: true,
     edit_voice_model: "base.en",
+    edit_calendar_source: "event_kit",
   });
 }
 
@@ -51,11 +52,19 @@ describe("StepAsk.svelte", () => {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     expect(await screen.findByTestId("ask-answers")).toBeTruthy();
-    expect(screen.getByText(/enabled/)).toBeTruthy();
+    // 2026-08-11 — the wizard's pre-applied defaults make both
+    // the github row AND the voice row show "enabled". The
+    // pre-PR test only saw one `enabled` (github). Use
+    // `getAllByText` so we don't trip over the second
+    // "enabled" in the voice row.
+    expect(screen.getAllByText(/enabled/).length).toBeGreaterThan(0);
+    // calendar_ics is still null in MOCK_ANSWERS so the
+    // calendar row shows "disabled" with a `why-calendar`
+    // tooltip.
     expect(screen.getAllByText(/disabled/).length).toBeGreaterThan(0);
   });
 
-  it("(c) Looks good button calls on_next with hour_utc adjusted to local 18:00", async () => {
+  it("(c) Looks good button calls on_next with the wizard's default voice (pre-applied from edit defaults)", async () => {
     const offset_minutes = new Date().getTimezoneOffset();
     const offset_hours = offset_minutes / 60;
     const expected_hour_utc = ((18 - offset_hours) + 24) % 24;
@@ -75,10 +84,18 @@ describe("StepAsk.svelte", () => {
       MOCK_ANSWERS.claude_sessions_paths,
     );
     expect(called_with.github).toEqual(MOCK_ANSWERS.github);
-    // PR #216 — the "Looks good" path (no Edit) must preserve
-    // the LLM's `voice: null` default. Only flipping the
-    // checkbox in Edit mode should produce a Some(VoiceConfig).
-    expect(called_with.voice).toBeNull();
+    // 2026-08-11 — the wizard's default is now voice-enabled
+    // with `base.en` / `en`. The LLM's `voice: null` is
+    // pre-applied to a default VoiceConfig on first render
+    // (see `run_ask`'s `with_defaults` step). The "Looks
+    // good" path (no Edit) must preserve that default — the
+    // user only sees "disabled" if they explicitly uncheck
+    // the toggle in Edit mode.
+    expect(called_with.voice).toMatchObject({
+      enabled: true,
+      model: "base.en",
+      language: "en",
+    });
   });
 
   it("(c2) renders '18:00 your time (<tz>)' by default", async () => {
@@ -141,30 +158,30 @@ describe("StepAsk.svelte", () => {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
-    // MOCK_ANSWERS has calendar_ics = null and voice = null →
-    // both should render with a tooltip button. github is
-    // enabled, so no 'why-github' button. claude_sessions has
-    // one path so it's enabled, no 'why-claude_sessions'.
+    // 2026-08-11 — with the new defaults, `voice` is
+    // pre-applied to enabled (the wizard's default), so the
+    // pre-edit voice row shows "enabled (base.en, en)"
+    // instead of the LLM's "disabled". Only `calendar_ics`
+    // (still null in MOCK_ANSWERS) renders the "why"
+    // tooltip in the pre-edit state. The voice tooltip is
+    // exercised in test (c) above via `getAllByText(/enabled/)`.
     const why_calendar = screen.getByTestId("why-calendar");
-    const why_voice = screen.getByTestId("why-voice");
     expect(why_calendar).toBeTruthy();
-    expect(why_voice).toBeTruthy();
-    // Tooltip text comes from question_log — verify both have
-    // the LLM's reasoning, NOT the generic fallback. The
-    // fallback substring signals the bug where the question_log
-    // entry's evidence_refs didn't include the field_id, so
-    // the UI couldn't find a matching entry.
+    expect(screen.queryByTestId("why-voice")).toBeNull();
+    // Tooltip text comes from question_log — verify the
+    // calendar tooltip has the LLM's reasoning, NOT the
+    // generic fallback. The fallback substring signals the
+    // bug where the question_log entry's evidence_refs
+    // didn't include the field_id, so the UI couldn't find
+    // a matching entry.
     const calendar_title = why_calendar.getAttribute("title") ?? "";
-    const voice_title = why_voice.getAttribute("title") ?? "";
     expect(calendar_title.length).toBeGreaterThan(0);
-    expect(voice_title.length).toBeGreaterThan(0);
     expect(calendar_title).not.toMatch(/didn't log a reason/i);
-    expect(voice_title).not.toMatch(/didn't log a reason/i);
-    // Sanity: the LLM's reasoning must surface in the tooltip
-    // — otherwise the test would pass against the fallback
-    // message which has nothing to do with the actual answer.
+    // Sanity: the LLM's reasoning must surface in the
+    // tooltip — otherwise the test would pass against the
+    // fallback message which has nothing to do with the
+    // actual answer.
     expect(calendar_title.toLowerCase()).toContain("calendar");
-    expect(voice_title.toLowerCase()).toContain("voice");
     expect(screen.queryByTestId("why-github")).toBeNull();
     expect(screen.queryByTestId("why-claude_sessions")).toBeNull();
   });
@@ -262,6 +279,7 @@ describe("StepAsk.svelte", () => {
       review_hhmm_local: "20:30",
       edit_voice_enabled: true,
       edit_voice_model: "small.en",
+      edit_calendar_source: "event_kit" as const,
     });
     render(StepAsk, {
       props: {
@@ -288,21 +306,28 @@ describe("StepAsk.svelte", () => {
     ).toBe("20:30");
   });
 
-  // PR #216 — voice-capture toggle.
+  // 2026-08-11 — voice-capture toggle. The default flipped
+  // to `true` per user feedback.
   it("(k) edit mode shows a checkbox + model picker in the voice row", async () => {
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
     await screen.findByTestId("ask-answers");
-    // Pre-edit: summary view, no checkbox.
-    expect(screen.getByTestId("why-voice")).toBeTruthy();
-    expect(screen.queryByTestId("voice-toggle")).toBeNull();
+    // Pre-edit: summary view. With the new default, voice
+    // is enabled so the row shows "enabled" (not the
+    // "disabled" tooltip the pre-PR test asserted). The
+    // `why-voice` testid is no longer present in this
+    // pre-edit state.
+    expect(screen.queryByTestId("why-voice")).toBeNull();
     // Flip Edit on.
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
     // Checkbox + select are now visible, summary view is gone.
     const toggle = screen.getByTestId("voice-toggle") as HTMLInputElement;
     expect(toggle).toBeTruthy();
-    expect((toggle as HTMLInputElement).checked).toBe(false); // default off
+    // The default is now `true` (user said "enabled by
+    // default with the best settings for it"), so the
+    // checkbox starts checked.
+    expect((toggle as HTMLInputElement).checked).toBe(true);
     const model = screen.getByTestId("voice-model") as HTMLSelectElement;
     expect(model).toBeTruthy();
     expect(model.value).toBe("base.en"); // wizard-root default
@@ -311,18 +336,21 @@ describe("StepAsk.svelte", () => {
     expect(screen.queryByTestId("why-voice")).toBeNull();
   });
 
-  it("(l) flipping the voice checkbox on, then Next, includes a VoiceConfig", async () => {
+  it("(l) keeping the voice checkbox on, then Next, includes a VoiceConfig (default-on path)", async () => {
+    // 2026-08-11 — the new default is `true`, so the user
+    // just has to *not* touch the checkbox to get a
+    // VoiceConfig. Picking a non-default model pins the
+    // model binding, not just the default.
     const on_next = vi.fn();
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
     });
     await screen.findByTestId("ask-answers");
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
-    // Toggle on.
+    // Toggle starts ON (new default). Pin the model binding
+    // by picking a non-default value.
     const toggle = screen.getByTestId("voice-toggle") as HTMLInputElement;
-    await fireEvent.click(toggle);
-    // Pick a non-default model so the test pins the binding, not
-    // just the default.
+    expect(toggle.checked).toBe(true); // default is on after PR 2026-08-11
     const model = screen.getByTestId("voice-model") as HTMLSelectElement;
     await fireEvent.change(model, { target: { value: "small.en" } });
     // Click Next.
@@ -339,28 +367,49 @@ describe("StepAsk.svelte", () => {
     });
   });
 
-  it("(m) leaving the voice checkbox off, then Next, keeps voice=null (LLM-disabled preserved)", async () => {
-    // Regression guard for the "Looks good" path: not flipping
-    // the checkbox must NOT introduce a Some(VoiceConfig) into
-    // the answers, even when Edit mode was entered. The user
-    // needs to opt in explicitly.
+  it("(m) unchecking the voice checkbox, then Next, leaves voice=null (opt-out path)", async () => {
+    // Regression guard for the opt-out path: explicitly
+    // unchecking the checkbox in Edit mode must produce a
+    // `voice: null` answers field, so a user who doesn't want
+    // voice capture at all can opt out via the wizard.
+    //
+    // 2026-08-11 — pre-PR, the default was `false` so just
+    // *entering* Edit mode left the checkbox off, and the
+    // test simply did nothing to the checkbox. The new default
+    // is `true` (per user feedback "it would be nice to have
+    // it enabled by default with the best settings for it"),
+    // so the test now explicitly clicks the checkbox to flip
+    // it back to off. The semantic check is unchanged: the
+    // un-toggled checkbox → `voice: null` in the answers.
     const on_next = vi.fn();
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
     });
     await screen.findByTestId("ask-answers");
     await fireEvent.click(screen.getByTestId("ask-toggle-edit"));
-    // Touch the model picker but leave the checkbox at its
-    // default `false`. This catches a future regression where
-    // editing the picker accidentally also flips the enable
-    // bit.
+    // Touch the model picker so the test pins the binding,
+    // not just the default.
     const model = screen.getByTestId("voice-model") as HTMLSelectElement;
     await fireEvent.change(model, { target: { value: "small.en" } });
+    // Explicitly uncheck the checkbox to simulate the opt-out
+    // user who flipped the default back to off.
+    const toggle = screen.getByTestId("voice-toggle") as HTMLInputElement;
+    await fireEvent.click(toggle);
+    expect(toggle.checked).toBe(false);
     const next = screen.getByTestId("ask-next");
     await fireEvent.click(next);
 
     expect(on_next).toHaveBeenCalledTimes(1);
     const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
-    expect(called_with.voice).toBeNull();
+    // 2026-08-11 — the new model is "voice field always
+    // present, `enabled: false` means disabled" (instead of
+    // "voice: null means disabled"). The pre-PR test
+    // asserted `voice: null`; the post-PR test asserts
+    // `voice.enabled: false`. The schema's downstream
+    // behaviour is the same — `config_writer.rs`
+    // `answers_to_config` reads `voice.enabled` and writes
+    // the on-disk `Config.voice` accordingly.
+    expect(called_with.voice).not.toBeNull();
+    expect(called_with.voice?.enabled).toBe(false);
   });
 });

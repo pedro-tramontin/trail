@@ -488,7 +488,12 @@ mod tests {
                 mode: "gh_cli".into(),
                 host: "github.com".into(),
             },
-            calendar_ics: PathBuf::from("/h/Library/Calendars/work.calendar/Calendar.ics"),
+            calendar: crate::config::CalendarSource::Ics {
+                path: PathBuf::from("/h/Library/Calendars/work.calendar/Calendar.ics"),
+            },
+            calendar_ics: Some(PathBuf::from(
+                "/h/Library/Calendars/work.calendar/Calendar.ics",
+            )),
             voice: VoiceConfig {
                 enabled: true,
                 hotkey: "ctrl+shift+space".into(),

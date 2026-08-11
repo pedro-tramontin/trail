@@ -35,6 +35,31 @@ chrono = { workspace = true }
 walkdir = { workspace = true }
 icalendar = { workspace = true }
 
+# macOS-only target-conditional deps. The same story as the
+# `src-tauri` crate: `objc2` / `objc2-foundation` / `block2` are the
+# 2026-current macOS binding stack, and `objc2-event-kit` (with
+# `default-features = false` + the `EKEvent` / `EKEventStore` /
+# `EKObject` / `EKTypes` feature set) gives us EventKit access
+# without dragging `objc2-app-kit` (and the AppKit dependency it
+# pulls in) into the statically-linked musl build. The
+# non-macOS branch in `collectors/calendar/ical.rs` is the only
+# `calendar::run` path that compiles on Linux.
+#
+# Why this is target-conditional and not always-built: the
+# `block2` crate transitively links CoreFoundation, which is
+# macOS-only; turning it on unconditionally would break the
+# Linux build. The `default-features = false` on
+# `objc2-event-kit` is the additional hardening that keeps AppKit
+# out of the macOS collector binary (AppKit needs NSApplication
+# runloop plumbing that the headless collector subprocess does
+# not provide — see `crates/trail-collector/src/collectors/
+# calendar/eventkit.rs`'s stub note for the long version).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+block2 = { workspace = true }
+objc2-event-kit = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

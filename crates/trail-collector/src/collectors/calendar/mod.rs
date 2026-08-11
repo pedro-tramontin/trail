@@ -1,67 +1,88 @@
 // SPDX-License-Identifier: MIT
 //
-// calendar.rs — the `calendar` collector entry point + its 4 spec tests.
+// calendar/mod.rs — the `calendar` collector entry point + the
+// platform dispatch (EventKit on macOS, `.ics` file parser on Linux +
+// macOS fallback). Submodule split:
 //
-// Phase 2 §2.4. Owns the I/O (reading the configured `.ics` file from
-// disk); the pure ICS→payload transform lives in `synth_calendar.rs`
-// next door so the synthesis step is unit-testable without any on-disk
-// fixtures. The collector stays sync (a few ms for a personal calendar
-// export); the Tauri orchestrator (§2.5) wraps it in
-// `tokio::process::Command` if it needs to invoke this from an async
-// context.
+//   * `ical`    — `.ics` file parser. Used on Linux (the VPS-shipped
+//                 musl build) and as the macOS fallback when the
+//                 user can't grant TCC to EventKit. Always compiles.
+//   * `eventkit` — `EventKit.framework` reader via `objc2-event-kit`.
+//                 macOS only. Gated to `target_os = "macos"` so the
+//                 musl cross-compile never sees the `objc2-event-kit`
+//                 dependency (which transitively links AppKit).
 //
-// **Path discovery:** the orchestrator reads
-// `~/.trail/config.json::calendar_ics` and threads the path through
-// `CollectorLaptopConfig.calendar_ics`. If the file doesn't exist, this
-// collector bails with a clear error — the supervisor turns that into a
-// non-zero exit and the Settings UI (§2.6) shows the missing-path state.
+// The top-level `run` function dispatches to `ical::run` on non-macOS
+// and the chosen source on macOS. The dispatch decision reads
+// `CollectorLaptopConfig.calendar_source` (the `CalendarSourceChoice`
+// tagged enum lives in `super` and lands in this same PR — see
+// `mod.rs` in the parent `collectors/` module for the migration
+// shim).
 //
 // **Privacy rule (Phase 2 §2.4 / design doc §2):** the synthesizer
-// only emits `uid`, `summary`, `start`, `duration_minutes`, `attendees`,
-// `organizer`, `location`. `DESCRIPTION`, `COMMENT`, and `X-ALT-DESC`
-// are NEVER captured — calendar event bodies frequently leak meeting
-// context, customer names, or healthcare details. See
-// `synth_calendar.rs` for the allowlist tokenizer.
+// only emits `uid`, `summary`, `start`, `duration_minutes`,
+// `attendees`, `organizer`, `location`, and (macOS EventKit only,
+// post-anonymize) `notes`. The EventKit reader never asks for
+// `EKEvent.description` / `EKEvent.comments` / `.ics DESCRIPTION` /
+// `.ics COMMENT` / `.ics X-ALT-DESC`. The schema reflects this
+// allowlist.
 
-use super::synth_calendar;
+use anyhow::Result;
+
 use super::{CollectorLaptopConfig, RawOutput};
-use anyhow::{Context, Result};
-use chrono::{Local, Utc};
 
-/// Top-level entry: read the configured `.ics`, extract today's
-/// events, return the supervisor-validated envelope.
+pub mod ical;
+#[cfg(target_os = "macos")]
+pub mod eventkit;
+
+/// Top-level entry: dispatch to the active source's backend. On macOS
+/// the source may be `EventKit` (live read) or `Ics` (file path). On
+/// Linux (and other non-macOS targets) only `Ics` is supported — the
+/// supervisor turns a `EventKit` choice on Linux into a
+/// config-validation error before reaching here.
 ///
-/// Bails with a clear error if the file isn't present (a fresh
-/// laptop without a Calendar export configured will see this).
+/// `calendar_source` is a re-export of the `CalendarSourceChoice`
+/// enum from `super` so call sites in `dispatch` (the parent
+/// `collectors/mod.rs`) can stay agnostic to the calendar-specific
+/// type.
 pub fn run(cfg: &CollectorLaptopConfig) -> Result<RawOutput> {
-    let path = &cfg.calendar_ics;
-    if !path.exists() {
-        anyhow::bail!("calendar .ics not found at {}", path.display());
+    match cfg.calendar_source {
+        super::CalendarSourceChoice::Ics => ical::run(cfg),
+        #[cfg(target_os = "macos")]
+        super::CalendarSourceChoice::EventKit => eventkit::run(cfg),
+        // The non-macOS arm. The `Config::validate` path on the Tauri
+        // side rejects a Linux user who picked EventKit before this
+        // collector is ever spawned, so the `unreachable!` is
+        // defensive — if it ever fires, a misconfigured Tauri side
+        // has been updated to allow EventKit on Linux. The
+        // `#[allow(unreachable_patterns)]` is the matching arm's
+        // permission to be present (it's a no-op on macOS, where
+        // the `#[cfg]` arm above covers the variant).
+        #[cfg(not(target_os = "macos"))]
+        super::CalendarSourceChoice::EventKit => {
+            unreachable!(
+                "Config::validate on the Tauri side must reject `EventKit` \
+                 on non-macOS before the collector subprocess is spawned. \
+                 If this is reached, the validation gate regressed."
+            )
+        }
     }
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let now = Utc::now();
-    let today = Local::now().date_naive();
-    let payload =
-        synth_calendar::synthesize(&text, today, now).context("synthesizing calendar payload")?;
-    Ok(RawOutput {
-        source: "calendar".to_string(),
-        captured_at: now,
-        date: today,
-        payload,
-    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::NaiveDate;
+    use super::super::synth_calendar;
+    use chrono::{NaiveDate, Utc};
     use serde_json::Value;
 
     // Fixtures and the bundled schema are read at compile time; the
-    // non-test build carries no fixture bytes.
-    const SCHEMA: &str = include_str!("../../schemas/calendar.schema.json");
-    const ICS_FIXTURE: &str = include_str!("../../tests/fixtures/calendar/workday.ics");
+    // non-test build carries no fixture bytes. The path is one
+    // directory deeper than the old `collectors/calendar.rs` file —
+    // we walk `../../../` (up out of `calendar/`, out of
+    // `collectors/`, out of `src/`) before dropping into `schemas/`
+    // and `tests/fixtures/`.
+    const SCHEMA: &str = include_str!("../../../schemas/calendar.schema.json");
+    const ICS_FIXTURE: &str = include_str!("../../../tests/fixtures/calendar/workday.ics");
 
     /// Test 1 — today-only filter. The fixture has three events: two on
     /// 2026-07-31 and one on 2026-07-25. Calling `synthesize` with a
@@ -148,7 +169,7 @@ mod tests {
 
     /// Test 4 — the payload validates against the bundled schema
     /// (Draft 2020-12). This is the same shape the supervisor's
-    /// compile_schema will check at runtime; if it passes here, the
+    /// `compile_schema` will check at runtime; if it passes here, the
     /// `run()` → `RawOutput` → schema round-trip is honest.
     #[test]
     fn synthesize_payload_validates_against_schema() {

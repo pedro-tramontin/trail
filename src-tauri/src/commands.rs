@@ -404,7 +404,7 @@ mod tests {
         let json = r#"{
             "claude_sessions_paths": [],
             "github": {"mode": "gh_cli", "host": "x"},
-            "calendar_ics": "x",
+            "calendar": {"kind": "ics", "path": "x"},
             "voice": {"enabled": false, "hotkey": "x", "transcriber": "x", "model": "x"},
             "review_time": "18:00",
             "summarizer": {"model": "x", "model_provider": "x", "anonymization_strictness": "x", "use_generic_categories": false},

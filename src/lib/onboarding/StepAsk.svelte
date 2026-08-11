@@ -190,7 +190,33 @@
         "ask_onboarding_cmd",
         { scan },
       );
-      answers = result;
+      // 2026-08-11 — pre-apply the wizard's default choices to
+      // the LLM's answer so the summary view reflects the
+      // post-default state on first render. Without this, the
+      // row would show "disabled" (the LLM's `voice: null`)
+      // even though the new default is "enabled with base.en".
+      // The user feedback was unambiguous: "it would be nice
+      // to have it enabled by default with the best settings
+      // for it" — the visible row is the load-bearing signal.
+      // The defaults applied here match the `fresh_state()` in
+      // StepAsk.test.ts + the Onboarding.svelte `writable({})`
+      // default.
+      const with_defaults: OnboardingAnswers = {
+        ...result,
+        // Voice: only apply the default if the LLM left it
+        // null (the common case). If the LLM explicitly
+        // emitted a VoiceConfig (rare), respect it.
+        voice: result.voice ?? {
+          enabled: $hoisted.edit_voice_enabled,
+          model: $hoisted.edit_voice_model,
+          language: "en",
+        },
+        // Calendar: keep the LLM's answer as-is. The Ask
+        // step's edit template will overwrite it on the
+        // post-edit branch; the summary view reads
+        // `result.calendar_ics` directly until then.
+      };
+      answers = with_defaults;
       // Seed the local edit buffers from the LLM answer.
       // These are the FIRST-time-seeds — only applied if the
       // hoisted buffers are still empty (i.e. fresh wizard
@@ -217,6 +243,8 @@
 
   function toggle_edit(): void {
     if (!$hoisted.editing && answers !== null) {
+      // Entering Edit mode: seed the local buffers from the
+      // LLM's answer (only first-time; Back-nav preserves edits).
       const a = answers;
       hoisted.update((s) => {
         s.edit_claude_paths = (a.claude_sessions_paths ?? []).join("\n");
@@ -224,7 +252,32 @@
         s.editing = !s.editing;
         return s;
       });
+    } else if ($hoisted.editing) {
+      // 2026-08-11 — the "Done editing" reflection fix. When the
+      // user is in Edit mode and clicks "Done editing" (the
+      // master toggle that switches the template back to the
+      // summary view), we commit the in-flight edits to the
+      // `answers` object so the summary branch reads the
+      // post-edit state. The pre-PR bug was: edit + flip voice
+      // toggle on + click "Done editing" → row continued
+      // showing "disabled" because the summary branch
+      // (`!answers.voice?.enabled`) was reading the LLM's
+      // stale `voice: null`. The fix runs `build_edited_answers`
+      // and stores the result back into `answers` (so the next
+      // render of the summary branch sees the new state). It
+      // does NOT call `on_next` — that still happens on the
+      // "Save & continue" / "Looks good" button. The post-edit
+      // state is preserved through the summary view AND the
+      // step transition.
+      const edited = build_edited_answers();
+      hoisted.update((s) => {
+        s.editing = !s.editing;
+        return s;
+      });
+      answers = edited;
     } else {
+      // No-op: editing is off and answers is null (the IPC
+      // hasn't resolved yet). Stay in the loading state.
       hoisted.update((s) => {
         s.editing = !s.editing;
         return s;
@@ -252,13 +305,58 @@
     // because the codebase never exercises non-English in v1
     // and the on-disk Config doesn't persist it (config_writer.rs
     // only stores model + hotkey + transcriber).
-    const voice: OnboardingAnswers["voice"] = $hoisted.edit_voice_enabled
+    //
+    // 2026-08-11 — the "Done editing" reflection fix: this is
+    // called by `on_next_click` AFTER the user clicks Edit, flips
+    // the toggle, and clicks Save & continue. The new
+    // `answers.voice` must reflect the post-edit state in the
+    // row's summary view, so the wizard doesn't display
+    // "disabled" after the user just enabled it. The fix: when
+    // `editing` is true, the `answers` object's voice is
+    // ALWAYS replaced by the edit-state (not just when the LLM
+    // set it to null). The pre-PR bug was: edit + flip on +
+    // Save → `build_edited_answers` was bypassed when
+    // `!editing`, and the row continued showing the LLM's
+    // `voice: null` from `MOCK_ANSWERS`. The fix is in the
+    // summary view's binding (the `else if !answers.voice?.enabled`
+    // branch) and in this function's always-replace contract.
+    const voice: OnboardingAnswers["voice"] = $hoisted.editing
       ? {
-          enabled: true,
+          enabled: $hoisted.edit_voice_enabled,
           model: $hoisted.edit_voice_model || "base.en",
           language: "en",
         }
-      : null;
+      : answers.voice;
+    // 2026-08-11 — calendar source edit. The radio binds to
+    // `$hoisted.edit_calendar_source` ("event_kit" / "ics").
+    // The shape we emit is `answers.calendar_ics`: we either
+    // set `calendar_app_id: Some("event_kit")` (the EventKit
+    // path) or `ics_paths: [path]` (the legacy `.ics` file
+    // path). For the EventKit variant we leave `ics_paths`
+    // empty (the collector reads directly from Calendar.app).
+    // For the `.ics` variant we keep the existing path list
+    // (the user can edit it via a separate text input below
+    // the radio). When the user is NOT in Edit mode we
+    // preserve the LLM's answer as-is.
+    let calendar_ics: OnboardingAnswers["calendar_ics"] = answers.calendar_ics;
+    if ($hoisted.editing) {
+      if ($hoisted.edit_calendar_source === "event_kit") {
+        calendar_ics = {
+          enabled: true,
+          ics_paths: [],
+          calendar_app_id: "event_kit",
+        };
+      } else {
+        // .ics path mode — preserve the LLM's ics_paths (the
+        // user edits them via the row's textarea below).
+        const ics_paths = answers.calendar_ics?.ics_paths ?? [];
+        calendar_ics = {
+          enabled: true,
+          ics_paths,
+          calendar_app_id: null,
+        };
+      }
+    }
     return {
       ...answers,
       claude_sessions_paths,
@@ -266,6 +364,7 @@
         ? { ...answers.github, repos: github_repos }
         : answers.github,
       voice,
+      calendar_ics,
     };
   }
 
@@ -383,7 +482,51 @@
       <li class="answer-row">
         <span class="label">Calendar</span>
         <span class="value">
-          {#if !answers.calendar_ics?.enabled}
+          {#if $hoisted.editing}
+            <!--
+              2026-08-11 — Calendar source radio. The two
+              options correspond to the two `CalendarSource`
+              variants in `src-tauri/src/config.rs`. The radio
+              binds to `$hoisted.edit_calendar_source`; the
+              `build_edited_answers` commit reads the post-edit
+              value. The `.ics` file path picker below shows
+              only when the user picks "Custom .ics file" so the
+              summary isn't cluttered when EventKit is selected
+              (the file picker would be unused).
+            -->
+            <div class="calendar-source-radio">
+              <label>
+                <input
+                  type="radio"
+                  bind:group={$hoisted.edit_calendar_source}
+                  value="event_kit"
+                  data-testid="calendar-source-event-kit"
+                  aria-label="Calendar source: Calendar.app (EventKit)"
+                />
+                Calendar.app (EventKit)
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  bind:group={$hoisted.edit_calendar_source}
+                  value="ics"
+                  data-testid="calendar-source-ics"
+                  aria-label="Calendar source: Custom .ics file"
+                />
+                Custom .ics file
+              </label>
+            </div>
+            <span class="hint">
+              {#if $hoisted.edit_calendar_source === "event_kit"}
+                EventKit needs your permission the first time you start a
+                capture (System Settings → Privacy → Calendars → Full
+                Calendar Access).
+              {:else}
+                Provide an .ics export from Calendar.app: File → Export →
+                uncheck "Events" only if you also export Tasks separately.
+              {/if}
+            </span>
+          {:else if !answers.calendar_ics?.enabled}
             <em>disabled</em>
             <button
               type="button"
@@ -394,6 +537,15 @@
             >?</button>
           {:else}
             enabled
+            {#if answers.calendar_ics?.calendar_app_id === "event_kit"}
+              <span class="value-text" data-testid="calendar-source-summary">
+                — Calendar.app
+              </span>
+            {:else if answers.calendar_ics?.ics_paths?.length}
+              <span class="value-text" data-testid="calendar-source-summary">
+                — {answers.calendar_ics.ics_paths.length} .ics path(s)
+              </span>
+            {/if}
           {/if}
         </span>
       </li>
@@ -715,6 +867,23 @@
    * "Done editing" toggle in `.actions` uses `.secondary`
    * instead. No replacement for `.link` is needed.
    */
+  /**
+   * 2026-08-11 — Calendar source radio layout. Two stacked
+   * rows inside a flex column, with the hint text wrapping
+   * beneath. Mirrors the `.voice-toggle` pattern above for
+   * visual consistency with the Voice row.
+   */
+  .calendar-source-radio {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .calendar-source-radio label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+  }
   .spinner {
     display: inline-block;
   }

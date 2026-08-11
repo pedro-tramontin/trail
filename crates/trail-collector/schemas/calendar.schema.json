@@ -26,7 +26,8 @@
               "duration_minutes": { "type": "integer", "minimum": 0 },
               "attendees":        { "type": "array", "items": { "type": "string" } },
               "organizer":        { "type": ["string", "null"] },
-              "location":         { "type": ["string", "null"] }
+              "location":         { "type": ["string", "null"] },
+              "notes":            { "type": "string" }
             }
           }
         }

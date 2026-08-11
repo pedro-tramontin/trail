@@ -56,6 +56,19 @@ fn main() {
         // runtime is baked into the binary. Cargo forwards link-arg
         // additions verbatim to the linker.
         println!("cargo:rustc-link-arg=-static");
+    } else if target_os == "macos" {
+        // 2026-08-11 — when the collector is built as a macOS
+        // binary (developer laptop or CI), link EventKit.framework
+        // so the `objc2-event-kit` bindings can resolve
+        // `EKEventStore` + the related C symbols at link time.
+        // The `EventKit` link is a no-op on the Linux musl target
+        // above (no macOS frameworks on Linux) so the line lives
+        // only on this branch. The same line is added to
+        // `src-tauri/build.rs` for the parent Tauri binary; the
+        // collector and the parent each need their own because
+        // they're separate crates and Cargo doesn't share build
+        // script output between crates.
+        println!("cargo:rustc-link-lib=framework=EventKit");
     } else {
         // Not the musl target — most likely the developer is running
         // `cargo build` on their own host (Linux gnu, macOS, etc.).
