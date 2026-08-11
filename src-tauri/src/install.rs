@@ -84,13 +84,18 @@ pub fn collector_script_path() -> PathBuf {
 /// a misleading "file not found" error from
 /// `crate::config::load_config`.
 pub fn user_config_path(app: &tauri::AppHandle) -> PathBuf {
+    // 2026-08-11 (PR #219) — clippy::useless_conversion fires
+    // if we re-wrap `std::env::var_os("HOME")` (an `OsString`
+    // option) in `PathBuf::from` and then unwrap a default
+    // `PathBuf` — the `.map` closure already produces a
+    // `PathBuf`, so the second `PathBuf::from` is
+    // redundant. Collapse the chain: build the home `OsString`
+    // first, then map to `PathBuf` once.
+    let fallback_home = std::env::var_os("HOME")
+        .unwrap_or_else(|| std::ffi::OsString::from("/tmp"));
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
-        ).join(".trail"))
+        .unwrap_or_else(|_| PathBuf::from(fallback_home).join(".trail"))
         .join("config.json")
 }
 
