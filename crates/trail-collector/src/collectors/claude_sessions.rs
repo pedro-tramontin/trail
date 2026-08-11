@@ -337,6 +337,7 @@ mod tests {
             calendar_names: None,
             raw_root: PathBuf::from("/tmp/raw"),
             schema_path: PathBuf::from("/tmp/schema.json"),
+            browser_history: Default::default(),
         };
         let raw = run(&cfg).expect("run with empty paths must succeed");
         assert_eq!(raw.source, "claude_sessions");

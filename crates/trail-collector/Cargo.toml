@@ -34,6 +34,18 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 icalendar = { workspace = true }
+rusqlite = { workspace = true }
+# `tempfile` is needed at runtime by the browser-history readers
+# (they copy locked browser SQLite DBs to a temp file before
+# opening them — plan
+# `.hermes/plans/2026-08-11_browser-history-collector.md` §D2). It
+# remains in `[dev-dependencies]` too because unit tests use it
+# for fixture directory creation; pinning it here as a regular
+# dependency is fine — it adds ~zero to the binary size, the
+# crate is `no_std`-friendly, and avoiding the prod-vs-dev split
+# prevents a single-crate path that would otherwise need both
+# `cfg(test)` and runtime builds.
+tempfile = { workspace = true }
 
 # macOS-only target-conditional deps. The same story as the
 # `src-tauri` crate: `objc2` / `objc2-foundation` / `block2` are the

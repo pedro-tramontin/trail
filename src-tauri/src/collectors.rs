@@ -384,6 +384,34 @@ struct LaptopCfg {
     raw_root: PathBuf,
     #[serde(skip)]
     schema_path: PathBuf,
+    /// 2026-08-11 (PR #221): browser-history subprocess input. The
+    /// supervisor populates this from
+    /// `cfg.browser_history.browsers` (the user's wizard pick
+    /// intersected with the scanner's `Available` set) plus
+    /// `cfg.browser_history.db_paths` (the scanner's per-browser
+    /// evidence paths). Empty list = subprocess emits an empty
+    /// envelope. Matches `CollectorLaptopConfig.browser_history`
+    /// (which is `BrowserHistoryInput`).
+    #[serde(default)]
+    browser_history: LaptopBrowserHistoryInput,
+}
+
+/// 2026-08-11 (PR #221): subprocess-side mirror of
+/// `crate::config::BrowserHistoryConfig`. Kept as a separate
+/// struct (rather than reusing the Tauri-side one) so the wire
+/// format the subprocess consumes is independent of the Tauri
+/// `Config`'s evolution.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+struct LaptopBrowserHistoryInput {
+    enabled_browsers: Vec<String>, // lowercase strings the subprocess's `Browser` enum deserializes
+    db_paths: Vec<LaptopBrowserDbPath>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct LaptopBrowserDbPath {
+    browser: String,
+    path: PathBuf,
+    profile: String,
 }
 
 /// True when the calendar collector should appear enabled in the
@@ -441,7 +469,31 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
             "claude_sessions.schema.json",
         ),
         ("calendar", vec![], "calendar.schema.json"),
+        ("browser_history", vec![], "browser_history.schema.json"),
     ];
+    // 2026-08-11 (PR #221): map the typed `Config.browser_history`
+    // onto the subprocess-side `LaptopBrowserHistoryInput`. Both
+    // lists are read from the same `Config` field so a user who's
+    // picked Chrome only gets Chrome in the subprocess too —
+    // there's no "default-to-all-browsers" surprise.
+    let laptop_browser_history = LaptopBrowserHistoryInput {
+        enabled_browsers: cfg
+            .browser_history
+            .browsers
+            .iter()
+            .map(|b| b.as_str().to_string())
+            .collect(),
+        db_paths: cfg
+            .browser_history
+            .db_paths
+            .iter()
+            .map(|p| LaptopBrowserDbPath {
+                browser: p.browser.as_str().to_string(),
+                path: p.path.clone(),
+                profile: p.profile.clone(),
+            })
+            .collect(),
+    };
     for (name, paths, schema) in sources {
         if *name == source {
             let laptop = LaptopCfg {
@@ -453,6 +505,7 @@ fn build_laptop_cfg(source: &str, cfg: &Config) -> Result<(LaptopCfg, &'static s
                 calendar_names,
                 raw_root,
                 schema_path: PathBuf::new(),
+                browser_history: laptop_browser_history.clone(),
             };
             return Ok((laptop, *schema));
         }
@@ -517,6 +570,7 @@ mod tests {
             summarizer_backend: "ollama".into(),
             transport_method: "ssh".into(),
             ssh_key_path: None,
+            browser_history: Default::default(),
         }
     }
 

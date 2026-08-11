@@ -81,6 +81,75 @@ pub struct Config {
     /// the password slot.
     #[serde(default)]
     pub ssh_key_path: Option<PathBuf>,
+    /// 2026-08-11 (PR #221, plan §browser-history): browser-history
+    /// configuration. Carries the user's browser pick (set by the
+    /// wizard's StepAsk row) intersected with the scanner's
+    /// `Available` set. Empty `browsers` = "no browsing captured
+    /// today" — the collector subprocess still runs and emits an
+    /// empty envelope so the daily review prompt can render
+    /// "no browsing captured today".
+    ///
+    /// `#[serde(default)]` keeps backwards-compat with on-disk
+    /// configs that haven't been touched since PR #219.
+    #[serde(default)]
+    pub browser_history: BrowserHistoryConfig,
+}
+
+/// 2026-08-11 (PR #221): what the laptop-side supervisor passes
+/// to the browser-history collector subprocess. Mirrors the
+/// calendar `CalendarSource` shape — the wizard's
+/// `answers.browser_history` is intersected with the scanner's
+/// `Available` set during config-write, then this typed struct
+/// is what the supervisor reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrowserHistoryConfig {
+    /// Browsers the user picked AND the scanner confirmed
+    /// available. Drives which per-browser reader runs in the
+    /// collector subprocess. Empty = nothing to capture (the
+    /// subprocess still emits an empty envelope).
+    pub browsers: Vec<BrowserKind>,
+    /// The supervisor fills these from the scanner's
+    /// `evidence.path` field for each picked browser. The
+    /// collector subprocess opens each path read-only via the
+    /// copy-to-temp + read-only-open pattern (plan §D2).
+    #[serde(default)]
+    pub db_paths: Vec<BrowserDbPath>,
+}
+
+/// 2026-08-11 (PR #221): the laptop-side `BrowserKind` enum
+/// mirrors the collector subprocess's `Browser` (in
+/// `crates/trail-collector/src/collectors/synth_browser_history`)
+/// and is serialised as the lowercase string form for the on-disk
+/// JSON. The scanner in `src-tauri/src/onboarding/scan.rs` emits
+/// `BrowserKind`; the config-writer in
+/// `src-tauri/src/onboarding/config_writer.rs` reads it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserKind {
+    Chrome,
+    Brave,
+    Opera,
+    Firefox,
+    Safari,
+}
+
+impl BrowserKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chrome => "chrome",
+            Self::Brave => "brave",
+            Self::Opera => "opera",
+            Self::Firefox => "firefox",
+            Self::Safari => "safari",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserDbPath {
+    pub browser: BrowserKind,
+    pub path: PathBuf,
+    pub profile: String,
 }
 
 /// The calendar collector's data source. `Ics` is the legacy

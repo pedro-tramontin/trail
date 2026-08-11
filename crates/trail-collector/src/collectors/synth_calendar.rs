@@ -6,13 +6,18 @@
 //! keeps the supervisor (`collect.rs`) honest: validation runs against the
 //! transformed output, never raw `.ics` bytes.
 //!
-//! **Privacy rule (Phase 2 §2.4, design doc §2):** capture only `UID`,
-//! `SUMMARY`, `DTSTART`, `DTEND`, `ATTENDEE` (× N), `ORGANIZER`, and
-//! `LOCATION` from each `VEVENT`. Do NOT capture `DESCRIPTION`,
-//! `COMMENT`, or `X-ALT-DESC` — calendar event bodies leak meeting
-//! context, customer names, healthcare details, etc. The tokenizer is
-//! deliberately conservative: it stops at the line-level and only
-//! surfaces the keys the schema declares.
+//! **Privacy posture (post-PR #219 + plan
+//! `.hermes/plans/2026-08-11_browser-history-collector.md` §D5):** the
+//! synthesizer captures every field the source exposes —
+//! `UID`, `SUMMARY`, `DTSTART`, `DTEND`, `ATTENDEE` (× N), `ORGANIZER`,
+//! `LOCATION`, `DESCRIPTION`, `COMMENT`, `X-ALT-DESC`, and the
+//! EventKit-only `notes` / `url` / `alarms` / `recurrence_rules`.
+//! PII scrubbing is the downstream `src-tauri/src/anonymizer.rs::anonymize`
+//! pass's job, running on the laptop before the payload reaches the
+//! VPS. This matches the new capture-then-anonymize posture the
+//! user confirmed for the browser-history collector (same plan §D1)
+//! and is the same privacy architecture PR #217 set up for
+//! `EKEvent.notes`.
 //!
 //! **Library note:** `icalendar = "0.7"` is the Phase 2 workspace-root
 //! dep, but `icalendar` 0.7.x is a *builder* library — it has no
@@ -21,7 +26,7 @@
 //! plan's pseudocode (`ics_text.parse()` + `event.get_start()` etc.)
 //! references APIs that don't exist in 0.7. Rather than swap out the
 //! spec's pinned dep, this module rolls a slim line-based ICS
-//! tokenizer that extracts exactly the seven fields above. The
+//! tokenizer that extracts every ICS field the schema declares. The
 //! `icalendar` crate remains in `[workspace.dependencies]` so the
 //! Phase 2 dep manifest is satisfied; the synthesis layer is the
 //! single seam where the actual ICS bytes become a payload.
@@ -104,12 +109,39 @@ pub fn synthesize(ics_text: &str, today: NaiveDate, _now: DateTime<Utc>) -> Resu
             .map(String::from);
         let location = vevent.get("LOCATION").map(|v| v.as_str()).map(String::from);
 
+        // Capture-then-anonymize fields. See module-level doc comment
+        // + plan §D5 for the rationale. `description` / `comment` /
+        // `x_alt_desc` were previously dropped at parse time per the
+        // Phase 2 §2.4 privacy rule; user confirmed (2026-08-11) the
+        // downstream LLM anonymizer is the right place for PII
+        // scrubbing, not the capture layer. `notes` is set by the
+        // EventKit path (not the .ics path); the .ics source has no
+        // such field so this is `None`.
+        let description = vevent
+            .get("DESCRIPTION")
+            .map(|v| v.as_str())
+            .map(String::from);
+        let comment = vevent
+            .get("COMMENT")
+            .map(|v| v.as_str())
+            .map(String::from);
+        let x_alt_desc = vevent
+            .get("X-ALT-DESC")
+            .map(|v| v.as_str())
+            .map(String::from);
+        let url = vevent.get("URL").map(|v| v.as_str()).map(String::from);
+
         // ATTENDEE is multi-valued: each ATTENDEE line is its own entry.
         // We collect every line whose key (case-insensitive exact-match
         // per RFC 5545) equals "ATTENDEE" — see the `raw_attendees`
         // capture in `parse_vevents` below.
         let attendees: Vec<String> = vevent.extra_attendees.iter().map(String::from).collect();
 
+        // EventKit-only fields (notes / alarms / recurrence_rules) are
+        // `None` for the .ics path; the EventKit path populates them
+        // before handing the row to `synthesize`. The schema
+        // declares all three as `["string"|"array", "null"]` so
+        // `None` is valid.
         events.push(serde_json::json!({
             "uid":              uid,
             "summary":          summary,
@@ -118,6 +150,13 @@ pub fn synthesize(ics_text: &str, today: NaiveDate, _now: DateTime<Utc>) -> Resu
             "attendees":        attendees,
             "organizer":        organizer,
             "location":         location,
+            "notes":            serde_json::Value::Null,
+            "description":      description,
+            "comment":          comment,
+            "x_alt_desc":       x_alt_desc,
+            "url":              url,
+            "alarms":           serde_json::Value::Null,
+            "recurrence_rules": serde_json::Value::Null,
         }));
     }
 
@@ -153,14 +192,15 @@ impl std::ops::Deref for VeventProps {
 
 /// Tokenize the ICS text into a list of `VEVENT` property maps. The
 /// tokenizer is line-based and case-insensitive on keys. Keys are
-/// stored UPPERCASE. We deliberately ignore everything outside a
-/// `VEVENT` block, and inside a `VEVENT` we ignore every line whose
-/// key isn't in our allowlist — DESCRIPTION / COMMENT / X-ALT-DESC
-/// are never read. Parameter handling: we keep the value verbatim
-/// after the `:` (the default RFC 5545 separator); the line folding
-/// escape sequences `\\n`, `\\,`, `\\;` are NOT decoded (the fixture
-/// uses none of these for the captured fields, and decoding can lose
-/// information).
+/// stored UPPERCASE. Per plan §D5 we capture every field the schema
+/// declares — pre-PR the allowlist was conservative (DESCRIPTION/
+/// COMMENT / X-ALT-DESC were deliberately dropped); the user
+/// confirmed 2026-08-11 that PII scrubbing belongs at the downstream
+/// LLM anonymizer, not at parse time. Parameter handling: we keep
+/// the value verbatim after the `:` (the default RFC 5545
+/// separator); the line folding escape sequences `\\n`, `\\,`, `\\;`
+/// are NOT decoded (the fixture uses none of these for the captured
+/// fields, and decoding can lose information).
 fn parse_vevents(ics_text: &str) -> Vec<VeventProps> {
     let mut events: Vec<VeventProps> = Vec::new();
     let mut current: Option<VeventProps> = None;
@@ -172,6 +212,10 @@ fn parse_vevents(ics_text: &str) -> Vec<VeventProps> {
         "ORGANIZER",
         "LOCATION",
         "ATTENDEE",
+        "DESCRIPTION",
+        "COMMENT",
+        "X-ALT-DESC",
+        "URL",
     ];
 
     for raw_line in ics_text.lines() {
@@ -286,7 +330,7 @@ END:VEVENT\r\n\
 END:VCALENDAR\r\n";
 
     #[test]
-    fn tokenizer_skip_property_keys_outside_allowlist() {
+    fn tokenizer_captures_all_schema_declared_fields() {
         let events = parse_vevents(SINGLE_EVENT_ICS);
         assert_eq!(events.len(), 1);
         let e = &events[0];
@@ -302,8 +346,9 @@ END:VCALENDAR\r\n";
             e.get("ORGANIZER").map(String::as_str),
             Some("mailto:host@x.com")
         );
-        // Privacy: DESCRIPTION was never read.
-        assert!(e.get("DESCRIPTION").is_none());
+        // Plan §D5 (2026-08-11): DESCRIPTION is now captured, the
+        // anonymizer scrubs it downstream.
+        assert_eq!(e.get("DESCRIPTION").map(String::as_str), Some("secret body"));
         assert_eq!(e.extra_attendees.len(), 3);
         assert_eq!(e.extra_attendees[0], "mailto:a@x.com");
         assert_eq!(e.extra_attendees[2], "mailto:c@x.com");

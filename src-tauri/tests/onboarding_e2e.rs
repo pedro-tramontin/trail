@@ -605,6 +605,25 @@ fn phase_c_writes_config_and_appends_audit_log_row() {
 
     append_audit_log(&answers, &home.config_path).expect("append_audit_log");
 
+    // 2026-08-11 (PR #221) — assert the browser-history round-trip
+    // end to end. The fixture's `answers.browser_history` (an
+    // `Option<Vec<String>>` listing the user's picked browsers)
+    // must surface in `Config.browser_history.browsers` as the
+    // typed `Vec<BrowserKind>` after `answers_to_config`. The e2e
+    // test doesn't stage any real browser DBs in the fixture
+    // home, so `db_paths` will be empty — that's the documented
+    // "user picked nothing the scanner could verify" case (the
+    // subprocess still runs and emits an empty envelope).
+    assert!(
+        cfg.browser_history.browsers.is_empty(),
+        "the default-answers fixture picks no browsers, so Config.browser_history.browsers should be empty; got {:?}",
+        cfg.browser_history.browsers
+    );
+    assert!(
+        cfg.browser_history.db_paths.is_empty(),
+        "db_paths empty by default — scanner pass fills this in a follow-up commit"
+    );
+
     // Reload the config via the frozen type — this is the proof that
     // the written file matches the schema.
     let loaded = load_config(&home.config_path).expect("load_config round-trips");
