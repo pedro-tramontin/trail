@@ -78,25 +78,28 @@ uuid = { workspace = true }
 # read_dir wouldn't suffice). The collector crate already pulls it
 # in transitively, but a workspace dep keeps the bound explicit.
 walkdir = { workspace = true }
-
-# cpal pulls in the platform audio backend (CoreAudio on macOS, ALSA on
-# Linux, etc.). §W4 forbids headless Linux agents from trying to capture
-# real audio, so we only build the cpal path on macOS — on Linux the
-# capture loop returns `CaptureError::Cpal` and only the resampler is
-# exercised in tests.
-[target.'cfg(target_os = "macos")'.dependencies]
+# cpal pulls in the platform audio backend (CoreAudio on macOS,
+# ALSA on Linux, WASAPI on Windows) selected at runtime — it is a
+# cross-platform crate. Previously macOS-gated by mistake; now
+# built on every target so the `voice::capture::backend` module
+# has a single, consistent build path.
 cpal = { workspace = true }
-# Phase 5 §5.3 — global-hotkey is the macOS-only push-to-talk shortcut
-# crate. On Linux the `register` function is a no-op stub so the parser
-# + tests can run there.
+# global-hotkey selects Carbon on macOS, X11 on Linux, and Win32
+# on Windows at runtime — also cross-platform. Previously
+# macOS-gated by mistake; the Linux/Win32 backends are real and
+# exercised on their respective platforms.
 global-hotkey = { workspace = true }
+
 # Phase 5 §5.7 — macOS mic permission detection. `objc2` is the
 # modern safe wrapper around the Objective-C runtime (replacing
 # `objc`/`cocoa`); `block2` provides the `__block` closures that
-# Apple's AVFoundation completion-handler APIs require. All three are
-# gated to `cfg(target_os = "macos")` because they transitively link
-# CoreFoundation — the non-macOS branch in `voice/permission.rs`
-# returns `MicPermissionState::Undetermined` directly.
+# Apple's AVFoundation completion-handler APIs require. All three
+# stay gated to `cfg(target_os = "macos")` because they transitively
+# link CoreFoundation — the non-macOS branch in
+# `voice/permission.rs` returns `MicPermissionState::Undetermined`
+# directly. The `objc2-event-kit` binding for macOS EventKit lives
+# here too (same Apple-only link surface).
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 block2 = { workspace = true }
@@ -111,6 +114,22 @@ block2 = { workspace = true }
 # `default-features` is "ignored" because the workspace version
 # already provides one.
 objc2-event-kit = { workspace = true }
+
+# Wayland + zbus are pre-emptive deps for the multi-backend hotkey
+# work planned for the next release. Adding them now (as Linux-only)
+# keeps the next PR scoped to just the dispatcher + backends rather
+# than a Cargo.lock churn on top of the code change. `zbus` is the
+# async IPC binding the dispatcher needs to talk to compositor
+# services (e.g. GNOME's mutter portal); `wayland-client` is the
+# raw binding; `wayland-protocols` with the `client` feature (which
+# pulls in `wayland-client`) and the `staging` feature (which exposes
+# the wlr-global-shortcuts, xdg-shell, and wlr-layer-shell protocols
+# we need for compositor-specific hotkey backends) covers the
+# surface the dispatcher will dispatch to.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.31", features = ["client", "staging"] }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
