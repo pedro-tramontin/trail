@@ -635,8 +635,11 @@ fn calendar_eventkit_tcc_status() -> Option<CalendarEventKitTcc> {
         let status: EKAuthorizationStatus =
             msg_send![class!(EKEventStore), authorizationStatusForEntityType: 0isize];
         match status {
+            // `Authorized` is deprecated and an alias for
+            // `FullAccess` (`Self = Self(FullAccess.0)` per
+            // objc2-event-kit 0.3.2's EKTypes.rs), so we don't
+            // need a separate arm — `FullAccess` covers both.
             EKAuthorizationStatus::FullAccess => Some(CalendarEventKitTcc::FullAccess),
-            EKAuthorizationStatus::Authorized => Some(CalendarEventKitTcc::FullAccess),
             EKAuthorizationStatus::NotDetermined => Some(CalendarEventKitTcc::NotDetermined),
             EKAuthorizationStatus::Denied
             | EKAuthorizationStatus::Restricted

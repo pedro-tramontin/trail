@@ -101,7 +101,11 @@ fn synth_eventkit(
     };
     let status = EKAuthorizationStatus(raw_status);
     match status {
-        EKAuthorizationStatus::FullAccess | EKAuthorizationStatus::Authorized => {}
+        // `Authorized` is deprecated and an alias for
+        // `FullAccess` (`Self = Self(FullAccess.0)` per
+        // objc2-event-kit 0.3.2's EKTypes.rs), so a single
+        // `FullAccess` arm covers both.
+        EKAuthorizationStatus::FullAccess => {}
         EKAuthorizationStatus::NotDetermined => {
             anyhow::bail!(
                 "EventKit access not yet requested. Run the Trail onboarding wizard \
@@ -441,10 +445,7 @@ fn live_eventkit_round_trip() {
     let raw_status: isize =
         unsafe { msg_send![cls, authorizationStatusForEntityType: 0isize] };
     let status = EKAuthorizationStatus(raw_status);
-    if !matches!(
-        status,
-        EKAuthorizationStatus::FullAccess | EKAuthorizationStatus::Authorized
-    ) {
+    if !matches!(status, EKAuthorizationStatus::FullAccess) {
         eprintln!(
             "live_eventkit_round_trip: TCC status is {:?}; \
              grant Trail full access in System Settings → \
