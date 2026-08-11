@@ -559,6 +559,38 @@ mod tests {
                 path: PathBuf::new(),
             },
         );
+        // 2026-08-11 — the scanner now reports five
+        // browser-history probes (chrome / brave /
+        // firefox / opera / safari). The sample scan
+        // mirrors that so the Ask step's prompt +
+        // envelope wiring is exercised end-to-end.
+        push(
+            &mut cands,
+            "firefox_history",
+            "Firefox history",
+            CollectorStatus::Unavailable,
+            EvidenceKind::FileExists {
+                path: PathBuf::new(),
+            },
+        );
+        push(
+            &mut cands,
+            "opera_history",
+            "Opera history",
+            CollectorStatus::Unavailable,
+            EvidenceKind::FileExists {
+                path: PathBuf::new(),
+            },
+        );
+        push(
+            &mut cands,
+            "safari_history",
+            "Safari history",
+            CollectorStatus::Unavailable,
+            EvidenceKind::FileExists {
+                path: PathBuf::new(),
+            },
+        );
         ScanReport {
             generated_at: Utc::now(),
             platform: Platform::Linux,
@@ -584,6 +616,18 @@ mod tests {
                 "selected": true,
                 "notes": "",
                 "evidence_refs": ["calendar"]
+            },
+            // 2026-08-11 — browser-history pre-fill. The
+            // LLM emits one field per scanner probe; the
+            // Ask step's checkbox row mirrors it. selected
+            // = false in the wiremock because the user's
+            // mock scan doesn't include any browser
+            // candidates (chrome_history / brave_history /
+            // etc. are Unavailable in sample_scan()).
+            "browser_history": {
+                "selected": false,
+                "notes": "",
+                "evidence_refs": ["chrome_history", "brave_history"]
             },
             "voice": {
                 "selected": false,

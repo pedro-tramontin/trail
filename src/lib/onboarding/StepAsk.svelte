@@ -234,6 +234,24 @@
           return s;
         });
       }
+      // 2026-08-11 — seed the new ICS-path and browser-history
+      // buffers from the LLM's pre-fill. Same first-time-only
+      // pattern as the github/claude rows above. The
+      // calendar_ics.ics_paths field is the LLM's best-guess
+      // path list (or empty); browser_history is the LLM's
+      // browser-ID pre-fill (or empty).
+      if ($hoisted.edit_ics_paths === "") {
+        hoisted.update((s) => {
+          s.edit_ics_paths = (result.calendar_ics?.ics_paths ?? []).join("\n");
+          return s;
+        });
+      }
+      if ($hoisted.edit_browser_history === "") {
+        hoisted.update((s) => {
+          s.edit_browser_history = (result.browser_history ?? []).join("\n");
+          return s;
+        });
+      }
     } catch (err) {
       error = String(err);
     } finally {
@@ -249,6 +267,8 @@
       hoisted.update((s) => {
         s.edit_claude_paths = (a.claude_sessions_paths ?? []).join("\n");
         s.edit_github_repos = (a.github?.repos ?? []).join("\n");
+        s.edit_ics_paths = (a.calendar_ics?.ics_paths ?? []).join("\n");
+        s.edit_browser_history = (a.browser_history ?? []).join("\n");
         s.editing = !s.editing;
         return s;
       });
@@ -347,15 +367,43 @@
           calendar_app_id: "event_kit",
         };
       } else {
-        // .ics path mode — preserve the LLM's ics_paths (the
-        // user edits them via the row's textarea below).
-        const ics_paths = answers.calendar_ics?.ics_paths ?? [];
+        // .ics path mode — read the textarea the user just
+        // edited. Pre-PR bug: the Ask step had no input
+        // element for the .ics path, so picking "Custom .ics
+        // file" silently produced an empty `ics_paths` list.
+        // The collector then wrote an empty calendar.json.
+        // The textarea is rendered inside the calendar row
+        // (conditional on `edit_calendar_source === "ics"`)
+        // and binds to `$hoisted.edit_ics_paths`. We split
+        // on newlines, trim, and drop empties — same shape
+        // as `claude_sessions_paths` / `github_repos`.
+        const ics_paths = $hoisted.edit_ics_paths
+          .split(/\r?\n/)
+          .map((s: string) => s.trim())
+          .filter((s: string) => s.length > 0);
         calendar_ics = {
-          enabled: true,
+          enabled: ics_paths.length > 0,
           ics_paths,
           calendar_app_id: null,
         };
       }
+    }
+    // 2026-08-11 — browser-history picker. The user picks
+    // one or more browsers via checkboxes (rendered in the
+    // new "Browser history" row); the rendered list is
+    // newline-separated IDs (`chrome`, `brave`, `firefox`,
+    // `opera`, `safari`). Split + trim + drop empties,
+    // matching the github/claude row pattern. Preserve the
+    // LLM's pre-fill when the user is NOT in Edit mode (so
+    // Back-nav doesn't clobber a previously-confirmed
+    // choice).
+    let browser_history: OnboardingAnswers["browser_history"] =
+      answers.browser_history;
+    if ($hoisted.editing) {
+      browser_history = $hoisted.edit_browser_history
+        .split(/\r?\n/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0);
     }
     return {
       ...answers,
@@ -365,6 +413,7 @@
         : answers.github,
       voice,
       calendar_ics,
+      browser_history,
     };
   }
 
@@ -524,8 +573,39 @@
               {:else}
                 Provide an .ics export from Calendar.app: File → Export →
                 uncheck "Events" only if you also export Tasks separately.
+                Enter the absolute path below.
               {/if}
             </span>
+            <!--
+              2026-08-11 — .ics path input. The textarea is
+              rendered ONLY when the user picks "Custom .ics
+              file" (the radio's value is "ics"). The
+              previous behaviour had no input here at all —
+              the user could pick the radio but couldn't
+              enter the path, so `build_edited_answers`
+              produced an empty `ics_paths` list. The
+              collector then wrote an empty calendar.json.
+              The textarea mirrors the `claude_sessions`
+              row's pattern: one path per line, trim,
+              drop empties. Pre-populated from
+              `answers.calendar_ics.ics_paths` when
+              entering Edit mode (see `toggle_edit`). On
+              macOS the user typically points this at
+              `~/Downloads/calendar.ics` after exporting
+              from Calendar.app; on Linux it's wherever
+              they synced the .ics file.
+            -->
+            {#if $hoisted.editing && $hoisted.edit_calendar_source === "ics"}
+              <textarea
+                rows="2"
+                class="inline-edit"
+                bind:value={$hoisted.edit_ics_paths}
+                data-testid="edit-ics-paths"
+                aria-label=".ics file paths (one per line)"
+                placeholder="/Users/you/Downloads/calendar.ics"
+              ></textarea>
+              <span class="hint">One absolute path per line</span>
+            {/if}
           {:else if !answers.calendar_ics?.enabled}
             <em>disabled</em>
             <button
@@ -546,6 +626,93 @@
                 — {answers.calendar_ics.ics_paths.length} .ics path(s)
               </span>
             {/if}
+          {/if}
+        </span>
+      </li>
+
+      <!--
+        2026-08-11 — Browser history row. Sits between the
+        Calendar row and the Voice capture row so the Ask
+        step's data-source rows mirror the scanner's
+        `candidates` order (chrome_history / brave_history /
+        firefox_history / opera_history / safari_history).
+        The scanner now reports five browser-history probes;
+        the Ask step lets the user pick which ones to
+        enable via five checkboxes. The actual data
+        collector that reads the SQLite / `places.sqlite` /
+        `History.db` files is built in a follow-up PR; for
+        now, the picker is captured in
+        `answers.browser_history` (a `string[]` of browser
+        IDs) and Phase C no-ops on it.
+      -->
+      <li class="answer-row" data-testid="row-browser-history">
+        <span class="label">Browser history</span>
+        <span class="value">
+          {#if $hoisted.editing}
+            <!--
+              Five checkboxes, one per scanner probe. The
+              renderer mirrors the "checked" state into the
+              newline-separated `edit_browser_history`
+              buffer so `build_edited_answers` can split +
+              trim + drop empties (same shape as the github
+              row's `edit_github_repos`). The bind:value is
+              updated via an `on:change` handler instead of
+              `bind:group` because `bind:group` would
+              clobber `edit_browser_history` with a single
+              ID, not a newline list. We hand-roll the
+              sync to preserve the buffer's shape.
+            -->
+            <div class="browser-history-picker" data-testid="browser-history-picker">
+              {#each ["chrome", "brave", "firefox", "opera", "safari"] as browser (browser)}
+                <label class="browser-history-checkbox">
+                  <input
+                    type="checkbox"
+                    value={browser}
+                    checked={$hoisted.edit_browser_history
+                      .split(/\r?\n/)
+                      .map((s: string) => s.trim())
+                      .includes(browser)}
+                    onchange={(e: Event) => {
+                      const target = e.currentTarget as HTMLInputElement;
+                      const current = $hoisted.edit_browser_history
+                        .split(/\r?\n/)
+                        .map((s: string) => s.trim())
+                        .filter((s: string) => s.length > 0);
+                      const next = target.checked
+                        ? [...new Set([...current, browser])]
+                        : current.filter((b: string) => b !== browser);
+                      hoisted.update((s) => {
+                        s.edit_browser_history = next.join("\n");
+                        return s;
+                      });
+                    }}
+                    data-testid={`browser-history-${browser}`}
+                    aria-label={`Enable ${browser} history`}
+                  />
+                  {browser}
+                </label>
+              {/each}
+            </div>
+            <span class="hint">
+              The Trail history collector reads each browser's local history
+              database (read-only copy — never modifies the source). The
+              collector is shipped in a follow-up release; for now this
+              picker is captured but not yet consumed.
+            </span>
+          {:else if !answers.browser_history?.length}
+            <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-browser_history"
+              aria-label="Why is Browser history disabled?"
+              title={disabled_reason("browser_history", answers.question_log)}
+            >?</button>
+          {:else}
+            enabled
+            <span class="value-text" data-testid="browser-history-summary">
+              — {answers.browser_history.join(", ")}
+            </span>
           {/if}
         </span>
       </li>

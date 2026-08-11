@@ -41,6 +41,16 @@ pub struct OnboardingAnswers {
     /// Calendar collector configuration. `None` means "do not enable".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_ics: Option<CalendarConfig>,
+    /// 2026-08-11 — Browser-history pick list. Each entry is
+    /// a browser ID the user enabled on the Ask step
+    /// (`"chrome"`, `"brave"`, `"firefox"`, `"opera"`,
+    /// `"safari"`). `None` means the field wasn't pre-filled
+    /// by the LLM; the Ask step's edit-mode handles the
+    /// picker UI. The actual collector that reads these
+    /// files is built in a follow-up PR — for now this is
+    /// captured but not consumed by Phase C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_history: Option<Vec<String>>,
     /// Voice capture configuration. `None` means "do not enable".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceConfig>,
@@ -78,6 +88,7 @@ impl Default for OnboardingAnswers {
             claude_sessions_paths: Vec::new(),
             github: None,
             calendar_ics: None,
+            browser_history: None,
             voice: None,
             review_time: ReviewTimeConfig {
                 cadence: "evening".to_string(),
@@ -213,6 +224,14 @@ pub struct OnboardingEnvelope {
     pub claude_sessions_paths: AnswerFieldBool,
     pub github: AnswerFieldBool,
     pub calendar_ics: AnswerFieldBool,
+    /// 2026-08-11 — Browser-history pick list. Same
+    /// `AnswerFieldBool` shape as the other data-source
+    /// rows so the Ask step's per-row tooltip reasoning
+    /// keeps working. `selected = true` means at least
+    /// one browser is enabled; the per-browser IDs live
+    /// in `notes` (comma-separated, matching the
+    /// calendar_ics notes convention).
+    pub browser_history: AnswerFieldBool,
     pub voice: AnswerFieldVoice,
     pub review_time: AnswerFieldReviewTime,
     pub summarizer: AnswerFieldSummarizer,
@@ -344,6 +363,29 @@ impl OnboardingEnvelope {
             None
         };
 
+        // 2026-08-11 — browser-history. The envelope's
+        // `notes` carries a comma-separated list of browser
+        // IDs (`chrome`, `brave`, `firefox`, `opera`,
+        // `safari`). When `selected = true` we parse it
+        // into a `Vec<String>`; when `selected = false` we
+        // emit `None` so the Ask step's "disabled" UI
+        // renders. The list is trimmed + empties dropped,
+        // matching the github row's `repos` parser.
+        let browser_history = if self.browser_history.selected {
+            self.browser_history
+                .notes
+                .as_deref()
+                .map(|n| {
+                    n.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+        } else {
+            None
+        };
+
         let voice = if self.voice.selected {
             Some(VoiceConfig {
                 enabled: true,
@@ -358,6 +400,7 @@ impl OnboardingEnvelope {
             claude_sessions_paths,
             github,
             calendar_ics,
+            browser_history,
             voice,
             review_time: ReviewTimeConfig {
                 cadence: self.review_time.cadence,
@@ -401,6 +444,17 @@ mod tests {
                 selected: false,
                 notes: None,
                 evidence_refs: vec![],
+            },
+            // 2026-08-11 — browser-history. Both test
+            // fixtures (all_selected / all_deselected)
+            // carry `selected = false` since the typed
+            // `OnboardingAnswers.browser_history` is
+            // tested independently in the all_selected
+            // arm above.
+            browser_history: AnswerFieldBool {
+                selected: true,
+                notes: Some("chrome".to_string()),
+                evidence_refs: vec!["chrome_history".to_string()],
             },
             voice: AnswerFieldVoice {
                 selected: true,
@@ -461,6 +515,17 @@ mod tests {
                 selected: false,
                 notes: None,
                 evidence_refs: vec![],
+            },
+            // 2026-08-11 — browser-history. Both test
+            // fixtures (all_selected / all_deselected)
+            // carry `selected = false` since the typed
+            // `OnboardingAnswers.browser_history` is
+            // tested independently in the all_selected
+            // arm above.
+            browser_history: AnswerFieldBool {
+                selected: true,
+                notes: Some("chrome".to_string()),
+                evidence_refs: vec!["chrome_history".to_string()],
             },
             voice: AnswerFieldVoice {
                 selected: false,

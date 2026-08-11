@@ -9,6 +9,7 @@
     "claude_sessions_paths",
     "github",
     "calendar_ics",
+    "browser_history",
     "voice",
     "review_time",
     "summarizer",
@@ -51,6 +52,20 @@
     "calendar_ics": {
       "type": "object",
       "description": "Whether to enable the calendar collector. selected=true enables it; notes may carry the .ics paths when known.",
+      "additionalProperties": false,
+      "required": ["selected"],
+      "properties": {
+        "selected": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "browser_history": {
+      "type": "object",
+      "description": "Which browser-history files to read. selected=true means enable; notes carries a comma-separated list of browser IDs (chrome, brave, firefox, opera, safari) when known. The actual collector that reads these files is built in a follow-up PR — for now this field is captured but not consumed by Phase C.",
       "additionalProperties": false,
       "required": ["selected"],
       "properties": {

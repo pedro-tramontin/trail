@@ -35,6 +35,8 @@ function fresh_state(): Writable<StepAskState> {
     edit_voice_enabled: true,
     edit_voice_model: "base.en",
     edit_calendar_source: "event_kit",
+    edit_ics_paths: "",
+    edit_browser_history: "",
   });
 }
 
@@ -117,6 +119,17 @@ describe("StepAsk.svelte", () => {
     // respective answer rows (right side, next to the label)
     // so flipping the Edit toggle only swaps the value-slot
     // content — never the row's outer dimensions.
+    //
+    // 2026-08-11 — also asserts that:
+    //   (1) the calendar row's ICS-path textarea is NOT
+    //       rendered until the user picks the "Custom .ics
+    //       file" radio (event_kit is the default), and
+    //   (2) the new browser-history picker row is rendered
+    //       with all five checkboxes.
+    // The pre-PR bug was: the user picked "Custom .ics file"
+    // but no input element existed to enter the path, so
+    // `build_edited_answers` produced an empty `ics_paths`
+    // list and the collector wrote an empty calendar.json.
     render(StepAsk, {
       props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
     });
@@ -131,6 +144,23 @@ describe("StepAsk.svelte", () => {
     // disabled-state summary text is replaced by the input.
     expect(screen.queryByTestId("claude-sessions-summary")).toBeNull();
     expect(screen.queryByTestId("github-summary")).toBeNull();
+    // Calendar default is event_kit — the ICS-path textarea
+    // should NOT be visible. Pre-PR bug: there was no input
+    // at all (calendar source picker had no textarea).
+    expect(screen.queryByTestId("edit-ics-paths")).toBeNull();
+    // Click the "Custom .ics file" radio and confirm the
+    // textarea appears inline within the calendar row.
+    await fireEvent.click(screen.getByTestId("calendar-source-ics"));
+    expect(screen.getByTestId("edit-ics-paths")).toBeTruthy();
+    // Browser-history picker: all five checkboxes must be
+    // present (none checked by default — the user must
+    // opt in).
+    expect(screen.getByTestId("browser-history-picker")).toBeTruthy();
+    expect(screen.getByTestId("browser-history-chrome")).toBeTruthy();
+    expect(screen.getByTestId("browser-history-brave")).toBeTruthy();
+    expect(screen.getByTestId("browser-history-firefox")).toBeTruthy();
+    expect(screen.getByTestId("browser-history-opera")).toBeTruthy();
+    expect(screen.getByTestId("browser-history-safari")).toBeTruthy();
   });
 
   it("(e) shows the error state when ask_onboarding_cmd rejects", async () => {
@@ -280,6 +310,8 @@ describe("StepAsk.svelte", () => {
       edit_voice_enabled: true,
       edit_voice_model: "small.en",
       edit_calendar_source: "event_kit" as const,
+      edit_ics_paths: "",
+      edit_browser_history: "",
     });
     render(StepAsk, {
       props: {
@@ -411,5 +443,67 @@ describe("StepAsk.svelte", () => {
     // the on-disk `Config.voice` accordingly.
     expect(called_with.voice).not.toBeNull();
     expect(called_with.voice?.enabled).toBe(false);
+  });
+
+  it("(k) .ics path textarea round-trips through build_edited_answers", async () => {
+    // 2026-08-11 — regression for the missing-file-picker
+    // bug. The pre-PR behavior: the user picked "Custom
+    // .ics file" but no input element existed, so
+    // `build_edited_answers` always produced
+    // `calendar_ics = { enabled: true, ics_paths: [], calendar_app_id: null }`
+    // regardless of what the user wanted. The collector
+    // then wrote an empty calendar.json. This test picks
+    // the radio, types a path, clicks "Looks good", and
+    // asserts the typed path lands in
+    // `on_next`'s `answers.calendar_ics.ics_paths`.
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    // Open Edit mode + switch the calendar source to .ics.
+    const edit = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(edit);
+    await fireEvent.click(screen.getByTestId("calendar-source-ics"));
+    // Type the absolute path into the textarea. Svelte 5's
+    // `bind:value` listens for `input` events (not `change`),
+    // so we use `fireEvent.input` here — the same pattern
+    // the github row test uses for `edit-github-repos`.
+    const ics = screen.getByTestId("edit-ics-paths") as HTMLTextAreaElement;
+    await fireEvent.input(ics, {
+      target: { value: "/Users/you/Downloads/calendar.ics" },
+    });
+    // Click "Looks good" and confirm the typed path
+    // landed in `answers.calendar_ics.ics_paths`.
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.calendar_ics?.calendar_app_id).toBeNull();
+    expect(called_with.calendar_ics?.ics_paths).toEqual([
+      "/Users/you/Downloads/calendar.ics",
+    ]);
+    expect(called_with.calendar_ics?.enabled).toBe(true);
+  });
+
+  it("(l) browser-history picker round-trips through build_edited_answers", async () => {
+    // 2026-08-11 — verifies the new Browser-history row
+    // commits its checkbox selections to
+    // `answers.browser_history`. Pre-PR the field didn't
+    // exist; the row is new.
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    const edit = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(edit);
+    // Tick chrome + firefox; leave brave / opera / safari
+    // unchecked.
+    await fireEvent.click(screen.getByTestId("browser-history-chrome"));
+    await fireEvent.click(screen.getByTestId("browser-history-firefox"));
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.browser_history).toEqual(["chrome", "firefox"]);
   });
 });

@@ -142,6 +142,11 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
         } else {
             None
         },
+        // 2026-08-11 — browser-history picker. The baseline
+        // never pre-fills it (the user must opt in via the
+        // Ask step's checkboxes). The future collector
+        // that reads these files is built in a follow-up PR.
+        browser_history: None,
         voice: None,
         review_time: ReviewTimeConfig {
             cadence: "evening".to_string(),

@@ -323,15 +323,15 @@ pub fn scan_laptop_with_config(platform: &Platform, home: &Path, config_path: &P
     };
 
     let mut candidates = Vec::with_capacity(8);
-    let mut c = scan_github(home, platform);
+    let mut c = scan_claude_sessions(home);
+    mark_configured(&mut c);
+    candidates.push(c);
+
+    c = scan_github(home, platform);
     mark_configured(&mut c);
     candidates.push(c);
 
     c = scan_calendar(home, platform);
-    mark_configured(&mut c);
-    candidates.push(c);
-
-    c = scan_claude_sessions(home);
     mark_configured(&mut c);
     candidates.push(c);
 
@@ -347,11 +347,30 @@ pub fn scan_laptop_with_config(platform: &Platform, home: &Path, config_path: &P
     mark_configured(&mut c);
     candidates.push(c);
 
+    // Browser-history probes. The order here MUST match
+    // `StepAsk.svelte`'s answer-row order — the user sees
+    // the same set of rows in the same order on both
+    // Step 2 (scan findings) and Step 3 (answers). The
+    // future history collector that reads these files will
+    // share the same order via a `BrowserSource` enum on
+    // `CollectorLaptopConfig` (mirroring `CalendarSource`).
     c = scan_chrome_history(home, platform);
     mark_configured(&mut c);
     candidates.push(c);
 
     c = scan_brave_history(home, platform);
+    mark_configured(&mut c);
+    candidates.push(c);
+
+    c = scan_firefox_history(home, platform);
+    mark_configured(&mut c);
+    candidates.push(c);
+
+    c = scan_opera_history(home, platform);
+    mark_configured(&mut c);
+    candidates.push(c);
+
+    c = scan_safari_history(home, platform);
     mark_configured(&mut c);
     candidates.push(c);
 
@@ -847,6 +866,172 @@ impl<T> Pipe<T> for T {
     }
 }
 
+/// Firefox history lives at a per-profile path. The profile dir
+/// is randomly named (`xxxxxxxx.default-release` or
+/// `xxxxxxxx.default`), so we glob for `places.sqlite` under the
+/// Firefox profiles root. The probe accepts the FIRST match
+/// (Firefox keeps the active profile at the top in `profiles.ini`,
+/// but the dir layout is stable enough that the first match is
+/// usually the right one).
+///
+/// macOS: `~/Library/Application Support/Firefox/Profiles/<profile>/places.sqlite`
+/// Linux: `~/.mozilla/firefox/<profile>/places.sqlite`
+///
+/// Notes for the future collector (not built in this PR — this
+/// commit is scanner-only, same shape as the Chrome/Brave probes):
+/// - Firefox stores bookmarks, history, and form data in the same
+///   `places.sqlite`. The history rows live in `moz_places`.
+/// - The database is locked when Firefox is running. Use a copy +
+///   read pattern, or `sqlite3_open_v2(...SQLITE_OPEN_READONLY)`.
+///   PRAGMA `journal_mode = WAL` survives a copy.
+fn scan_firefox_history(home: &Path, platform: &Platform) -> CollectorCandidate {
+    let profiles_root = match platform {
+        Platform::Macos => home
+            .join("Library")
+            .join("Application Support")
+            .join("Firefox")
+            .join("Profiles"),
+        Platform::Linux => home.join(".mozilla").join("firefox"),
+        Platform::Other(_) => PathBuf::new(),
+    };
+    if profiles_root.as_os_str().is_empty() {
+        return finalize(
+            "firefox_history",
+            "Firefox history",
+            CollectorStatus::Unavailable,
+            unavailable_evidence(),
+            Some("platform not supported".to_string()),
+        );
+    }
+    // Glob `places.sqlite` under each `<profile>/` subdirectory.
+    // `glob` returns absolute paths when given an absolute root.
+    let path = glob_first_child_with(&profiles_root, "places.sqlite");
+    if let Some(p) = path {
+        return finalize(
+            "firefox_history",
+            "Firefox history",
+            CollectorStatus::Available,
+            EvidenceKind::FileExists { path: p },
+            None,
+        );
+    }
+    finalize(
+        "firefox_history",
+        "Firefox history",
+        CollectorStatus::Unavailable,
+        unavailable_evidence(),
+        Some(format!("{} not present", profiles_root.display())),
+    )
+}
+
+/// Opera history: Chromium-based, so the path layout is the same
+/// as Chrome but with a different vendor dir. Opera also keeps a
+/// `Local State` JSON at the vendor root that names the active
+/// profile — but for the scanner we just probe the default
+/// `History` file (the user with custom profiles can re-run the
+/// scan and the collector's profile-detection logic will pick the
+/// right one once that's built).
+///
+/// macOS: `~/Library/Application Support/com.operasoftware.Opera/History`
+/// Linux: `~/.config/opera/Default/History`
+fn scan_opera_history(home: &Path, platform: &Platform) -> CollectorCandidate {
+    let path = match platform {
+        Platform::Macos => home
+            .join("Library")
+            .join("Application Support")
+            .join("com.operasoftware.Opera")
+            .join("History"),
+        Platform::Linux => home
+            .join(".config")
+            .join("opera")
+            .join("Default")
+            .join("History"),
+        Platform::Other(_) => PathBuf::new(),
+    };
+    if path.as_os_str().is_empty() {
+        return finalize(
+            "opera_history",
+            "Opera history",
+            CollectorStatus::Unavailable,
+            unavailable_evidence(),
+            Some("platform not supported".to_string()),
+        );
+    }
+    if let Some(ev) = probe_file(&path) {
+        return finalize("opera_history", "Opera history", CollectorStatus::Available, ev, None);
+    }
+    finalize(
+        "opera_history",
+        "Opera history",
+        CollectorStatus::Unavailable,
+        unavailable_evidence(),
+        Some(format!("{} not present", path.display())),
+    )
+}
+
+/// Safari history (macOS only — Safari doesn't exist on Linux).
+/// `~/Library/Safari/History.db` is the SQLite database. The
+/// adjacent `HistoryIndex.plist` is a Spotlight-style index that
+/// Safari writes alongside it; either one being present is
+/// sufficient evidence the user uses Safari (the actual collector
+/// will read `History.db`).
+///
+/// Full Disk Access: Safari's `History.db` is gated by TCC. The
+/// scanner reports file existence (the OS reports the path even
+/// without FDA), but the collector that reads it later will need
+/// FDA granted to Trail — same shape as the EventKit TCC probe.
+fn scan_safari_history(home: &Path, platform: &Platform) -> CollectorCandidate {
+    let path = match platform {
+        Platform::Macos => home.join("Library").join("Safari").join("History.db"),
+        // Safari doesn't ship on Linux — keep the candidate in the
+        // report with `Unavailable` + a platform-unavailable note
+        // so the wizard UI doesn't show a phantom row.
+        Platform::Linux | Platform::Other(_) => PathBuf::new(),
+    };
+    if path.as_os_str().is_empty() {
+        return finalize(
+            "safari_history",
+            "Safari history",
+            CollectorStatus::Unavailable,
+            unavailable_evidence(),
+            Some("platform not supported".to_string()),
+        );
+    }
+    if let Some(ev) = probe_file(&path) {
+        return finalize("safari_history", "Safari history", CollectorStatus::Available, ev, None);
+    }
+    finalize(
+        "safari_history",
+        "Safari history",
+        CollectorStatus::Unavailable,
+        unavailable_evidence(),
+        Some(format!("{} not present", path.display())),
+    )
+}
+
+/// Walk one level deep under `root`, return the first directory
+/// that contains a file named `filename`. Used by the Firefox
+/// probe to skip the random `<profile>` directory name. Returns
+/// `None` if `root` doesn't exist or has no qualifying child.
+///
+/// We don't pull in the `glob` crate to avoid a new dep — the
+/// probe scans `read_dir` once per browser and stops at the first
+/// hit. Firefox users typically have a single active profile.
+fn glob_first_child_with(root: &Path, filename: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let candidate = path.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn probe_history_file(path: PathBuf, id: &str, display_name: &str) -> CollectorCandidate {
     if path.as_os_str().is_empty() {
         return finalize(
@@ -964,6 +1149,9 @@ mod tests {
             "vscode_extensions",
             "chrome_history",
             "brave_history",
+            "firefox_history",
+            "opera_history",
+            "safari_history",
         ] {
             assert!(report.candidates.iter().any(|c| c.collector_id == id));
         }
@@ -1084,6 +1272,112 @@ mod tests {
                 assert!(path.ends_with("google-chrome/Default/History"));
             }
             _ => panic!("expected FileExists for chrome history"),
+        }
+    }
+
+    #[test]
+    fn firefox_history_finds_places_sqlite_in_profile_dir() {
+        // The Firefox profile dir is randomly named (e.g.
+        // `xxxxxxxx.default-release`). The probe should walk
+        // one level deep under `Profiles/` and find the file
+        // regardless of the random prefix.
+        let home = TempHome::new();
+        let platform = detect_platform();
+        let profile_dir = match platform {
+            Platform::Macos => home
+                .path()
+                .join("Library/Application Support/Firefox/Profiles/abcd1234.default-release"),
+            Platform::Linux => home.path().join(".mozilla/firefox/abcd1234.default-release"),
+            Platform::Other(_) => return, // skip on Other platforms
+        };
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        // Non-empty: `probe_file` requires `meta.len() != 0`
+        // (a zero-byte lock-stub doesn't count as evidence).
+        std::fs::write(profile_dir.join("places.sqlite"), b"x").unwrap();
+
+        let report = scan_laptop_with_config(
+            &platform,
+            home.path(),
+            &home.path().join(".trail/config.json"),
+        );
+        let c = find(&report, "firefox_history");
+        assert_eq!(c.status, CollectorStatus::Available);
+        match &c.evidence {
+            EvidenceKind::FileExists { path } => {
+                assert!(path.ends_with("places.sqlite"));
+                assert!(path.to_string_lossy().contains("abcd1234.default-release"));
+            }
+            _ => panic!("expected FileExists for firefox history"),
+        }
+    }
+
+    #[test]
+    fn firefox_history_unavailable_without_profiles_dir() {
+        let home = TempHome::new();
+        let platform = detect_platform();
+        let report = scan_laptop_with_config(
+            &platform,
+            home.path(),
+            &home.path().join(".trail/config.json"),
+        );
+        let c = find(&report, "firefox_history");
+        assert_eq!(c.status, CollectorStatus::Unavailable);
+    }
+
+    #[test]
+    fn opera_history_evidence_path_correct_per_platform() {
+        let home = TempHome::new();
+        let platform = detect_platform();
+        let path = match platform {
+            // macOS has no `.config` dir; Opera lands under
+            // `Library/Application Support/com.operasoftware.Opera`.
+            Platform::Macos => {
+                let p = home
+                    .path()
+                    .join("Library/Application Support/com.operasoftware.Opera/History");
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                // Non-empty: `probe_file` requires `meta.len() != 0`.
+                std::fs::write(&p, b"x").unwrap();
+                p
+            }
+            Platform::Linux => {
+                let p = home.path().join(".config/opera/Default/History");
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"x").unwrap();
+                p
+            }
+            Platform::Other(_) => return,
+        };
+        let report = scan_laptop_with_config(
+            &platform,
+            home.path(),
+            &home.path().join(".trail/config.json"),
+        );
+        let c = find(&report, "opera_history");
+        assert_eq!(c.status, CollectorStatus::Available);
+        match &c.evidence {
+            EvidenceKind::FileExists { path: found } => assert_eq!(found, &path),
+            _ => panic!("expected FileExists for opera history"),
+        }
+    }
+
+    #[test]
+    fn safari_history_only_reported_on_macos() {
+        // On Linux the candidate is present in the report with
+        // `Unavailable` (no phantom row) so the wizard UI
+        // doesn't show Safari as a Linux option.
+        let home = TempHome::new();
+        let platform = detect_platform();
+        let report = scan_laptop_with_config(
+            &platform,
+            home.path(),
+            &home.path().join(".trail/config.json"),
+        );
+        let c = find(&report, "safari_history");
+        // Status may be Available or Unavailable depending on
+        // host, but on Linux it must NEVER be Available.
+        if matches!(platform, Platform::Linux | Platform::Other(_)) {
+            assert_eq!(c.status, CollectorStatus::Unavailable);
         }
     }
 
