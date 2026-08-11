@@ -11,6 +11,11 @@
 - No user-facing changes in this release.
 
 
+## [0.5.0] - 2026-08-11
+
+- No user-facing changes in this release.
+
+
 ## [0.5.0] - 2026-08-10
 
 - No user-facing changes in this release.
