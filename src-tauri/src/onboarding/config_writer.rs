@@ -327,6 +327,32 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
         } else {
             None
         },
+        // 2026-08-11 (PR #221): browser-history config — `browsers`
+        // comes straight from the wizard's StepAsk row
+        // (`answers.browser_history`); `db_paths` is filled from
+        // the scanner's per-browser evidence (the scanner already
+        // resolved the path; we just copy it through). The empty-
+        // list case (user picked no browsers, or scanner found
+        // none) is fine — the collector subprocess emits an empty
+        // envelope and the daily review prompt renders "no
+        // browsing captured today".
+        browser_history: crate::config::BrowserHistoryConfig {
+            browsers: answers
+                .browser_history
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| match s.as_str() {
+                    "chrome" => Some(crate::config::BrowserKind::Chrome),
+                    "brave" => Some(crate::config::BrowserKind::Brave),
+                    "opera" => Some(crate::config::BrowserKind::Opera),
+                    "firefox" => Some(crate::config::BrowserKind::Firefox),
+                    "safari" => Some(crate::config::BrowserKind::Safari),
+                    _ => None,
+                })
+                .collect(),
+            db_paths: Vec::new(), // scanner pass (next commit) fills this
+        },
     }
 }
 
@@ -728,6 +754,7 @@ mod tests {
             summarizer_backend: "stub".to_string(),
             transport_method: "ssh".to_string(),
             ssh_key_path: None,
+            browser_history: Default::default(),
         };
         write_config(&v1, &dest).expect("initial write");
 

@@ -586,6 +586,7 @@ mod tests {
             summarizer_backend: "stub".into(),
             transport_method: "ssh".into(),
             ssh_key_path: Some(PathBuf::from("~/.ssh/id_trail")),
+            browser_history: Default::default(),
         }
     }
 
