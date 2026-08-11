@@ -192,6 +192,11 @@ jobs:
       # https://v2.tauri.app/start/prerequisites/
       - name: Install Linux system deps (Tauri 2)
         run: |
+          # cpal (un-gated in the voice cross-platform work) pulls in
+          # alsa-sys on Linux; alsa-sys' build script runs pkg-config
+          # against alsa.pc, which lives in libasound2-dev. Without
+          # this the rust-clippy job fails with "Package alsa was not
+          # found in the pkg-config search path".
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
@@ -205,7 +210,8 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libwebkit2gtk-4.1-dev \
-            libglib2.0-dev
+            libglib2.0-dev \
+            libasound2-dev
 
       # dtolnay/rust-toolchain@stable picks up the toolchain pin
       # from rust-toolchain.toml at the repo root (stable-1.81.x).
