@@ -1,17 +1,18 @@
-//! Audio capture (macOS-only) + cross-platform resampling.
+//! Cross-platform audio capture + resampling.
 //!
-//! On macOS, `spawn_capture_loop` builds a `cpal` input stream on a
-//! dedicated `std::thread` (cpal streams are `!Send`) and bridges
-//! each callback's interleaved f32 frames into a `tokio::sync::mpsc`
-//! channel of mono 16 kHz frames. The consumer (spawned by §5.6's
-//! `spawn_capture_loop` Part B fixup) drains the channel into the
-//! shared `Arc<Mutex<Vec<f32>>>` that whisper consumes.
+//! `spawn_capture_loop` builds a `cpal` input stream on a dedicated
+//! `std::thread` (cpal streams are `!Send`) and bridges each callback's
+//! interleaved f32 frames into a `tokio::sync::mpsc` channel of mono
+//! 16 kHz frames. The consumer (spawned by §5.6's `spawn_capture_loop`
+//! Part B fixup) drains the channel into the shared
+//! `Arc<Mutex<Vec<f32>>>` that whisper consumes.
 //!
-//! On non-macOS, `spawn_capture_loop` returns
-//! `CaptureError::Cpal` per §W4 (headless Linux agents have no
-//! microphone and cannot exercise the real cpal pipeline). The
-//! resampler (`resample_to_16k`) is platform-independent and the
-//! tests in this module run on every host.
+//! cpal picks the host backend at runtime — CoreAudio on macOS, ALSA
+//! on Linux, WASAPI on Windows — so the same `spawn_capture_loop`
+//! body runs on every OS. Headless CI agents without a microphone
+//! will get `CaptureError::Cpal("no input device available")` from
+//! `default_input_device()`, which callers can surface to the UI
+//! without their own `#[cfg]` plumbing.
 //!
 //! ## Sample rate + format
 //!
@@ -96,11 +97,10 @@ pub type Frame = f32;
 /// of headroom — enough to absorb a brief consumer stall without
 /// dropping audio but small enough to surface backpressure quickly
 /// during sustained pauses.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// Spawn the cpal capture loop (macOS only) AND the consumer task
-/// that drains the sample channel into the shared `CaptureState`.
+/// Spawn the cpal capture loop AND the consumer task that drains
+/// the sample channel into the shared `CaptureState`.
 ///
 /// The cpal stream lives on its own `std::thread` (streams are
 /// `!Send`); the consumer task is a normal `tokio::spawn`ed future
@@ -115,11 +115,11 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// that `voice_stop` / `voice_abort` (and eventually the whisper
 /// pipeline in §5.7) read from.
 ///
-/// On non-macOS hosts the function returns
-/// `CaptureError::Cpal("...")` instead of compiling in a stub, so
-/// upstream code can branch on the error without `#[cfg]` of its
-/// own.
-#[cfg(target_os = "macos")]
+/// On hosts without a default input device (headless CI agents,
+/// VMs without USB passthrough) `default_input_device()` returns
+/// `None` and this function returns
+/// `CaptureError::Cpal("no input device available")` so upstream
+/// code can branch on the error without `#[cfg]` of its own.
 pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let (tx, rx) = tokio::sync::mpsc::channel::<Frame>(CHANNEL_CAPACITY);
@@ -221,17 +221,6 @@ pub fn spawn_capture_loop(state: Arc<CaptureState>) -> Result<(), CaptureError> 
     *state.consumer_handle.lock() = Some(handle);
 
     Ok(())
-}
-
-/// Non-macOS stub: return an error so callers (5-3 transcription)
-/// can degrade gracefully without `#[cfg]` of their own. The
-/// `resample_to_16k` helper below is still available and exercised
-/// by the tests in this module on every host.
-#[cfg(not(target_os = "macos"))]
-pub fn spawn_capture_loop(_state: Arc<CaptureState>) -> Result<(), CaptureError> {
-    Err(CaptureError::Cpal(
-        "cpal capture is only supported on macOS; Linux builds return this error per §W4".into(),
-    ))
 }
 
 /// Resample a chunk of mono PCM frames from `from_rate` to 16 kHz
@@ -386,22 +375,27 @@ mod tests {
     }
 
     #[test]
-    fn spawn_capture_loop_unsupported_on_linux() {
-        // On non-macOS, spawn_capture_loop must return an error
-        // (not a stubbed receiver) so upstream code can degrade
-        // gracefully. The macOS branch is a no-op here — real
-        // cpal capture is verified manually on Pedro's Mac per §W4.
-        #[cfg(not(target_os = "macos"))]
-        {
-            let state = std::sync::Arc::new(CaptureState::new());
-            let result = spawn_capture_loop(state);
-            assert!(result.is_err(), "expected unsupported-platform error");
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // Don't actually open the mic in unit tests — too noisy
-            // and not deterministic. Manual verification only.
-        }
+    #[ignore = "needs a real input device — Linux CI runner has no mic; see PHASE9_VOICE_PARITY_VERIFICATION.md for the manual matrix coverage"]
+    fn spawn_capture_loop_returns_ok_when_input_device_present() {
+        // Real cpal capture is verified on the operator's local
+        // machine (macOS / Linux desktop / Windows desktop) per
+        // PHASE9_VOICE_PARITY_VERIFICATION.md. CI agents are
+        // headless, so this test is #[ignore]'d by default; on
+        // the operator's machine `cargo test -- --ignored` runs
+        // the actual cpal pipeline. With an input device present
+        // the function should return Ok and the consumer handle
+        // should be populated.
+        let state = std::sync::Arc::new(CaptureState::new());
+        let result = spawn_capture_loop(state.clone());
+        assert!(
+            result.is_ok(),
+            "expected Ok when default_input_device is present, got {:?}",
+            result
+        );
+        assert!(
+            state.consumer_handle.lock().is_some(),
+            "consumer task should be spawned on success"
+        );
     }
 
     #[test]
