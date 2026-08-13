@@ -160,6 +160,11 @@
       "matchPackageNames": ["tauri", "@tauri-apps/api", "@tauri-apps/cli"],
       "matchUpdateTypes": ["major"],
       "enabled": false
+    },
+    {
+      "description": "windows-core is pinned to 0.61.2 in Cargo.lock. cpal 0.18.1's #[windows::core::implement] macros were generated against the 0.61.x Interface trait; cargo's resolver picks 0.62.x for unrelated deps, the cpal macros fail to satisfy the new trait, and the Windows build breaks. Do not propose any windows-core update (major, minor, or patch) — the precise-pin is maintained by a CI guard, not by the workspace Cargo.toml. To re-enable updates, see the comment block in workspace Cargo.toml and verify cpal's upstream release notes indicate the macros were regenerated against the new Interface trait.",
+      "matchPackageNames": ["windows-core"],
+      "enabled": false
     }
   ]
 }

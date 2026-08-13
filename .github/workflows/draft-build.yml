@@ -563,6 +563,27 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      # ----------------------------------------------------------------
+      # TEMPORARY GUARD: enforce windows-core = 0.61.2 in Cargo.lock.
+      # ----------------------------------------------------------------
+      # cpal 0.18.1's #[windows::core::implement] macros were generated
+      # against the 0.61.x `Interface` trait. If cargo's resolver picks
+      # 0.62.x (the default from other workspace deps), the macros emit
+      # code that doesn't satisfy the 0.62.x trait on the consuming
+      # side -> E0277 -> draft-windows fails. This step re-applies a
+      # precise-pin on every build so a follow-up `cargo update` (by a
+      # developer, a Renovate PR that slipped past the suppression
+      # rule, or the version-bump workflow) cannot regress us. The
+      # command is idempotent: if windows-core is already 0.61.2 in
+      # Cargo.lock, this is a no-op.
+      # To re-enable bumping, see the comment block in workspace
+      # Cargo.toml + the `windows-core` packageRule in renovate.json;
+      # all three (this step, the workspace comment, the renovate
+      # rule) must be removed together once cpal upstream regenerates
+      # its macros against the new `Interface` trait.
+      - name: Enforce windows-core = 0.61.2 precise-pin (cpal 0.18.1 macro compat)
+        run: cargo update -p windows-core --precise 0.61.2
+
       - name: Build Tauri debug bundle (Windows, x64)
         # `pnpm tauri build --debug` on Windows auto-downloads
         # NSIS 3.x via Tauri's bundle pipeline (no manual
@@ -956,6 +977,22 @@ jobs:
 
       - name: Install frontend deps + build
         run: pnpm install --frozen-lockfile && pnpm build
+
+      # ----------------------------------------------------------------
+      # TEMPORARY GUARD: enforce windows-core = 0.61.2 in Cargo.lock.
+      # ----------------------------------------------------------------
+      # Same rationale as the draft-windows job's precise-pin step.
+      # tauri-action internally runs `cargo build` WITHOUT --locked,
+      # so any drift in Cargo.lock's windows-core version would be
+      # picked up by the resolver at build time and break the
+      # post-merge Windows attach. This step re-applies the
+      # precise-pin every time, idempotently, so the version-bump
+      # workflow's `cargo update` (which regenerates the lockfile
+      # for the new version) cannot regress us.
+      # See the workspace Cargo.toml comment + the renovate.json
+      # `windows-core` suppression rule for the upgrade checklist.
+      - name: Enforce windows-core = 0.61.2 precise-pin (cpal 0.18.1 macro compat)
+        run: cargo update -p windows-core --precise 0.61.2
 
       - name: Build Tauri bundle (Windows, debug)
         uses: tauri-apps/tauri-action@v0
