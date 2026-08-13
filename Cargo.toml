@@ -109,6 +109,20 @@ objc2-event-kit = { version = "0.3.2", default-features = false, features = [
     "EKParticipant",
     "EKTypes",
 ] }
+# Windows microphone permission detection via the WinRT
+# `Windows.Security.Authorization.AppCapabilityAccess` API
+# (see src-tauri/src/voice/windows.rs). `windows 0.61` is the
+# series that ships the typed `AppCapability::Create` +
+# `AppCapability::CheckAccess` surface; we don't pull the
+# `Media_Capture_Capture` feature (heavier) because the
+# `AppCapability` route is hardware-agnostic — it just reads
+# the OS's per-app consent record. Pinned at the workspace
+# level so the `windows` + `windows-core` + `windows-targets`
+# trio resolves to one version across the lockfile.
+windows = { version = "0.61", default-features = false, features = [
+    "Security_Authorization_AppCapabilityAccess",
+    "Foundation",
+] }
 
 [profile.release]
 opt-level = 3

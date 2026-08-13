@@ -5877,6 +5877,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "whisper-rs",
+ "windows",
  "wiremock",
  "zbus 4.4.0",
  "zeroize",
