@@ -506,4 +506,58 @@ describe("StepAsk.svelte", () => {
     const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
     expect(called_with.browser_history).toEqual(["chrome", "firefox"]);
   });
+
+  // §17-5 — voice microphone permission denied-callout.
+  // The 3 cases below mirror the per-item brief's "3 vitest
+  // cases on the wizard step (default / enabled / denied-with-callout)".
+
+  it("(m) voice row defaults: no mic-permission callout when the IPC returns undefined", async () => {
+    // The onMount handler swallows the IPC rejection and
+    // leaves `mic_permission_state` undefined — the callout
+    // must stay hidden so we don't flash a misleading
+    // "denied" message.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "check_mic_permission_cmd") return Promise.reject("ipc fail");
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    await screen.findByTestId("ask-answers");
+    expect(screen.queryByTestId("mic-permission-denied-callout")).toBeNull();
+  });
+
+  it("(n) voice row enabled: no callout when mic permission is granted", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "check_mic_permission_cmd") return Promise.resolve("granted");
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    await screen.findByTestId("ask-answers");
+    // Let the onMount microtask flush.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId("mic-permission-denied-callout")).toBeNull();
+  });
+
+  it("(o) voice row denied: red callout appears with Open-Privacy-Settings button", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "check_mic_permission_cmd") return Promise.resolve("denied");
+      if (cmd === "mic_permission_deep_link_url_cmd")
+        return Promise.resolve("pavucontrol:");
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const callout = await screen.findByTestId("mic-permission-denied-callout");
+    expect(callout).toBeTruthy();
+    const btn = await screen.findByTestId("open-permission-settings");
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toMatch(/Open Privacy Settings/);
+  });
 });

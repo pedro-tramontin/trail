@@ -131,6 +131,18 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.31", features = ["client", "staging"] }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
+# Windows-only deps: the `windows` crate is the WinRT binding
+# the §17-5 mic permission module uses to call
+# `AppCapability::Create` + `CheckAccess`. `default-features = false`
+# is required so we don't drag in the full Win32 surface
+# (the foundation surface is enough — we only need the
+# Security.Authorization.AppCapabilityAccess API + the HSTRING
+# / IAsyncOperation plumbing from Foundation). The
+# `windows-rs` runtime crate is implicit via the `windows`
+# umbrella; no extra entry needed.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # HTTP mock server for the ollama client unit tests — see src/ollama.rs.

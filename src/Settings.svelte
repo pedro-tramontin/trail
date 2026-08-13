@@ -26,7 +26,18 @@
    * run onboarding in demo mode (the bootstrap refuses demo when
    * a real config exists) and the rest of Settings is
    * placeholder anyway, so the disabled copy is honest.
+   *
+   * §17-5 — voice microphone permission row. Reads the current
+   * OS-level mic permission via `check_mic_permission_cmd`,
+   * shows the human-readable state ("granted" / "denied" /
+   * "undetermined"), and surfaces a per-OS deep-link button
+   * when state == "denied". The "Test microphone" button runs
+   * `voice_start` for 2 s then `voice_stop` so the user can
+   * sanity-check the round-trip from Settings.
    */
+
+  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
 
   interface Props {
     onreset?: () => void;
@@ -34,6 +45,55 @@
   }
 
   let { onreset = () => {}, is_demo = false }: Props = $props();
+
+  let mic_permission: "granted" | "denied" | "undetermined" | undefined =
+    $state(undefined);
+  let mic_permission_url: string | undefined = $state(undefined);
+  let test_in_progress = $state(false);
+
+  onMount(() => {
+    invoke<string>("check_mic_permission_cmd")
+      .then((s) => {
+        if (s === "granted" || s === "denied" || s === "undetermined") {
+          mic_permission = s;
+        }
+      })
+      .catch(() => {
+        mic_permission = undefined;
+      });
+    invoke<string>("mic_permission_deep_link_url_cmd")
+      .then((u) => {
+        mic_permission_url = u;
+      })
+      .catch(() => {
+        mic_permission_url = undefined;
+      });
+  });
+
+  async function test_microphone(): Promise<void> {
+    if (test_in_progress) return;
+    test_in_progress = true;
+    try {
+      await invoke("voice_start");
+      await new Promise((r) => setTimeout(r, 2000));
+      await invoke("voice_stop");
+    } catch {
+      /* The IPC may fail if permission is denied; surface
+         the existing denied-callout instead of erroring here. */
+    } finally {
+      test_in_progress = false;
+    }
+  }
+
+  async function open_permission_settings(): Promise<void> {
+    if (!mic_permission_url) return;
+    const a = document.createElement("a");
+    a.href = mic_permission_url;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 
   function rerun_onboarding(): void {
     if (confirm("This will reset your Trail config. Continue?")) {
@@ -66,4 +126,75 @@
       Re-run onboarding
     </button>
   {/if}
+
+  <section class="voice-permission-row" data-testid="voice-permission-row">
+    <h2>Voice microphone permission</h2>
+    <p data-testid="voice-permission-state" class="state-{mic_permission ?? 'unknown'}">
+      Permission: <strong>{mic_permission ?? "checking…"}</strong>
+    </p>
+    {#if mic_permission === "denied"}
+      <button
+        type="button"
+        class="open-permission-settings"
+        data-testid="settings-open-permission"
+        onclick={open_permission_settings}
+      >
+        Open Privacy Settings
+      </button>
+    {/if}
+    <button
+      type="button"
+      class="test-microphone"
+      data-testid="settings-test-microphone"
+      disabled={test_in_progress}
+      onclick={test_microphone}
+    >
+      {test_in_progress ? "Recording…" : "Test microphone"}
+    </button>
+  </section>
 </section>
+
+<style>
+  .voice-permission-row {
+    margin-top: 1.5rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 6px;
+    background: var(--panel, #fafafa);
+  }
+  .voice-permission-row h2 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+  }
+  .state-denied strong {
+    color: #c62828;
+  }
+  .state-granted strong {
+    color: #2e7d32;
+  }
+  .open-permission-settings {
+    display: inline-block;
+    margin-right: 0.5rem;
+    padding: 0.35rem 0.8rem;
+    border: 1px solid #c62828;
+    background: #fff;
+    color: #c62828;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .test-microphone {
+    display: inline-block;
+    padding: 0.35rem 0.8rem;
+    border: 1px solid #1976d2;
+    background: #1976d2;
+    color: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .test-microphone:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+</style>

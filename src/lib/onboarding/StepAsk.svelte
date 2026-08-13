@@ -1,12 +1,36 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { writable, type Writable } from "svelte/store";
+  import { onMount } from "svelte";
   import type {
     OnboardingAnswers,
     ScanReport,
     StepAskState,
     QuestionLogEntry,
   } from "./types";
+
+  /** §17-5 — microphone permission state for the wizard's
+   *  denied-callout. Fetched on mount via the new
+   *  `check_mic_permission_cmd` Tauri command. Undefined while
+   *  the IPC is in flight (the callout is hidden during that
+   *  window so we don't flash a "denied" message that the OS
+   *  later overrules). */
+  let mic_permission_state: "granted" | "denied" | "undetermined" | undefined =
+    $state(undefined);
+
+  onMount(() => {
+    invoke<string>("check_mic_permission_cmd")
+      .then((s) => {
+        if (s === "granted" || s === "denied" || s === "undetermined") {
+          mic_permission_state = s;
+        }
+      })
+      .catch(() => {
+        // Permission check is best-effort — if the IPC fails,
+        // leave the state undefined and don't render the callout.
+        mic_permission_state = undefined;
+      });
+  });
 
   /**
    * Step 3 — LLM-driven Q&A (item 6-2).
@@ -771,6 +795,49 @@
         </span>
       </li>
 
+      {#if mic_permission_state === "denied"}
+        <li
+          class="answer-row permission-denied-callout"
+          data-testid="mic-permission-denied-callout"
+          aria-live="polite"
+        >
+          <span class="label">Microphone permission</span>
+          <span class="value">
+            <strong>denied</strong>. Open your system's privacy settings to
+            grant Trail access:
+            <button
+              type="button"
+              class="open-permission-settings"
+              data-testid="open-permission-settings"
+              onclick={async () => {
+                try {
+                  const url = await invoke<string>(
+                    "mic_permission_deep_link_url_cmd",
+                  );
+                  // Open the per-OS URL via a hidden anchor.
+                  // `tauri-plugin-opener` isn't wired in this
+                  // build, but the per-OS schemes (pavucontrol:,
+                  // ms-settings:privacy-microphone, the macOS
+                  // Apple-preferences URL) all work via a plain
+                  // anchor click in the system browser handler.
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.style.display = "none";
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                } catch {
+                  /* ignore — the user can still grant permission
+                     via System Settings manually */
+                }
+              }}
+            >
+              Open Privacy Settings
+            </button>
+          </span>
+        </li>
+      {/if}
+
       <li class="answer-row" data-testid="row-review-time">
         <span class="label">Review time</span>
         <span class="value review-time">
@@ -983,6 +1050,35 @@
     font-size: 0.8rem;
     color: var(--muted, #666);
     line-height: 1.3;
+  }
+  /** §17-5 — red-bordered denied-callout that appears below
+   *  the voice row when the OS reports mic permission denied.
+   *  Uses a 2 px solid red border + light pink fill so the
+   *  issue is impossible to miss in the wizard flow. */
+  .permission-denied-callout {
+    border: 2px solid #c62828;
+    border-radius: 6px;
+    padding: 0.6rem 0.9rem;
+    margin: 0.5rem 0;
+    background: #ffebee;
+    color: #4a1414;
+  }
+  .permission-denied-callout .label {
+    font-weight: 600;
+  }
+  .open-permission-settings {
+    margin-left: 0.5rem;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid #c62828;
+    background: #fff;
+    color: #c62828;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .open-permission-settings:hover {
+    background: #c62828;
+    color: #fff;
   }
   /**
    * Review-time row uses a flex layout in its value slot so

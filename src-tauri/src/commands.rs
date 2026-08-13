@@ -350,6 +350,63 @@ pub async fn voice_abort(
     Ok("voice capture aborted".into())
 }
 
+// ---------------------------------------------------------------------------
+// §17-5 — Per-OS microphone permission IPC commands.
+//
+// The wizard's "Test microphone" button (and the Settings
+// permission row) need to read the current OS-level
+// microphone permission state from the frontend. These three
+// commands are thin wrappers over
+// `crate::voice::permission::*`:
+//
+//   - `check_mic_permission_cmd` — read-only status query.
+//   - `request_mic_permission_cmd` — trigger the OS
+//     permission prompt (no-op on Linux, Win32
+//     `RequestAccessAsync` on Windows, AVFoundation
+//     `requestAccessForMediaType:` on macOS).
+//   - `mic_permission_deep_link_url_cmd` — return the per-OS
+//     "open the right settings pane" URL. The frontend hands
+//     this to `tauri-plugin-opener` when the wizard surfaces
+//     the red "denied" callout.
+//
+// The `MicPermissionState` enum is `Serialize` (the lowercase
+// "granted" / "denied" / "undetermined" string reaches the
+// frontend via `serde_json`), so the TypeScript side branches
+// on the lowercase variant name directly.
+// ---------------------------------------------------------------------------
+
+/// Tauri command: return the current OS-level microphone
+/// permission state as a lowercase string ("granted" /
+/// "denied" / "undetermined"). Cheap (no prompt) — safe to
+/// call on every wizard render.
+#[tauri::command]
+pub fn check_mic_permission_cmd() -> String {
+    crate::voice::permission::check_mic_permission().to_string()
+}
+
+/// Tauri command: trigger the OS microphone permission
+/// prompt. On macOS this surfaces the TCC dialog; on Windows
+/// the Settings consent dialog; on Linux it's a no-op (the
+/// daemon prompts the user on first device open instead).
+/// Returns the post-prompt state as a lowercase string.
+#[tauri::command]
+pub fn request_mic_permission_cmd() -> String {
+    crate::voice::permission::request_mic_permission().to_string()
+}
+
+/// Tauri command: return the per-OS deep-link URL the
+/// frontend hands to `tauri-plugin-opener` when the user
+/// clicks "Open Privacy Settings" on the denied callout. The
+/// URL is per-OS:
+///
+///   - macOS: `x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone`
+///   - Linux: `pavucontrol:`
+///   - Windows: `ms-settings:privacy-microphone`
+#[tauri::command]
+pub fn mic_permission_deep_link_url_cmd() -> String {
+    crate::voice::permission::mic_permission_deep_link_url().to_string()
+}
+
 /// Resolve the `~/.trail/` root directory from the loaded config. The
 /// config itself doesn't store its own location (we only ever persist
 /// the raw/drafts subdirs), so we look next to the config file —

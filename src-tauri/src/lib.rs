@@ -735,6 +735,19 @@ pub fn run() {
             // shared samples buffer, aborts the consumer task, and
             // removes any partial WAV + JSON files.
             commands::voice_abort,
+            // §17-5 — per-OS microphone permission IPC commands.
+            // The wizard's "Test microphone" button + the
+            // Settings permission row read the current OS-level
+            // permission state via `check_mic_permission_cmd`,
+            // trigger the OS prompt via
+            // `request_mic_permission_cmd`, and resolve the
+            // per-OS deep-link URL via
+            // `mic_permission_deep_link_url_cmd` so the
+            // frontend can hand it to `tauri-plugin-opener` on
+            // the denied callout.
+            commands::check_mic_permission_cmd,
+            commands::request_mic_permission_cmd,
+            commands::mic_permission_deep_link_url_cmd,
             list_collectors,
             run_collector_now,
             set_collector_enabled,
