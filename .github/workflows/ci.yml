@@ -192,6 +192,11 @@ jobs:
       # https://v2.tauri.app/start/prerequisites/
       - name: Install Linux system deps (Tauri 2)
         run: |
+          # cpal (un-gated in the voice cross-platform work) pulls in
+          # alsa-sys on Linux; alsa-sys' build script runs pkg-config
+          # against alsa.pc, which lives in libasound2-dev. Without
+          # this the rust-clippy job fails with "Package alsa was not
+          # found in the pkg-config search path".
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
@@ -205,7 +210,8 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libwebkit2gtk-4.1-dev \
-            libglib2.0-dev
+            libglib2.0-dev \
+            libasound2-dev
 
       # dtolnay/rust-toolchain@stable picks up the toolchain pin
       # from rust-toolchain.toml at the repo root (stable-1.81.x).
@@ -235,3 +241,28 @@ jobs:
       # the MSRV pin that prevents clippy from suggesting idioms
       # stable on 1.97 but not 1.81.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # TEMPORARY GUARD: assert windows-core = 0.61.2 in Cargo.lock.
+      # cpal 0.18.1's #[windows::core::implement] macros were
+      # generated against the 0.61.x `Interface` trait. A bare
+      # `cargo update` would re-bump windows-core to 0.62.2 and
+      # silently re-introduce the E0277 on draft-windows. The
+      # `--locked` flag above already catches lockfile drift with
+      # a generic error; this check gives a specific, actionable
+      # message pointing at the upgrade checklist. Companion to
+      # the precise-pin steps in draft-build.yml's draft-windows
+      # + build-windows jobs (which re-apply the pin at build
+      # time, so the *compiled* binary is always correct). To
+      # re-enable bumping, see the workspace Cargo.toml comment
+      # + the renovate.json `windows-core` packageRule; all
+      # three must be removed together.
+      - name: Assert windows-core = 0.61.2 precise-pin
+        run: |
+          ACTUAL=$(grep -A1 '^name = "windows-core"$' Cargo.lock | grep -E '^version' | head -1 | sed -E 's/.*"([0-9][^"]*)".*/\1/')
+          if [ "$ACTUAL" != "0.61.2" ]; then
+            echo "::error::Cargo.lock has windows-core = $ACTUAL; this build requires 0.61.2 (cpal 0.18.1 macro compat)."
+            echo "::error::Re-apply the precise-pin with: cargo update -p windows-core --precise 0.61.2"
+            echo "::error::See the comment block in workspace Cargo.toml for the upgrade checklist."
+            exit 1
+          fi
+          echo "OK: windows-core = $ACTUAL in Cargo.lock"
