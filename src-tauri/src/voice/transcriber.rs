@@ -7,10 +7,17 @@
 //! callers can surface this to the UI (e.g., trigger a model download
 //! via §5.1).
 //!
-//! On Linux tests, the model is optional: `transcribe` returns a
-//! successful empty `Transcript` if the env var is unset or the
-//! model file isn't there. This lets the pipeline be tested
-//! end-to-end without a 150 MB model on disk on CI.
+//! On hosts where the env var is unset or the model file isn't
+//! present (CI agents, fresh developer clones), `transcribe` returns
+//! an empty `Transcript`. This lets the upstream pipeline be
+//! unit-tested end-to-end without a 150 MB model on disk.
+//!
+//! whisper-rs is built on every host — its CoreML/CUDA/DirectML
+//! backends are selected at runtime by the feature flags the user
+//! passes to `cargo build`. The platform-agnostic decode pipeline
+//! (`FullParams::new(SamplingStrategy::Greedy)` → `state.full()` →
+//! `state.get_segment(i).to_str()`) runs the same on Linux, macOS,
+//! and Windows.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,58 +51,44 @@ pub struct Transcript {
 
 /// Lazy-initialized whisper context. The first call to `init_context`
 /// loads the model from disk. Subsequent calls reuse the same
-/// `WhisperContext` (the actual whisper-rs state lives inside the
-/// `Box<dyn Any>` and is only touched on macOS).
+/// `WhisperContext` — re-reading a 150 MB GGML file on every
+/// transcription is wasteful, and whisper.cpp's underlying
+/// `whisper_init_*` is not particularly cheap either.
 static WHISPER_CONTEXT: Lazy<Arc<Mutex<Option<WhisperContext>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
+/// Wrapped `whisper_rs::WhisperContext` plus the on-disk path it was
+/// loaded from. The `model_path` is exposed for diagnostics (the UI
+/// can show "loaded model from …") and for the unit tests that want
+/// to assert the right file got picked up.
 pub struct WhisperContext {
     pub model_path: PathBuf,
-    /// The actual whisper-rs context is wrapped in an opaque `Box`
-    /// so its type signature doesn't leak into this module's public
-    /// API (whisper-rs isn't built on Linux — only on macOS).
-    _ctx: Box<dyn std::any::Any + Send + Sync>,
+    ctx: whisper_rs::WhisperContext,
 }
 
 impl WhisperContext {
-    /// Load a whisper context from a model file. On macOS this
-    /// actually constructs a `whisper_rs::WhisperContext`; on
-    /// non-macOS it just records the path so the rest of the
-    /// pipeline can be unit-tested without a 150 MB model on disk.
+    /// Load a whisper context from a model file. Always constructs a
+    /// real `whisper_rs::WhisperContext`; the platform-agnostic
+    /// `Wctx::new_with_params` call is what replaced the old
+    /// macOS-only `Box<dyn Any>` stub.
     pub fn load(path: &Path) -> Result<Self, TranscribeError> {
         if !path.exists() {
             return Err(TranscribeError::ModelMissing(path.to_path_buf()));
         }
-        #[cfg(target_os = "macos")]
-        {
-            use whisper_rs::WhisperContext as Wctx;
-            let path_str = path.to_str().ok_or_else(|| {
-                TranscribeError::Whisper(format!("non-utf8 model path: {}", path.display()))
-            })?;
-            // `WhisperContext::new` was removed in whisper-rs 0.13;
-            // the replacement is `new_with_params` which takes a
-            // `WhisperContextParameters` value. The defaults match
-            // what the old `new(path)` call did (no GPU, no flash
-            // attention, no DTW).
-            let ctx =
-                Wctx::new_with_params(path_str, whisper_rs::WhisperContextParameters::default())
-                    .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
-            Ok(Self {
-                model_path: path.to_path_buf(),
-                _ctx: Box::new(ctx),
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // On Linux/Windows we don't build whisper-rs. The
-            // pipeline returns an empty `Transcript` instead, so
-            // the `transcribe` codepath can be exercised in tests
-            // without a model.
-            Ok(Self {
-                model_path: path.to_path_buf(),
-                _ctx: Box::new(()),
-            })
-        }
+        use whisper_rs::WhisperContext as Wctx;
+        // `WhisperContext::new` was removed in whisper-rs 0.13; the
+        // replacement is `new_with_params` which takes a
+        // `WhisperContextParameters` value. The defaults match
+        // what the old `new(path)` call did (no GPU, no flash
+        // attention, no DTW) — runtime feature flags from the user's
+        // build command select CoreML (macOS) / CUDA (Linux/Windows)
+        // / DirectML (Windows) at a higher level.
+        let ctx = Wctx::new_with_params(path, whisper_rs::WhisperContextParameters::default())
+            .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
+        Ok(Self {
+            model_path: path.to_path_buf(),
+            ctx,
+        })
     }
 }
 
@@ -116,14 +109,13 @@ pub fn init_context(model_path: &Path) -> Result<PathBuf, TranscribeError> {
 
 /// Transcribe a buffer of 16 kHz mono PCM samples.
 ///
-/// On macOS, runs the full whisper pipeline. On Linux (and in
-/// tests), returns an empty `Transcript` if the
-/// `TRAIL_WHISPER_MODEL` env var is unset or the model file is
-/// missing — so the pipeline can be tested without a 150 MB
-/// model on disk.
+/// Always runs the same whisper-rs decode pipeline. If
+/// `TRAIL_WHISPER_MODEL` is unset or the model file is missing, the
+/// function short-circuits to an empty `Transcript` so the rest of
+/// the pipeline (UI wiring, store writes) can be exercised on hosts
+/// that haven't downloaded the model yet — e.g. CI agents and fresh
+/// developer clones.
 pub async fn transcribe(samples: &[f32]) -> Result<Transcript, TranscribeError> {
-    let _samples_len = samples.len();
-
     // Look up the model path. If it's unset or missing, return
     // an empty transcript (the test + Linux-CI path).
     let model_path = std::env::var("TRAIL_WHISPER_MODEL").ok().map(PathBuf::from);
@@ -132,40 +124,74 @@ pub async fn transcribe(samples: &[f32]) -> Result<Transcript, TranscribeError> 
         _ => return Ok(Transcript::default()),
     };
 
+    // `state.full` panics on an empty input buffer, so short-circuit
+    // here with an empty transcript instead of round-tripping through
+    // whisper (the unit tests pass an empty `&[]` to assert this
+    // exact behaviour).
+    if samples.is_empty() {
+        return Ok(Transcript::default());
+    }
+
     // Eagerly initialize the context so the lazy cell is populated
-    // before we hand off to the platform-specific branch.
+    // before we run the decode. `init_context` is idempotent so
+    // repeated calls during a single session just hit the fast path.
     init_context(&model_path)?;
-    let _ctx_loaded = WHISPER_CONTEXT.lock().is_some();
 
-    // Actual whisper run is macOS-only. On Linux/Windows we
-    // return an empty `Transcript` because the model file shape
-    // is unknown and there's no `whisper_rs` binary linked.
-    #[cfg(target_os = "macos")]
-    {
-        // Touch the imports so the cfg-gated block compiles even
-        // though v1 doesn't run the full pipeline yet (the real
-        // `state.full(...)` call lands in §5.7).
-        // whisper-rs 0.13 makes `SamplingStrategy` a public type
-        // accessible via the `whisper_rs::SamplingStrategy` path.
-        // The earlier `as _` trait-import trick was a workaround
-        // for an older release; the proper import now brings the
-        // type into scope so the enum variants resolve.
-        use whisper_rs::SamplingStrategy;
-        let _ = SamplingStrategy::Greedy { best_of: 1 };
-        let _ = _ctx_loaded;
-        Ok(Transcript::default())
-    }
+    // Hold the lazy-cell guard through the decode. `whisper_rs`
+    // doesn't expose `Clone` on `WhisperContext` in 0.16, so cloning
+    // to drop the lock early isn't an option; instead we accept the
+    // serialisation (one transcription at a time per process) which
+    // matches the upstream caller model anyway — the UI gates the
+    // "Stop" button on the in-flight `voice_stop` promise and won't
+    // kick off a second `transcribe` until the first resolves.
+    let guard = WHISPER_CONTEXT.lock();
+    let ctx = guard
+        .as_ref()
+        .expect("context was just initialized above")
+        .ctx
+        .create_state()
+        .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = _ctx_loaded;
-        Ok(Transcript::default())
+    // Build a fresh `WhisperState` per decode. whisper-rs' state
+    // carries the KV cache + internal scratch buffers; reusing it
+    // across calls is possible (and faster) but for v1 we keep one
+    // state per call to avoid the cross-call locking + lifecycle
+    // complications. The context itself is still cached, which is
+    // where the 150 MB read saving lives.
+    let mut state = ctx;
+    let mut params =
+        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+    params.set_language(Some("en"));
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    state
+        .full(params, samples)
+        .map_err(|e| TranscribeError::Whisper(e.to_string()))?;
+
+    let num_segments = state.full_n_segments();
+    let mut text = String::new();
+    for i in 0..num_segments {
+        if let Some(seg) = state.get_segment(i) {
+            // `to_str_lossy` replaces invalid UTF-8 with the
+            // replacement char rather than failing the whole
+            // decode — better UX than surfacing a `WhisperError`
+            // for a single garbled byte in a non-English model.
+            if let Ok(cow) = seg.to_str_lossy() {
+                text.push_str(cow.as_ref());
+            }
+        }
     }
+    Ok(Transcript {
+        text,
+        segments: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn lazy_context_init_fails_on_missing_model() {
@@ -176,24 +202,60 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_empty_buffer_returns_empty_transcript() {
+        // The empty-buffer path short-circuits before the model
+        // decode, so it always passes — regardless of whether
+        // `TRAIL_WHISPER_MODEL` is set.
         let result = transcribe(&[]).await.expect("transcribe");
         assert_eq!(result.text, "");
         assert_eq!(result.segments.len(), 0);
     }
 
+    /// Decode a 5-second sine wave through the real whisper-rs
+    /// pipeline. Skipped unless the user points
+    /// `TRAIL_WHISPER_MODEL` at a real model file on disk (the
+    /// ~150 MB `ggml-base.en.bin`). When the model is present the
+    /// decode must return `Ok` within a 10-second deadline — a sine
+    /// wave is not speech, so the produced text is empty/noisy, but
+    /// the pipeline itself must not error out.
     #[tokio::test]
+    #[ignore = "requires TRAIL_WHISPER_MODEL pointing at a real ggml-base.en.bin on disk"]
     async fn transcribe_synthesized_5sec_buffer_returns_valid_transcript() {
+        let model_path = match std::env::var("TRAIL_WHISPER_MODEL").ok().map(PathBuf::from) {
+            Some(p) if p.exists() => p,
+            _ => {
+                eprintln!("skipping: TRAIL_WHISPER_MODEL is unset or the model file is missing");
+                return;
+            }
+        };
+
         // 5 seconds @ 16 kHz mono = 80_000 samples. The exact text
-        // content is model-dependent; on Linux we just verify the
-        // shape is correct (empty transcript, no panic).
+        // content is model-dependent (a sine wave is not speech, so
+        // the model produces empty or noisy output); we just verify
+        // the pipeline doesn't error out within the deadline.
         let samples: Vec<f32> = (0..80_000)
             .map(|i| {
                 let t = (i as f32) / 16_000.0;
                 (t * 440.0 * std::f32::consts::PI * 2.0).sin() * 0.5
             })
             .collect();
+
+        // Touch `model_path` to keep the unused-variable lint quiet
+        // when the env var is set but the file is missing — the
+        // `match` above already returns early in that case, so this
+        // line only runs when the path is real.
+        let _ = model_path;
+
+        let start = Instant::now();
         let result = transcribe(&samples).await.expect("transcribe");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "transcribe took {elapsed:?}, exceeded 10-second deadline"
+        );
+        // Sine wave → no speech → empty / no-segment transcript.
+        // The model is allowed to produce some noisy tokens, but the
+        // structure must hold: a `Transcript` value, not an error.
+        let _ = result.text;
         assert_eq!(result.segments.len(), 0);
-        assert_eq!(result.text, "");
     }
 }
