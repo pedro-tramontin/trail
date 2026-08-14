@@ -48,7 +48,50 @@ humantime = "2.4.0"
 wiremock = "0.6.5"
 sha2 = "0.10"
 # Phase 5 §5.1 — whisper model download + audio capture.
-whisper-rs = "0.16.0"
+#
+# The default feature set (used by the collector crate, which
+# doesn't link whisper.cpp) is empty — the GPU backends are
+# activated per-target below because each GPU feature requires
+# matching SDK + system libraries at *build* time. whisper-rs
+# itself has no runtime `install_gpu()` call; GPU selection is a
+# compile-time decision wired into whisper.cpp's CMake.
+#
+# Per-target feature splits:
+#
+#   - macOS:        `metal`     (Apple Metal framework ships
+#                                with the OS; ggml-metal's CMake
+#                                builds cleanly on darwin).
+#   - Linux:        `vulkan`    (Mesa RADV / NVK / AMDVLK
+#                                drivers are packaged as
+#                                `libvulkan1` / `mesa-vulkan-drivers`
+#                                on every distro; whisper-rs-sys
+#                                links `-lvulkan` directly
+#                                without an SDK install on Linux).
+#   - Windows:      `vulkan`    (DirectML is built into whisper.cpp
+#                                unconditionally so the DX12 path
+#                                is available without a separate
+#                                Cargo feature; Vulkan is added
+#                                for NVIDIA / AMD / Intel GPUs
+#                                that prefer it).
+#
+# §5b D1: `cuda` is INTENTIONALLY OMITTED (anywhere). whisper-rs-sys's
+# `cuda` feature pulls in the NVIDIA CUDA Toolkit at *build* time
+# — not just a runtime library, the full `nvcc` + `libcublas` +
+# `libcudart` SDK (~5 GB). Our build host has neither
+# `/usr/local/cuda` nor `nvcc`, and the GitHub Actions runners
+# don't ship the NVIDIA driver. NVIDIA users still get GPU
+# acceleration on Linux + Windows via the `vulkan` backend (the
+# NVIDIA proprietary Vulkan driver + the open-source NVK both
+# expose the CUDA compute surface through Vulkan 1.3+).
+#
+# §5b D2: `metal` is gated to macOS-only. whisper-rs-sys's
+# `build.rs` unconditionally sets `GGML_METAL=ON` when the
+# `metal` feature is on — even on Linux, where ggml-metal's
+# CMake can't find the Apple Foundation framework (a macOS
+# system library). The per-target feature split below avoids
+# the cross-build failure while keeping Metal enabled for the
+# macOS runner.
+whisper-rs = { version = "0.16.0", default-features = false }
 hound = "3.5.1"
 # dirs 5 → 6: dirs 5 used `dirs-sys 0.4` which still pulls in
 # `redox_users 0.4` (via the implicit `dirs-sys` chain); mainline has

@@ -557,6 +557,8 @@ mod tests {
                 hotkey: "ctrl+shift+space".into(),
                 transcriber: "whisper_cpp".into(),
                 model: "base.en".into(),
+                gpu_acceleration: true,
+                gpu_fallback_logged: false,
             },
             review_time: "18:00".into(),
             summarizer: SummarizerConfig {

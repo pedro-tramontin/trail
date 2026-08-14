@@ -201,18 +201,28 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
     };
 
     // -------- voice ----------
+    // 2026-08-13 (D2): `gpu_acceleration` defaults to `true` (the
+    // user's wizard preference is "yes, try GPU"). The
+    // `gpu_fallback_logged` companion is internal state the
+    // Settings panel flips to `true` the first time it surfaces
+    // a "GPU disabled: <reason>" banner, so the warning isn't
+    // spammed on every transcribe call.
     let voice = match &answers.voice {
         Some(v) if v.enabled => VoiceConfig {
             enabled: true,
             hotkey: "ctrl+shift+space".to_string(),
             transcriber: "whisper_cpp".to_string(),
             model: v.model.clone(),
+            gpu_acceleration: true,
+            gpu_fallback_logged: false,
         },
         _ => VoiceConfig {
             enabled: false,
             hotkey: "ctrl+shift+space".to_string(),
             transcriber: "whisper_cpp".to_string(),
             model: "base.en".to_string(),
+            gpu_acceleration: true,
+            gpu_fallback_logged: false,
         },
     };
 
@@ -727,6 +737,8 @@ mod tests {
                 hotkey: "ctrl+shift+space".to_string(),
                 transcriber: "whisper_cpp".to_string(),
                 model: "base.en".to_string(),
+                gpu_acceleration: true,
+                gpu_fallback_logged: false,
             },
             review_time: "18:00".to_string(),
             summarizer: CfgSummarizerConfig {
