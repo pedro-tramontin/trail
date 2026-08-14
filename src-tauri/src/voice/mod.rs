@@ -24,7 +24,9 @@ pub mod tray_blink;
 
 pub use abort::{no_op_abort, voice_abort, AbortError};
 pub use capture::{resample_to_16k, spawn_capture_loop, CaptureError, CaptureState, Frame};
-pub use hotkey::{parse_hotkey, register as register_hotkey, HotKey, HotkeyError};
+pub use hotkey::{
+    active_backend_label, parse_hotkey, register as register_hotkey, HotKey, HotkeyError,
+};
 pub use meter::Meter;
 pub use model_manager::{ensure_model, ensure_model_with, ModelError, EXPECTED_SHA256, MODEL_URL};
 pub use permission::{
