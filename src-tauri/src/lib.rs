@@ -735,6 +735,12 @@ pub fn run() {
             // shared samples buffer, aborts the consumer task, and
             // removes any partial WAV + JSON files.
             commands::voice_abort,
+            // Phase 5 §5.5 — voice capture IPC commands. Wired here
+            // (§17-8) so the platform-agnostic cpal + whisper
+            // pipeline is reachable from the menu-bar UI's
+            // push-to-talk + "Test microphone" buttons on all 3 OSes.
+            commands::voice_start,
+            commands::voice_stop,
             // §17-5 — per-OS microphone permission IPC commands.
             // The wizard's "Test microphone" button + the
             // Settings permission row read the current OS-level

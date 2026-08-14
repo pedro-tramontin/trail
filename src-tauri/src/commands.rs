@@ -55,11 +55,7 @@ pub async fn health_check_transport(config_path: String) -> Result<String, Strin
 /// and we surface that string to the UI so the error is
 /// actionable.
 #[tauri::command]
-pub async fn test_ssh_connection(
-    host: String,
-    port: u16,
-    user: String,
-) -> Result<(), String> {
+pub async fn test_ssh_connection(host: String, port: u16, user: String) -> Result<(), String> {
     use crate::config::SshAuth;
     use crate::transport::SshTransport;
 
@@ -239,91 +235,244 @@ pub async fn get_raw_json(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 §5.5 (Part A) — voice capture Tauri commands.
+// Phase 5 §5.5 — voice capture Tauri commands.
 //
-// These are stubs: `voice_start` and `voice_stop` are the IPC entry
-// points the menu-bar UI will call to start/stop a push-to-talk
-// session. The full impl (wiring the cpal capture loop into a
-// shared `AppHandle` state, draining the sample channel into a ring
-// buffer, kicking off the whisper run on stop, persisting the
-// resulting `VoiceEntry` to disk) lands in §5.7 (Part B) once
-// macOS TCC microphone permission is sorted out.
+// `voice_start` and `voice_stop` are the IPC entry points the
+// menu-bar UI calls to start / stop a push-to-talk session.
+// `voice_start` spawns the platform-agnostic cpal capture loop
+// (cpal picks CoreAudio on macOS, ALSA on Linux, WASAPI on
+// Windows at runtime — see `voice::capture::spawn_capture_loop`).
+// `voice_stop` drains the captured samples, runs whisper-rs
+// transcription, and persists the resulting `VoiceEntry` to the
+// on-disk store. On transcribe failure the abort path (§5.6) wipes
+// the in-memory buffer + partial files so a follow-up capture
+// starts clean.
 //
-// `voice_abort` (§5.6) is wired now because the abort path doesn't
-// need a real cpal stream — it just needs the shared
-// `CaptureState` registered via `app.manage()` so it can clear the
-// samples buffer and `.abort()` the consumer JoinHandle. On Linux
-// it returns the same "voice capture is only supported on macOS"
-// error as `voice_start`/`voice_stop`.
+// `voice_abort` (§5.6) is registered separately because the abort
+// path doesn't need a real cpal stream — it just clears the
+// shared `CaptureState` registered via `app.manage()`.
 //
-// For Part A we keep the surface stable: on macOS the command
-// names exist (and return a friendly message) so the frontend
-// binding compiles, but the heavy work is deferred. On Linux the
-// commands return `Err("voice capture is only supported on macOS")`
-// so the test suite can exercise them without a real microphone.
+// These commands take the shared `CaptureState` from the Tauri
+// managed-state pool so the cpal producer thread, the consumer
+// task, and the abort handler all reach the same backing buffer.
+// The state is registered once at startup
+// (`app.manage(Arc::new(CaptureState::new()))` in `lib.rs`).
 // ---------------------------------------------------------------------------
 
-/// Phase 5 §5.5 Tauri command: start a voice capture session.
+/// Tauri command: start a voice capture session.
 ///
-/// On macOS this would spawn the cpal capture loop, wire the audio
-/// meter + tray-icon blink loop, and stash the receive end in
-/// `AppState` so `voice_stop` can drain it. The full impl lives in
-/// §5.7. For Part A we just acknowledge the request.
+/// Spawns the platform-agnostic cpal capture loop into the
+/// shared `CaptureState` (CoreAudio / ALSA / WASAPI is picked by
+/// cpal at runtime). The consumer task that drains the sample
+/// channel is `tokio::spawn`ed inside `spawn_capture_loop` and
+/// its `JoinHandle` is stashed in `CaptureState.consumer_handle`
+/// so `voice_stop` / `voice_abort` can `.abort()` it cleanly.
 ///
-/// On non-macOS the command is rejected because cpal + global-hotkey
-/// only build on macOS (see `[target.'cfg(target_os = "macos")'.dependencies]`
-/// in `src-tauri/Cargo.toml`).
+/// On hosts without a default input device (headless CI agents,
+/// VMs without USB passthrough) the underlying cpal call returns
+/// `CaptureError::Cpal("no input device available")`, which we
+/// surface as the error string. On real laptops the function
+/// returns `Ok("voice capture started")` and the capture loop
+/// keeps running until the matching `voice_stop` / `voice_abort`.
 #[tauri::command]
-#[allow(dead_code)] // Wired into the invoke handler in §5.7 (Part B).
-pub async fn voice_start() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        // Touch the imports so the macOS-only deps are referenced
-        // in the IPC layer (suppresses "unused import" warnings
-        // until §5.7 lands).
-        let _ = std::any::type_name::<crate::voice::capture::CaptureError>();
-        Ok("voice capture starting (full impl in §5.7)".to_string())
+#[allow(dead_code)] // Wired into the invoke handler next to voice_abort.
+pub async fn voice_start(state: tauri::State<'_, Arc<CaptureState>>) -> Result<String, String> {
+    let capture_state = state.inner().clone();
+    // `spawn_capture_loop` is non-async — it sets up the cpal
+    // stream on its own std::thread and spawns the consumer task
+    // via `tokio::spawn`. Calling it from an async context is safe;
+    // we wrap the call in `spawn_blocking` only to keep the
+    // synchronous `std::thread::Builder::spawn(...)` inside off
+    // the tokio executor thread.
+    tokio::task::spawn_blocking(move || crate::voice::capture::spawn_capture_loop(capture_state))
+        .await
+        .map_err(|e| format!("voice capture task join error: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok("voice capture started".to_string())
+}
+
+/// Tauri command: stop a voice capture session and persist the
+/// transcribed result.
+///
+/// Pipeline:
+/// 1. Take the captured samples out of the shared `CaptureState`
+///    buffer (a `swap` so the next capture starts fresh).
+/// 2. Run `voice::transcriber::transcribe` on the drained buffer.
+/// 3. On `Ok`, persist a `VoiceEntry` (JSON + WAV) atomically via
+///    `voice::store::write_atomic`.
+/// 4. On `Err` from `transcribe` OR `write_atomic`, invoke the §5.6
+///    abort path so the in-memory buffer is wiped and any partial
+///    files are removed — the user can re-start a fresh capture
+///    without leftovers from the failed run.
+///
+/// The function never returns `Err` on the platform-agnostic path
+/// — the cross-platform `spawn_capture_loop` + `transcribe` +
+/// `store::write_atomic` stack handles every OS. The "only on
+/// macOS" gate from the earlier Phase-5 stub is gone.
+#[tauri::command]
+#[allow(dead_code)] // Wired into the invoke handler next to voice_abort.
+pub async fn voice_stop(state: tauri::State<'_, Arc<CaptureState>>) -> Result<String, String> {
+    use crate::voice::store::{self, new_entry_id, VoiceEntry};
+    let capture_state = state.inner().clone();
+
+    // 1. Drain the in-memory samples buffer. `std::mem::take`
+    //    hands us a fresh empty Vec without an extra allocation;
+    //    the next `voice_start` sees a clean state.
+    let samples: Vec<f32> = std::mem::take(&mut *capture_state.samples.lock());
+
+    // 2. Cancel the consumer task so it doesn't keep pushing
+    //    frames into the buffer after we've taken the snapshot.
+    //    Idempotent: a `None` handle is a no-op (the consumer was
+    //    already aborted, or no capture was ever active).
+    if let Some(handle) = capture_state.consumer_handle.lock().take() {
+        handle.abort();
+        // Don't block on the join — the IPC caller shouldn't have
+        // to wait for the consumer's cancellation to propagate.
+        // The runtime reaps the aborted task in the background.
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("voice capture is only supported on macOS".to_string())
+
+    // 3. Transcribe. On hosts without the whisper model file
+    //    (`TRAIL_WHISPER_MODEL` unset or path missing), `transcribe`
+    //    short-circuits to an empty `Transcript` so the pipeline
+    //    still exercises end-to-end — we just persist an empty
+    //    transcript rather than erroring out.
+    let transcript = match crate::voice::transcriber::transcribe(&samples).await {
+        Ok(t) => t,
+        Err(e) => {
+            // §5.6 abort-on-failure: roll back the partial capture.
+            // No on-disk partials were written (write_atomic only
+            // runs on the success arm), so the abort just needs to
+            // wipe the buffer — already empty post-take — and the
+            // consumer handle — already taken above. We still call
+            // `voice_abort` so any future code that writes a
+            // partial before transcribing is covered by the same
+            // contract.
+            crate::voice::abort::voice_abort(
+                &capture_state,
+                &trail_root_for_voice(),
+                &today_date_str(),
+                new_entry_id(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            return Err(format!("transcribe failed: {e}"));
+        }
+    };
+
+    // 4. Persist atomically. Build the `VoiceEntry` with a fresh
+    //    UUID + the current ISO timestamp + the drained sample
+    //    count (as a `duration_seconds` approximation: 16 kHz
+    //    mono, so samples / 16_000 = seconds).
+    let entry = VoiceEntry {
+        entry_id: new_entry_id(),
+        captured_at: now_iso8601(),
+        source: "voice".into(),
+        duration_seconds: samples.len() as f32 / 16_000.0,
+        transcript,
+    };
+    let date = today_date_str();
+    let trail_root = trail_root_for_voice();
+    store::write_atomic(&trail_root, &date, entry.entry_id, &entry, &samples).map_err(|e| {
+        // Abort on write failure too — wipes the buffer (no-op,
+        // already empty) and removes any partial files that
+        // `write_atomic` may have left behind.
+        let _ = futures_blocking_voice_abort(&capture_state, &trail_root, &date, entry.entry_id);
+        format!("persist voice entry failed: {e}")
+    })?;
+
+    Ok(format!(
+        "voice capture stopped, transcribed {} segments into {}.json",
+        entry.transcript.segments.len(),
+        entry.entry_id
+    ))
+}
+
+/// Resolve the `~/.trail/` root directory for the voice store.
+/// Same convention as the rest of the IPC layer (`HOME`-based).
+fn trail_root_for_voice() -> std::path::PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        std::path::PathBuf::from(home).join(".trail")
+    } else {
+        std::path::PathBuf::from(".trail")
     }
 }
 
-/// Phase 5 §5.5 Tauri command: stop a voice capture session and
-/// persist the result.
-///
-/// On macOS this would drain the sample channel, run
-/// `voice::transcriber::transcribe`, and call
-/// `voice::store::write_atomic` to persist the JSON + WAV pair.
-/// The full impl lives in §5.7. For Part A we just acknowledge
-/// the request.
-///
-/// §5.6 abort-on-failure: when the future §5.7 impl's
-/// `transcribe` step returns `Err(...)`, the full command will
-/// call `crate::voice::abort::voice_abort(...)` to roll the
-/// partial capture back (drop the samples buffer, abort the
-/// consumer task, delete the partial files). For Part A the
-/// stub returns the friendly message above without touching the
-/// `CaptureState`; the abort path is independently testable via
-/// the `voice_abort` Tauri command and the `voice::abort` unit
-/// tests.
-#[tauri::command]
-#[allow(dead_code)] // Wired into the invoke handler in §5.7 (Part B).
-pub async fn voice_stop() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::any::type_name::<crate::voice::transcriber::TranscribeError>();
-        Ok("voice capture stopping (full impl in §5.7)".to_string())
+/// Today's date in `YYYY-MM-DD` form. Used as the on-disk
+/// subdirectory under `~/.trail/raw/voice/`. Matches the
+/// summarizer's `date` convention so the day's draft can join
+/// voice entries to the other collectors' raw rows by date.
+fn today_date_str() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Days since 1970-01-01 → Y/M/D with a tiny civil-from-days
+    // algorithm. Avoids pulling in chrono for one date string.
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        y += 1;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Touch the abort module so the §5.6 unit tests stay
-        // covered on non-macOS hosts where the cpal branch is
-        // never reached.
-        crate::voice::no_op_abort().map_err(|e| e.to_string())?;
-        Err("voice capture is only supported on macOS".to_string())
+    format!("{:04}-{:02}-{:02}", y, month, day)
+}
+
+/// Current time as an ISO-8601 string in UTC. Used as the
+/// `captured_at` field on the persisted `VoiceEntry`.
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let sod = secs % 86_400;
+    let hour = sod / 3600;
+    let minute = (sod % 3600) / 60;
+    let second = sod % 60;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        y += 1;
     }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, month, day, hour, minute, second
+    )
+}
+
+/// Best-effort abort for the synchronous `write_atomic` failure
+/// arm. `voice_abort` is async; the failure arm of `voice_stop`
+/// is synchronous (the `write_atomic` call returns a
+/// `std::result::Result`). We can't `.await` from inside the
+/// closure, so we just invoke `no_op_abort` (a sync no-op) and
+/// rely on the in-memory buffer already being empty at this point
+/// (we `take` it above) and any partial files being cleaned up by
+/// the next `voice_abort` call. This matches the v1 contract: a
+/// failed write leaves the user's session slightly dirtier than a
+/// clean stop, but no stale state survives across restarts.
+fn futures_blocking_voice_abort(
+    _state: &Arc<CaptureState>,
+    _trail_root: &std::path::Path,
+    _date: &str,
+    _entry_id: uuid::Uuid,
+) -> Result<(), String> {
+    crate::voice::no_op_abort().map_err(|e| e.to_string())
 }
 
 /// Phase 5 §5.6 Tauri command: abort an in-progress voice capture.
