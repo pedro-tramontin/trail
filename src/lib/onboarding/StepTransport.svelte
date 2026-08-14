@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
   import { writable, type Writable } from "svelte/store";
   import type { StepTransportState } from "./types";
 
@@ -8,10 +9,10 @@
    *
    * Collects the VPS connection details (host, user, port) and
    * either generates a fresh ed25519 SSH keypair (stored in the
-   * macOS Keychain via the `generate_ssh_key` Tauri command from
-   * item 1-2) or attaches an existing key already in the
-   * keychain. The returned key path is surfaced in the UI so
-   * the user can confirm where the public key went.
+   * OS credential store via the `generate_ssh_key` Tauri command
+   * from item 1-2) or attaches an existing key already in the
+   * OS credential store. The returned key path is surfaced in
+   * the UI so the user can confirm where the public key went.
    *
    * Validation:
    *   - host: non-empty
@@ -37,13 +38,13 @@
    *   1. **Generate** — clicks the "Generate SSH key" button.
    *      Calls `generate_ssh_key`, which is idempotent
    *      (re-running returns the existing public key in the
-   *      keychain). First-run path.
-   *   2. **Use existing** — clicks "Use existing key in
-   *      keychain". Calls `get_ssh_public_key`; if it returns
-   *      `Some(pubkey)`, we set `ssh_key_path` to that value
-   *      without generating a new key. If `None`, we surface
-   *      a "no existing key found" error and the user can
-   *      fall back to Generate.
+   *      OS credential store). First-run path.
+   *   2. **Use existing** — clicks "Use existing key in OS
+   *      credential store". Calls `get_ssh_public_key`; if it
+   *      returns `Some(pubkey)`, we set `ssh_key_path` to that
+   *      value without generating a new key. If `None`, we
+   *      surface a "no existing key found" error and the user
+   *      can fall back to Generate.
    *
    * Both paths end with the same `ssh_key_path` value — a
    * public key in OpenSSH single-line form. The `ssh_key_source`
@@ -69,15 +70,15 @@
    *     `ssh_key_path` slot. The user can click as many
    *     times as they want.
    *   - Clicking Use existing overwrites `ssh_key_path` with
-   *     whatever's in the keychain right now.
+   *     whatever's in the OS credential store right now.
    *
    * ## "Test connection" button (PR #193)
    *
    * Calls the `test_ssh_connection` Tauri command (added in
    * this PR), which builds an `SshTransport` in-memory with
    * the (host, port, user) the user typed + publickey auth
-   * against whatever key is in the keychain, then runs
-   * `health_check()`. Result is shown next to the button:
+   * against whatever key is in the OS credential store, then
+   * runs `health_check()`. Result is shown next to the button:
    * a green ✅ "Connected" on success or a red error with
    * the message on failure. We do NOT advance or block Next
    * on the result — it's informational, so the user can still
@@ -88,6 +89,19 @@
    * valid (NOT on a key being attached) — even without a key
    * the user can press it, see the auth error, then attach a
    * key and test again, all on the same screen.
+   *
+   * ## Platform-neutral credential-store wording (§X-3)
+   *
+   * User-visible strings say "OS credential store" instead of
+   * "keychain". A native HTML `title` tooltip on the relevant
+   * affordances expands to the platform-specific name fetched
+   * from the `credential_store_name` Tauri command (Keychain
+   * on macOS, secret-service / GNOME Keyring / KWallet on
+   * Linux, Credential Manager on Windows). The command runs
+   * once on mount and the result is held in
+   * `credential_store_label`; the tooltip falls back to
+   * "OS credential store" if the IPC call fails so the UI
+   * still renders.
    */
 
   let {
@@ -97,6 +111,32 @@
     state: Writable<StepTransportState>;
     on_next: () => void;
   } = $props();
+
+  // Per-OS user-facing name of the OS credential store. Loaded
+  // once on mount from the `credential_store_name` Tauri command
+  // (PR §X-3). The fallback "OS credential store" matches the
+  // platform-neutral wording in the body copy — if the IPC
+  // call fails (test env, command not registered), the tooltip
+  // degrades to the same label the user already sees inline.
+  //
+  // We use a Svelte `writable` store rather than a `$state` rune
+  // for the label. The `state` prop above shadows the `$state`
+  // rune (svelte-check would flag it as `store_rune_conflict`),
+  // but a `writable` is just a regular variable — `$credential_label`
+  // in the template auto-subscribes and re-renders when the
+  // store's value changes. Net effect: tooltip updates on
+  // mount without an explicit `$state` declaration in this file.
+  const credential_label_store = writable<string>("OS credential store");
+  onMount(async () => {
+    try {
+      const label = await invoke<string>("credential_store_name");
+      if (label) credential_label_store.set(label);
+    } catch {
+      // Keep the fallback. The tooltip is best-effort UX; the
+      // body copy already says "OS credential store" so a missing
+      // IPC just means the tooltip repeats the body label.
+    }
+  });
 
   // The form fields bind to `$state.X` (Svelte's auto-store
   // subscription). The $store-name prefix auto-subscribes to
@@ -146,10 +186,10 @@
     }
   }
 
-  /** Read the public key for the key already in the keychain.
-   *  If found, adopt it as the wizard's `ssh_key_path`. If
-   *  no key exists, surface an actionable error so the user
-   *  can fall back to Generate. */
+  /** Read the public key for the key already in the OS
+   *  credential store. If found, adopt it as the wizard's
+   *  `ssh_key_path`. If no key exists, surface an actionable
+   *  error so the user can fall back to Generate. */
   async function use_existing_key(): Promise<void> {
     state.update((s) => {
       s.generating = true;
@@ -161,7 +201,7 @@
       state.update((s) => {
         if (pub === null || pub === "") {
           s.key_error =
-            "No existing SSH key found in keychain. Click 'Generate SSH key' to create one.";
+            "No existing SSH key found in OS credential store. Click 'Generate SSH key' to create one.";
         } else {
           s.ssh_key_path = pub;
           s.ssh_key_source = "existing";
@@ -276,6 +316,7 @@
           class="secondary"
           data-testid="transport-generate-key"
           disabled={$state.generating}
+          title="Store a fresh ed25519 key in the {$credential_label_store}"
           onclick={() => {
             void generate_key();
           }}
@@ -287,18 +328,23 @@
           class="secondary"
           data-testid="transport-use-existing-key"
           disabled={$state.generating}
+          title="Reuse the ed25519 key already in the {$credential_label_store}"
           onclick={() => {
             void use_existing_key();
           }}
         >
-          Use existing key in keychain
+          Use existing key in OS credential store
         </button>
       </div>
       {#if $state.ssh_key_path}
-        <p class="muted" data-testid="transport-key-path">
+        <p
+          class="muted"
+          data-testid="transport-key-path"
+          title="Stored in the {$credential_label_store}"
+        >
           ✅ Currently attached: {$state.ssh_key_source === "existing"
             ? "existing key from"
-            : "generated key in"} Keychain — <code>{$state.ssh_key_path}</code>
+            : "generated key in"} OS credential store — <code>{$state.ssh_key_path}</code>
         </p>
       {:else}
         <p class="hint" data-testid="transport-key-hint">

@@ -289,4 +289,98 @@ describe("StepTransport.svelte", () => {
       (screen.getByTestId("transport-next") as HTMLButtonElement).disabled,
     ).toBe(true);
   });
+
+  // §X-3 — per-OS tooltip for the credential-store affordances.
+  // The component fetches the platform-specific name from the
+  // `credential_store_name` Tauri command on mount and uses it
+  // in the `title` (native tooltip) attribute on the
+  // Generate / Use existing / key-path elements. These three
+  // cases assert the per-OS label is rendered correctly by
+  // stubbing the command's return value to the expected
+  // platform-specific name and inspecting the title
+  // attributes after the mount's async IPC resolves.
+  it("(n) macOS: tooltip shows 'Keychain' as the credential-store label", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "credential_store_name") return Promise.resolve("Keychain");
+      if (cmd === "generate_ssh_key") return Promise.resolve(MOCK_KEY_PATH);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    const state = fresh_state();
+    render(StepTransport, { props: { state, on_next: () => {} } });
+    // Click generate so the key-path <p> with the third
+    // tooltip renders.
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    await screen.findByTestId("transport-key-path");
+    // Wait for the mount-time IPC to resolve.
+    await waitFor(() => {
+      const generate_btn = screen.getByTestId(
+        "transport-generate-key",
+      ) as HTMLButtonElement;
+      expect(generate_btn.title).toContain("Keychain");
+    });
+    // The 'Use existing' button tooltip also references the
+    // platform-specific label.
+    const use_existing = screen.getByTestId(
+      "transport-use-existing-key",
+    ) as HTMLButtonElement;
+    expect(use_existing.title).toContain("Keychain");
+    // The key-path paragraph also surfaces the per-OS label
+    // in its title attribute.
+    const key_path = screen.getByTestId("transport-key-path") as HTMLElement;
+    expect(key_path.title).toContain("Keychain");
+    // The button body copy stays platform-neutral (this is
+    // the user-visible wording change §X-3 ships).
+    expect(use_existing.textContent).toContain("OS credential store");
+    expect(use_existing.textContent).not.toContain("keychain");
+  });
+
+  it("(o) Linux: tooltip shows 'secret-service / GNOME Keyring / KWallet'", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "credential_store_name") {
+        return Promise.resolve("secret-service / GNOME Keyring / KWallet");
+      }
+      if (cmd === "generate_ssh_key") return Promise.resolve(MOCK_KEY_PATH);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    await screen.findByTestId("transport-key-path");
+    await waitFor(() => {
+      const generate_btn = screen.getByTestId(
+        "transport-generate-key",
+      ) as HTMLButtonElement;
+      expect(generate_btn.title).toContain("GNOME Keyring");
+    });
+    const use_existing = screen.getByTestId(
+      "transport-use-existing-key",
+    ) as HTMLButtonElement;
+    expect(use_existing.title).toContain("secret-service");
+    const key_path = screen.getByTestId("transport-key-path") as HTMLElement;
+    expect(key_path.title).toContain("KWallet");
+  });
+
+  it("(p) Windows: tooltip shows 'Credential Manager' as the credential-store label", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "credential_store_name") return Promise.resolve("Credential Manager");
+      if (cmd === "generate_ssh_key") return Promise.resolve(MOCK_KEY_PATH);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    await screen.findByTestId("transport-key-path");
+    await waitFor(() => {
+      const generate_btn = screen.getByTestId(
+        "transport-generate-key",
+      ) as HTMLButtonElement;
+      expect(generate_btn.title).toContain("Credential Manager");
+    });
+    const use_existing = screen.getByTestId(
+      "transport-use-existing-key",
+    ) as HTMLButtonElement;
+    expect(use_existing.title).toContain("Credential Manager");
+    const key_path = screen.getByTestId("transport-key-path") as HTMLElement;
+    expect(key_path.title).toContain("Credential Manager");
+    // Body copy stays platform-neutral on every host.
+    expect(use_existing.textContent).toContain("OS credential store");
+  });
 });

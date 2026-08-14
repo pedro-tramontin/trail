@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config;
+use crate::keyring;
 use crate::logs::{self, LogEntry};
 use crate::ollama::{OllamaClient, DEFAULT_ENDPOINT};
 use crate::summarizer::{self, SummarizeReceipt};
@@ -20,6 +21,22 @@ use crate::voice::capture::CaptureState;
 pub fn build_transport(config_path: PathBuf) -> Result<Box<dyn Transport>, String> {
     let cfg = config::load_config(&config_path).map_err(|e| e.to_string())?;
     transport::from_config(&cfg.transport).map_err(|e| e.to_string())
+}
+
+/// Tauri command: return the user-facing name of the OS credential
+/// store on the host that ran this binary. The wizard renders this
+/// inside the "store SSH key" affordance and the inline tooltip that
+/// expands the platform-neutral "OS credential store" label into the
+/// platform-specific name (Keychain on macOS, secret-service / GNOME
+/// Keyring / KWallet on Linux, Credential Manager on Windows).
+///
+/// Pure function: no state, no I/O, no async. The per-OS dispatch
+/// lives in [`crate::keyring::credential_store_name_for`], which is
+/// also the test seam — `cargo test -p trail keyring` asserts the
+/// per-OS arm shape on every host without `#[cfg]` gymnastics.
+#[tauri::command]
+pub fn credential_store_name() -> &'static str {
+    keyring::credential_store_name()
 }
 
 /// Tauri command: probe the configured transport (SSH reachability +
