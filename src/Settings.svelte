@@ -34,10 +34,21 @@
    * when state == "denied". The "Test microphone" button runs
    * `voice_start` for 2 s then `voice_stop` so the user can
    * sanity-check the round-trip from Settings.
+   *
+   * §X-5 / Phase 11 §11.3 — SSH-key settings panel. The
+   * `<SshKeySettings />` mount below reads the typed
+   * `KeyringHint` (the §11.1 enum) from the `keyring_hint`
+   * Tauri command and renders one of 4 UI states (Empty /
+   * PublicOnly / KeyPair / Unavailable) inside the platform-
+   * neutral "OS credential store" wording. The §X-3 work
+   * already rewrote any "keychain" copy to the platform-
+   * neutral wording — this comment block is the durable
+   * pointer back to that audit.
    */
 
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import SshKeySettings from "./lib/SshKeySettings.svelte";
 
   interface Props {
     onreset?: () => void;
@@ -152,6 +163,23 @@
       {test_in_progress ? "Recording…" : "Test microphone"}
     </button>
   </section>
+
+  <!--
+    §X-5 / Phase 11 §11.3 — SSH-key settings panel mount.
+
+    The panel reads the typed `KeyringHint` from the
+    `keyring_hint` Tauri command and renders one of 4 UI
+    states (Empty / PublicOnly / KeyPair / Unavailable)
+    inside the platform-neutral "OS credential store"
+    wording. Self-contained — no props needed; the
+    component owns its IPC calls + clipboard + error
+    rendering. The `is_demo` gate is intentionally NOT
+    passed: a demo-mode install should still let the user
+    inspect (and re-generate) the SSH keypair, since the
+    SSH push is the load-bearing action that the demo
+    mode fakes with fixture data.
+  -->
+  <SshKeySettings />
 </section>
 
 <style>
