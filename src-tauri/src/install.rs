@@ -26,13 +26,138 @@
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tauri::Manager;
+use thiserror::Error;
 
 use crate::config::{Config, TransportConfig};
+
+// ---------------------------------------------------------------------------
+// Real-VPS script invocation
+// ---------------------------------------------------------------------------
+
+/// Environment-variable name the real-VPS path uses to pass the
+/// rendered install plan's path to `scripts/install-collector.sh`.
+/// The script reads `$TRAIL_INSTALL_PLAN` to know which plan JSON
+/// to push to the configured SSH target. `pub` so the unit tests
+/// can assert the wire contract without re-typing the literal.
+pub const INSTALL_PLAN_ENV: &str = "TRAIL_INSTALL_PLAN";
+
+/// Environment-variable name the real-VPS path uses to pass the
+/// user's `~/.trail/config.json` path to `scripts/install-collector.sh`.
+/// The script reads `$TRAIL_INSTALL_CONFIG` to discover the
+/// `TransportConfig::Ssh` host/port/user. `pub` so the unit tests
+/// can assert the wire contract without re-typing the literal.
+pub const INSTALL_CONFIG_ENV: &str = "TRAIL_INSTALL_CONFIG";
+
+/// Spawn `scripts/install-collector.sh` with the plan + config
+/// paths handed in via `$TRAIL_INSTALL_PLAN` / `$TRAIL_INSTALL_CONFIG`.
+/// Captures the child's stdout + stderr and returns them via
+/// `std::process::Output` so the caller can surface the script's
+/// output in the Tauri command's `Result<String, String>`.
+///
+/// The function is a thin wrapper around
+/// `std::process::Command::new("bash")` so the test suite can mock
+/// the spawn at a single boundary. The actual Command
+/// construction lives in `default_install_script_invoker` — the
+/// indirection is what makes the test seam work.
+fn invoke_install_script(plan_path: &Path, config_path: &Path) -> std::io::Result<Output> {
+    // The indirection goes through a `Mutex<Option<Box<dyn FnMut>>>`
+    // so the unit tests can swap the bash invoker out for a
+    // mock (with captured state — the recording slot, the
+    // success flag, etc.) without changing the public
+    // signature. In production the slot is always `None`; the
+    // lock + branch is a few cycles on the install code path,
+    // which is dwarfed by the SSH round trip the script makes.
+    let mut slot = INVOKE_INSTALL_SCRIPT
+        .lock()
+        .expect("INVOKE_INSTALL_SCRIPT mutex poisoned");
+    match slot.as_mut() {
+        Some(f) => f(plan_path, config_path),
+        None => default_install_script_invoker(plan_path, config_path),
+    }
+}
+
+/// Production invoker. Spawns `bash scripts/install-collector.sh`
+/// in the workspace root (the script path is relative to the
+/// repo, per Phase 1 §1.10's shell-portable contract). The
+/// rendered plan + user config are passed via env vars rather
+/// than argv so the script's existing arg-parser stays focused
+/// on its `--binary` / `--host` flags.
+fn default_install_script_invoker(plan_path: &Path, config_path: &Path) -> std::io::Result<Output> {
+    // The script is shell-portable and lives at `<repo>/scripts/install-collector.sh`.
+    // We invoke it by relative path so the same code path works on
+    // every host (developer laptop, CI, packaged `.app`) without
+    // having to discover the repo root at runtime — the wizard's
+    // working directory is the repo root when launched from
+    // `cargo tauri dev` / `cargo run`.
+    let script_arg = "scripts/install-collector.sh".to_string();
+    let plan_str = plan_path.to_string_lossy().to_string();
+    let cfg_str = config_path.to_string_lossy().to_string();
+    std::process::Command::new("bash")
+        .arg(&script_arg)
+        .env(INSTALL_PLAN_ENV, &plan_str)
+        .env(INSTALL_CONFIG_ENV, &cfg_str)
+        .output()
+}
+
+/// Trait-object indirection that lets the test suite swap the
+/// bash invoker out for a mock. `None` means "use the default
+/// invoker" (production behaviour); tests set this to a
+/// `Box<dyn FnMut>` that captures the recording slot + success
+/// flag for that test, and reset to `None` when their guard
+/// drops. Using a `Box<dyn FnMut>` (vs. a raw function pointer)
+/// is what lets each test carry its own state without
+/// cross-test interference under `cargo test`'s default
+/// parallel runner.
+type InstallScriptInvoker = Box<dyn FnMut(&Path, &Path) -> std::io::Result<Output> + Send>;
+
+static INVOKE_INSTALL_SCRIPT: Mutex<Option<InstallScriptInvoker>> = Mutex::new(None);
+
+/// Test-only helper: install a mock invoker for the duration of
+/// the returned guard. The guard's `Drop` restores `None` (the
+/// default invoker) so subsequent tests aren't poisoned by an
+/// earlier test's mock. Returning a guard makes the swap
+/// panic-safe: a test that returns early still resets the slot.
+#[cfg(test)]
+fn set_install_script_invoker<F>(f: F) -> InstallScriptInvokerGuard
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<Output> + Send + 'static,
+{
+    let mut slot = INVOKE_INSTALL_SCRIPT
+        .lock()
+        .expect("INVOKE_INSTALL_SCRIPT mutex poisoned");
+    let prev = slot.replace(Box::new(f));
+    drop(slot);
+    InstallScriptInvokerGuard { prev }
+}
+
+/// RAII guard that resets `INVOKE_INSTALL_SCRIPT` to `None` (the
+/// default invoker) when dropped. Only constructed by
+/// `set_install_script_invoker` from `#[cfg(test)]` code.
+#[cfg(test)]
+struct InstallScriptInvokerGuard {
+    // The previous invoker (if any). Saved so a future "stack"
+    // of nested installs can restore the prior mock; today we
+    // unconditionally reset to `None`, but the field keeps the
+    // drop body non-trivial and the door open for that
+    // future-proofing without an API change.
+    prev: Option<InstallScriptInvoker>,
+}
+
+#[cfg(test)]
+impl Drop for InstallScriptInvokerGuard {
+    fn drop(&mut self) {
+        let mut slot = INVOKE_INSTALL_SCRIPT
+            .lock()
+            .expect("INVOKE_INSTALL_SCRIPT mutex poisoned");
+        *slot = self.prev.take();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -91,8 +216,8 @@ pub fn user_config_path(app: &tauri::AppHandle) -> PathBuf {
     // `PathBuf`, so the second `PathBuf::from` is
     // redundant. Collapse the chain: build the home `OsString`
     // first, then map to `PathBuf` once.
-    let fallback_home = std::env::var_os("HOME")
-        .unwrap_or_else(|| std::ffi::OsString::from("/tmp"));
+    let fallback_home =
+        std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("/tmp"));
     app.path()
         .app_config_dir()
         .unwrap_or_else(|_| PathBuf::from(fallback_home).join(".trail"))
@@ -465,23 +590,57 @@ pub async fn install_vps_collector_inner(
         })
     } else {
         // The real-VPS path: read the live config, render the
-        // plan from it, and (in v1) defer to the existing
-        // `scripts/install-collector.sh` shell driver for the
-        // actual ssh2 work. Surfacing a clear error keeps the
-        // wizard honest about which path it took.
+        // plan, write it to `~/.trail/collector.json` so the
+        // shell script can find it, then defer the actual
+        // ssh2 work to `scripts/install-collector.sh`. The
+        // script is shell-portable (Phase 1 §1.10) and is the
+        // load-bearing implementation the wizard falls back
+        // to when the user wants the "auto" path on their
+        // actual machine. Stdout + stderr are surfaced in the
+        // Tauri command's `Result<String, String>` so the
+        // wizard's toast can echo what happened.
         let cfg = crate::config::load_config(cfg_path).map_err(|e| e.to_string())?;
         let plan = render_install_plan(&cfg, &target.user).map_err(|e| e.to_string())?;
-        // The real-VPS path is intentionally a no-op stub here:
-        // Phase 1 §1.10's `scripts/install-collector.sh` is the
-        // load-bearing implementation the wizard falls back to when
-        // the user wants the "auto" path on their actual machine.
-        // Surfacing a clear error keeps the wizard honest about
-        // which path it took.
-        let _ = plan;
-        Err(
-            "real-VPS install path runs `scripts/install-collector.sh`; not implemented in this Rust stub"
-                .to_string(),
-        )
+        let plan_path = collector_script_path();
+        if let Some(parent) = plan_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let plan_json = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?;
+        std::fs::write(&plan_path, plan_json).map_err(|e| e.to_string())?;
+        let output = invoke_install_script(&plan_path, cfg_path).map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if output.status.success() {
+            // Surface the script's stdout in the wizard's
+            // success toast; include stderr as a footnote so
+            // a warning from the script (e.g. "binary
+            // up-to-date, skipping") isn't lost.
+            let mut body = stdout;
+            if !stderr.trim().is_empty() {
+                body.push_str("\n--- stderr ---\n");
+                body.push_str(stderr.trim_end());
+            }
+            Ok(VpsInstallReport {
+                ok: true,
+                message: body,
+                dry_run_port: None,
+            })
+        } else {
+            // Non-zero exit: surface both streams so the user
+            // can see what went wrong (the script's `--help`,
+            // a missing binary, a refused SSH key, etc.).
+            let code = output.status.code().unwrap_or(-1);
+            let mut body = format!("install-collector.sh exited with status {code}");
+            if !stdout.trim().is_empty() {
+                body.push_str("\n--- stdout ---\n");
+                body.push_str(stdout.trim_end());
+            }
+            if !stderr.trim().is_empty() {
+                body.push_str("\n--- stderr ---\n");
+                body.push_str(stderr.trim_end());
+            }
+            Err(body)
+        }
     }
 }
 
@@ -823,12 +982,261 @@ mod tests {
         let count = loaded
             .pending_installs
             .iter()
-            .filter(|x| *x == "vps_collector")
+            .filter(|x| x.as_str() == "vps_collector")
             .count();
         assert_eq!(
             count, 1,
             "expected exactly one 'vps_collector' entry, got: {:?}",
             loaded.pending_installs
+        );
+    }
+
+    // ---- Test 5: real-VPS path invokes scripts/install-collector.sh ----
+
+    /// Per-test recording + success-flag state for the mock
+    /// bash invoker. The mock is installed via
+    /// `set_install_script_invoker` with a closure that
+    /// mutates an `Arc<Mutex<MockState>>` so the test's
+    /// assertions and the production code's call see the
+    /// same data without stepping on parallel tests'
+    /// recordings.
+    struct MockState {
+        recorded: Option<(PathBuf, PathBuf)>,
+        should_succeed: bool,
+    }
+
+    /// Process-wide serialisation mutex. The two real-VPS tests
+    /// both mutate `$HOME` (so the production code resolves
+    /// `collector_script_path()` to a tempdir under our
+    /// control) and `INVOKE_INSTALL_SCRIPT` (so the production
+    /// code's bash spawn is mocked). Under `cargo test`'s
+    /// default parallel runner, two tests stomping on either
+    /// of those would race; the simplest fix is to make the
+    /// two tests mutually exclusive via this lock. A custom
+    /// `Mutex<()>` (vs. `serial_test` or a thread-local) is
+    /// the lightest weight option — no extra dev-dependency,
+    /// no per-test attribute, and the lock is uncontended
+    /// outside this test mod.
+    static REAL_VPS_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+    fn real_vps_test_lock() -> &'static tokio::sync::Mutex<()> {
+        REAL_VPS_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Spawn a child `sh -c "exit <N>"` and return its
+    /// `Output` (with synthesised stdout/stderr). Used by the
+    /// mock invoker to produce a real `ExitStatus` (the type
+    /// has no public constructor on any platform) and a
+    /// recognisable body for the wizard's toast / error
+    /// message.
+    fn run_synthetic_script(plan_path: &Path, config_path: &Path, exit_code: i32) -> Output {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {exit_code}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn synthetic status");
+        let status = child.wait().expect("wait synthetic status");
+        Output {
+            status,
+            stdout: format!(
+                "mock stdout (plan={}, cfg={})\n",
+                plan_path.display(),
+                config_path.display()
+            )
+            .into_bytes(),
+            stderr: format!(
+                "mock stderr (plan={}, cfg={})\n",
+                plan_path.display(),
+                config_path.display()
+            )
+            .into_bytes(),
+        }
+    }
+
+    /// The real-VPS branch must invoke `bash scripts/install-collector.sh`
+    /// with the rendered plan path + user config path handed in
+    /// via `$TRAIL_INSTALL_PLAN` / `$TRAIL_INSTALL_CONFIG`. Mock
+    /// the bash invoker so the test doesn't actually fork
+    /// (`install-collector.sh` would try to ssh into a
+    /// non-existent host and hang), and assert the recorded
+    /// paths match the ones the production code derived from
+    /// the live `config.json`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_vps_collector_invokes_shell_script_on_realvps_path() {
+        // Hold the test-mod lock for the duration so a
+        // parallel `install_vps_collector_surfaces_shell_errors`
+        // doesn't stomp on `$HOME` or `INVOKE_INSTALL_SCRIPT`
+        // mid-call. `tokio::sync::Mutex` (not std) so the guard
+        // can safely span the `.await` below per
+        // `clippy::await_holding_lock`.
+        let _lock = real_vps_test_lock().lock().await;
+        // 1. Build the per-test mock state. The closure
+        //    captures an `Arc<Mutex<...>>` so the test
+        //    driver can read back the recorded paths after
+        //    `install_vps_collector_inner` returns.
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MockState {
+            recorded: None,
+            should_succeed: true,
+        }));
+        let state_for_closure = state.clone();
+        let _guard = set_install_script_invoker(move |plan_path, config_path| {
+            let mut guard = state_for_closure.lock().unwrap();
+            guard.recorded = Some((plan_path.to_path_buf(), config_path.to_path_buf()));
+            let should_succeed = guard.should_succeed;
+            drop(guard);
+            Ok(run_synthetic_script(
+                plan_path,
+                config_path,
+                if should_succeed { 0 } else { 7 },
+            ))
+        });
+
+        // 2. Write a real `config.json` into a tempdir so the
+        //    production code can `load_config` it and render the
+        //    plan.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = tmp.path().join("config.json");
+        let cfg = fixture_config();
+        crate::onboarding::config_writer::write_config(&cfg, &cfg_path).expect("write_config");
+
+        // 3. Redirect `HOME` to a tempdir so
+        //    `collector_script_path()` writes the rendered plan
+        //    somewhere under our control and we can compare
+        //    against the recorded plan path. Setting HOME via
+        //    `set_var` is `unsafe` on recent Rust editions
+        //    (2024+) because of data-race concerns in
+        //    multi-threaded programs; the test runs on the
+        //    current thread only for the duration of the
+        //    `install_vps_collector_inner` call (the other
+        //    workers are blocked in the runtime), so the race
+        //    window is closed for the assertion. Reset HOME on
+        //    the way out so subsequent tests see the real value.
+        let home_backup = std::env::var_os("HOME");
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).expect("mkdir fake home");
+        // SAFETY: see the comment above; the install helper is
+        // called synchronously from the test thread and the
+        // tokio workers are idle.
+        unsafe { std::env::set_var("HOME", &fake_home) };
+        let result = install_vps_collector_inner(
+            &VpsInstallTarget {
+                host: "vm.example.test".to_string(),
+                port: 22,
+                user: "vps_user".to_string(),
+            },
+            false,
+            &cfg_path,
+        )
+        .await;
+        match home_backup {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let report = result.expect("install_vps_collector real-VPS should succeed");
+
+        // 4. The mock records `(plan_path, config_path)`. The
+        //    plan path comes from `collector_script_path()` —
+        //    i.e. `<HOME>/.trail/collector.json` under our
+        //    overridden HOME. The config path is the
+        //    `cfg_path` we wrote above.
+        let recorded = state
+            .lock()
+            .unwrap()
+            .recorded
+            .clone()
+            .expect("mock invoker was not called");
+        let expected_plan_path = fake_home.join(".trail").join("collector.json");
+        assert_eq!(
+            recorded.0, expected_plan_path,
+            "real-VPS path should hand the rendered plan path to install-collector.sh"
+        );
+        assert_eq!(
+            recorded.1, cfg_path,
+            "real-VPS path should hand the user config path to install-collector.sh"
+        );
+        assert!(
+            report.ok,
+            "expected ok=true when mock invoker returns success, got: {report:?}"
+        );
+        assert!(
+            report.message.contains("mock stdout"),
+            "expected the wizard's message to include the script's stdout, got: {:?}",
+            report.message
+        );
+        assert_eq!(report.dry_run_port, None);
+    }
+
+    /// The real-VPS branch must surface a non-zero exit from
+    /// `scripts/install-collector.sh` as a frontend-visible
+    /// error. Mock the bash invoker to return an exit code of
+    /// 7 with a recognisable stderr line, and assert the
+    /// `Result::Err` body the Tauri command returns contains
+    /// the synthetic stderr so the wizard can show the user
+    /// what went wrong (refused SSH key, missing binary, etc.).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_vps_collector_surfaces_shell_errors() {
+        let _lock = real_vps_test_lock().lock().await;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MockState {
+            recorded: None,
+            should_succeed: false,
+        }));
+        let state_for_closure = state.clone();
+        let _guard = set_install_script_invoker(move |plan_path, config_path| {
+            let mut guard = state_for_closure.lock().unwrap();
+            guard.recorded = Some((plan_path.to_path_buf(), config_path.to_path_buf()));
+            let should_succeed = guard.should_succeed;
+            drop(guard);
+            Ok(run_synthetic_script(
+                plan_path,
+                config_path,
+                if should_succeed { 0 } else { 7 },
+            ))
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = tmp.path().join("config.json");
+        let cfg = fixture_config();
+        crate::onboarding::config_writer::write_config(&cfg, &cfg_path).expect("write_config");
+
+        let home_backup = std::env::var_os("HOME");
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).expect("mkdir fake home");
+        // SAFETY: see the success-path test for the
+        // multi-thread rationale; the inner helper is
+        // synchronous from the test's perspective and the
+        // tokio workers are idle while we hold the slot.
+        unsafe { std::env::set_var("HOME", &fake_home) };
+        let result = install_vps_collector_inner(
+            &VpsInstallTarget {
+                host: "vm.example.test".to_string(),
+                port: 22,
+                user: "vps_user".to_string(),
+            },
+            false,
+            &cfg_path,
+        )
+        .await;
+        match home_backup {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        let err = result.expect_err("real-VPS path should return Err when bash exits non-zero");
+        // The error body must surface the script's exit code
+        // and the synthesised stderr so the wizard can render
+        // a useful "what went wrong" toast. Checking for the
+        // exit-code line is the durable contract; the stderr
+        // substring keeps the assertion close to the user-
+        // visible behaviour.
+        assert!(
+            err.contains("exited with status 7"),
+            "expected error to surface the script's exit code, got: {err:?}"
+        );
+        assert!(
+            err.contains("mock stderr"),
+            "expected error to surface the script's stderr, got: {err:?}"
         );
     }
 }
