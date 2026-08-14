@@ -560,4 +560,116 @@ describe("StepAsk.svelte", () => {
     expect(btn).toBeTruthy();
     expect(btn.textContent).toMatch(/Open Privacy Settings/);
   });
+
+  // §X-4 — per-OS calendar permission deep-link button.
+  // The 3 cases below mirror the per-item brief's "3
+  // vitest cases on StepAsk.svelte (one per OS) + the
+  // UnknownDE fallback path". Each case enters Edit mode
+  // + leaves the calendar source on the default
+  // "event_kit", then asserts the per-OS deep-link URL
+  // the Tauri command returns is rendered as a button (or,
+  // for the Linux/UnknownDE arm, the labeled fallback
+  // message is rendered instead of a button).
+  //
+  // The Tauri command is mocked so the test doesn't need
+  // a real Tauri runtime. We branch on
+  // `calendar_permission_deep_link_url`:
+  //   - macOS test: returns the Apple system-preferences URL.
+  //   - Windows test: returns the ms-settings URL.
+  //   - Linux/UnknownDE test: rejects with the structured
+  //     UnknownDE error string; the component catches the
+  //     rejection and renders the labeled fallback message.
+
+  it("(p) calendar row event_kit + macOS: per-OS deep-link button renders with Apple URL", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.resolve(
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar",
+        );
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    // Enter Edit mode so the EventKit branch of the
+    // calendar row renders (the deep-link button is only
+    // shown when `editing` is true).
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    // Let the onMount calendar_permission_deep_link_url
+    // microtask flush.
+    await new Promise((r) => setTimeout(r, 0));
+    const btn = await screen.findByTestId(
+      "open-calendar-permission-settings",
+    );
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toMatch(/Open Calendar Settings/);
+    // The UnknownDE labeled fallback must NOT be rendered
+    // when the URL is known.
+    expect(
+      screen.queryByTestId("calendar-permission-unknown-de"),
+    ).toBeNull();
+  });
+
+  it("(q) calendar row event_kit + Windows: per-OS deep-link button renders with ms-settings URL", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.resolve("ms-settings:privacy-calendar");
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    await new Promise((r) => setTimeout(r, 0));
+    const btn = await screen.findByTestId(
+      "open-calendar-permission-settings",
+    );
+    // Guard against a typo testid — the spec's
+    // `open-calendar-permission-settings` testid is the
+    // single source of truth. We do a lengthier text
+    // assertion here so the message rendered to the user
+    // is the per-OS "Open Calendar Settings" wording, not
+    // any other "Open ... Settings" label.
+    expect(btn.textContent).toMatch(/Open Calendar Settings/);
+    // The UnknownDE labeled fallback must NOT be rendered.
+    expect(
+      screen.queryByTestId("calendar-permission-unknown-de"),
+    ).toBeNull();
+  });
+
+  it("(r) calendar row event_kit + Linux/UnknownDE: labeled 'open manually' fallback renders, no button", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.reject(
+          "Linux DE not detected (could be GNOME, KDE, or other). User must open settings manually.",
+        );
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    // Wait for the onMount microtask + the UnknownDE
+    // catch handler to land `calendar_permission_url` in
+    // the "unknown_de" sentinel state.
+    await new Promise((r) => setTimeout(r, 0));
+    // The deep-link button must NOT render in the
+    // UnknownDE arm (no dead-button UX).
+    expect(
+      screen.queryByTestId("open-calendar-permission-settings"),
+    ).toBeNull();
+    // The labeled "open manually" fallback must render.
+    // We assert on a unique substring of the labeled
+    // message so a future copy edit doesn't break the
+    // test unless the load-bearing phrase is dropped.
+    const hint = await screen.findByText(/wasn't detected/);
+    expect(hint).toBeTruthy();
+    expect(hint.textContent).toMatch(/open Settings/);
+  });
 });

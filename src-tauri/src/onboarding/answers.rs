@@ -39,6 +39,18 @@ pub struct OnboardingAnswers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<GitHubConfig>,
     /// Calendar collector configuration. `None` means "do not enable".
+    ///
+    /// On macOS the `calendar_app_id == Some("event_kit")` variant
+    /// asks the user to grant Full Calendar Access the first time
+    /// the collector runs. The wizard surfaces this requirement
+    /// via the EventKit hint in `StepAsk.svelte` (calendar row),
+    /// which uses the per-OS deep-link button emitted by
+    /// `commands::calendar_permission_deep_link_url` (see
+    /// `commands::calendar_permission_deep_link_url_for` for the
+    /// per-OS dispatch table). On Linux the helper returns
+    /// `Err(CalendarPermissionDeepLinkError::UnknownDE)` and the
+    /// wizard renders a labeled "open Settings → Privacy →
+    /// Calendar manually" fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_ics: Option<CalendarConfig>,
     /// 2026-08-11 — Browser-history pick list. Each entry is
