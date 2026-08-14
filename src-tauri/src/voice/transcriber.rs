@@ -125,6 +125,16 @@ thread_local! {
     /// and GPU-ok unit tests drive the branch deterministically
     /// without having to swap the build's feature flags at compile
     /// time. `None` (the production default) means "use `gpu_init`".
+    // `#[allow(clippy::type_complexity)]` silences the
+    // `very complex type` lint on the `RefCell<Option<fn ...>>`
+    // triple-nesting. The test seam has to be `RefCell` (the
+    // probe is mutable, set by `GpuProbeGuard::new` + reset on
+    // drop) wrapping `Option` (None = production path, Some =
+    // unit-test override) wrapping a `fn` pointer (zero-sized
+    // type, no allocation). Factoring into a type alias would
+    // push the same complexity into the alias name; the
+    // annotation is the lighter touch.
+    #[allow(clippy::type_complexity)]
     static GPU_INIT_FOR_TEST: std::cell::RefCell<Option<fn() -> Result<(), &'static str>>> =
         const { std::cell::RefCell::new(None) };
 }

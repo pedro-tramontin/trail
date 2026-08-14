@@ -737,6 +737,8 @@ mod tests {
                 hotkey: "ctrl+shift+space".to_string(),
                 transcriber: "whisper_cpp".to_string(),
                 model: "base.en".to_string(),
+                gpu_acceleration: true,
+                gpu_fallback_logged: false,
             },
             review_time: "18:00".to_string(),
             summarizer: CfgSummarizerConfig {
