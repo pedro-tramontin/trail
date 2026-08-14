@@ -216,6 +216,34 @@ pub struct VoiceConfig {
     /// v1 only: "whisper_cpp". Reserved for v2 cloud STT.
     pub transcriber: String,
     pub model: String,
+    /// 2026-08-13 (D2): GPU acceleration is on by default.
+    /// When `true`, `voice::transcriber::WhisperContext::load`
+    /// attempts to enable the GPU backend at model-load time;
+    /// on failure it logs a one-shot warning and falls back to
+    /// CPU automatically. The `gpu_fallback_logged` companion
+    /// field is internal state the UI reads once per session to
+    /// surface "GPU disabled: <reason>" without spamming the
+    /// warning log.
+    ///
+    /// `#[serde(default = "default_gpu_acceleration")]` keeps
+    /// backwards-compat with on-disk configs written before this
+    /// field existed (they default to `true`).
+    #[serde(default = "default_gpu_acceleration")]
+    pub gpu_acceleration: bool,
+    /// 2026-08-13 (D2): one-shot "we logged the GPU fallback"
+    /// bookkeeping so the Settings UI can show "GPU disabled:
+    /// <reason>" exactly once. `false` ⇒ never surfaced yet;
+    /// `true` ⇒ already shown. Set by the wizard/Settings panel
+    /// on first display; never reset by the runtime.
+    #[serde(default)]
+    pub gpu_fallback_logged: bool,
+}
+
+/// Serde helper for `VoiceConfig::gpu_acceleration`'s default.
+/// Returns `true` so a fresh `Config` blob — or an old v1 blob
+/// missing the field — defaults to GPU acceleration on.
+fn default_gpu_acceleration() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

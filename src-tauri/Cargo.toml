@@ -58,6 +58,12 @@ notify-rust = "4.18.0"
 humantime = "2.4.0"
 # Phase 5 §5.1 — whisper model download verification.
 sha2 = { workspace = true }
+# whisper-rs's GPU backends are activated per-target below (the
+# always-on declaration has no features; the per-target
+# `[target.'cfg(...)'.dependencies]` blocks pick the right one).
+# See the workspace `Cargo.toml`'s whisper-rs comment for the
+# per-OS rationale (cuda is omitted; metal is macOS-only;
+# vulkan works on Linux + Windows without a build-time SDK).
 whisper-rs = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
@@ -114,6 +120,12 @@ block2 = { workspace = true }
 # `default-features` is "ignored" because the workspace version
 # already provides one.
 objc2-event-kit = { workspace = true }
+# 2026-08-13 (D2) — whisper-rs on macOS enables the `metal`
+# feature so whisper.cpp's GPU decode path links the Apple
+# Metal framework. `cuda` + `vulkan` are intentionally omitted
+# (see workspace Cargo.toml §5b D1/D2 for rationale); Metal
+# alone is the recommended GPU path on macOS.
+whisper-rs = { workspace = true, features = ["metal"] }
 
 # Wayland + zbus are pre-emptive deps for the multi-backend hotkey
 # work planned for the next release. Adding them now (as Linux-only)
@@ -130,6 +142,20 @@ objc2-event-kit = { workspace = true }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.31", features = ["client", "staging"] }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+# 2026-08-13 (D2) — whisper-rs on Linux enables no GPU features
+# (§5b D3: Vulkan SDK + glslc headers are not installed on the
+# build host, so `vulkan` would fail to configure; CUDA is
+# omitted per §5b D1; Metal is macOS-only per §5b D2). The
+# `enable_gpu` parameter in `WhisperContext::load` still
+# defaults to `true` via `Config.voice.gpu_acceleration`, and
+# the runtime probe records `gpu_active = false` when the GPU
+# path isn't compiled in — the auto-fallback to CPU still
+# works. CI runners don't have the Vulkan SDK either, so this
+# stays consistent across the matrix. NVIDIA + AMD + Intel
+# users get GPU decode via a future `vulkan` feature once the
+# GitHub Actions runners install `libvulkan-dev` +
+# `glslang-tools` (tracked as a follow-up).
+whisper-rs = { workspace = true }
 
 # Windows-only deps: the `windows` crate is the WinRT binding
 # the §17-5 mic permission module uses to call
@@ -142,6 +168,17 @@ zbus = { version = "4", default-features = false, features = ["tokio"] }
 # umbrella; no extra entry needed.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
+# 2026-08-13 (D2) — whisper-rs on Windows enables no GPU
+# features (§5b D3: the Vulkan SDK would need to be installed
+# on the GitHub Actions runner; CUDA is omitted per §5b D1;
+# Metal is macOS-only per §5b D2). The `enable_gpu` parameter
+# in `WhisperContext::load` still defaults to `true` via
+# `Config.voice.gpu_acceleration`, and the runtime probe
+# records `gpu_active = false` when the GPU path isn't
+# compiled in — the auto-fallback to CPU still works. DX12 +
+# DirectML paths are added back in a follow-up once the
+# Windows runner installs the Vulkan SDK.
+whisper-rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

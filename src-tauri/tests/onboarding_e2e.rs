@@ -402,6 +402,23 @@ async fn phase_a_through_phase_d_walkthrough() {
     };
     append_audit_log(&answers, &home.config_path).expect("append_audit_log");
 
+    // 2026-08-13 (D2): `Config.voice.gpu_acceleration` defaults to
+    // `true` per the spec ("GPU acceleration is enabled by
+    // default; if your computer doesn't support it we'll fall
+    // back automatically"). The `gpu_fallback_logged` companion
+    // is `false` on a fresh write — the Settings UI flips it to
+    // `true` the first time it surfaces the GPU-fallback banner.
+    assert!(
+        cfg.voice.gpu_acceleration,
+        "Config.voice.gpu_acceleration must default to true per the spec (D2); got {}",
+        cfg.voice.gpu_acceleration
+    );
+    assert!(
+        !cfg.voice.gpu_fallback_logged,
+        "gpu_fallback_logged is fresh on a new write; got {}",
+        cfg.voice.gpu_fallback_logged
+    );
+
     // Round-trip through the frozen Config type.
     //
     // `Config::review_time` is the `cadence` string from the
