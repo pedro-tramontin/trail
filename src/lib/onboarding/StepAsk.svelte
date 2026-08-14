@@ -18,6 +18,33 @@
   let mic_permission_state: "granted" | "denied" | "undetermined" | undefined =
     $state(undefined);
 
+  /** §X-4 — calendar permission deep-link URL. The wizard's
+   *  EventKit hint is now a per-OS button instead of a
+   *  plain-text "System Settings → Privacy → Calendars" string.
+   *  Resolved once on mount via the new
+   *  `calendar_permission_deep_link_url` Tauri command. The
+   *  three states are:
+   *
+   *   - `undefined` — IPC still in flight; the hint stays
+   *     hidden (no flash of a wrong button).
+   *   - `"unknown_de"` — Linux + the helper returned
+   *     `CalendarPermissionDeepLinkError::UnknownDE` (the
+   *     webview can't detect GNOME vs KDE vs other). The
+   *     hint renders as a labeled "open manually" message.
+   *   - `string` — the per-OS URL the user clicks. The
+   *     hint renders as a button that opens the URL via
+   *     a hidden anchor (same pattern as the mic
+   *     permission denied callout).
+   *
+   *  Linux is the load-bearing case: macOS and Windows
+   *  resolve immediately. On Linux the helper returns
+   *  `UnknownDE` unless the frontend supplies a `de` arg
+   *  (we don't have a reliable in-webview DE detector yet,
+   *  so we always pass `null`). The frontend can be wired
+   *  to a richer detector in a follow-up. */
+  let calendar_permission_url: string | "unknown_de" | undefined =
+    $state(undefined);
+
   onMount(() => {
     invoke<string>("check_mic_permission_cmd")
       .then((s) => {
@@ -29,6 +56,33 @@
         // Permission check is best-effort — if the IPC fails,
         // leave the state undefined and don't render the callout.
         mic_permission_state = undefined;
+      });
+    // §X-4 — resolve the per-OS calendar permission deep-link
+    // URL once on mount. We pass `null` for the `de` argument
+    // (the webview can't reliably detect GNOME vs KDE vs
+    // other, so the helper returns `UnknownDE` on Linux and
+    // the frontend renders the labeled "open manually"
+    // fallback). macOS / Windows resolve to their per-OS
+    // URL regardless of `de`. The IPC is best-effort: on
+    // rejection we leave the state undefined and the hint
+    // stays hidden rather than rendering a dead button.
+    invoke<string>("calendar_permission_deep_link_url", { de: null })
+      .then((url) => {
+        calendar_permission_url = url;
+      })
+      .catch((err: unknown) => {
+        // Tauri serialises the `CalendarPermissionDeepLinkError`
+        // variant as a string. Branch on the `UnknownDE` /
+        // `UnknownOS` prefix so the frontend can render the
+        // labeled fallback. Anything else (e.g. IPC failure
+        // before the command runs) leaves the state
+        // undefined and the hint stays hidden.
+        const msg = String(err);
+        if (msg.includes("Linux DE not detected")) {
+          calendar_permission_url = "unknown_de";
+        } else {
+          calendar_permission_url = undefined;
+        }
       });
   });
 
@@ -465,6 +519,27 @@
     on_next(final);
   }
 
+  /**
+   * §X-4 — open the per-OS calendar permission settings
+   * pane via a hidden anchor click. The
+   * `calendar_permission_url` state is guaranteed to be a
+   * `string` (not `"unknown_de"` and not `undefined`) by the
+   * surrounding `{#if calendar_permission_url === ...}` /
+   * `{:else if ...}` / `{:else}` ladder — the button is only
+   * rendered in the "URL is known" branch. We pull the
+   * value into a typed local so TypeScript's narrowing
+   * survives the closure boundary.
+   */
+  function open_calendar_permission_settings(): void {
+    const url: string = String(calendar_permission_url);
+    const a = document.createElement("a");
+    a.href = url;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   $effect(() => {
     void run_ask();
   });
@@ -591,9 +666,51 @@
             </div>
             <span class="hint">
               {#if $hoisted.edit_calendar_source === "event_kit"}
-                EventKit needs your permission the first time you start a
-                capture (System Settings → Privacy → Calendars → Full
-                Calendar Access).
+                {#if calendar_permission_url === undefined}
+                  <!--
+                    IPC still in flight (or rejected with an
+                    unhandled error). Don't render anything
+                    yet so we don't flash the wrong control
+                    when the helper resolves a few ms later.
+                  -->
+                {:else if calendar_permission_url === "unknown_de"}
+                  <!--
+                    Linux + DE not detected. The helper
+                    returned
+                    `CalendarPermissionDeepLinkError::UnknownDE`
+                    (we can't reliably detect GNOME vs KDE
+                    vs other from inside a webview). The
+                    labeled message tells the user where to
+                    go without dangling a dead button.
+                  -->
+                  EventKit needs your permission the first time
+                  you start a capture. Your desktop environment
+                  wasn't detected — open Settings → Privacy →
+                  Calendar manually.
+                {:else}
+                  <!--
+                    The per-OS URL is known. The button opens
+                    it via a hidden anchor (same pattern as
+                    the mic permission denied callout).
+                    `tauri-plugin-opener` isn't wired in this
+                    build; the per-OS schemes
+                    (`x-apple.systempreferences:…`,
+                    `gnome-control-center …`,
+                    `ms-settings:…`) all work via a plain
+                    anchor click in the system browser
+                    handler.
+                  -->
+                  EventKit needs your permission the first time
+                  you start a capture.
+                  <button
+                    type="button"
+                    class="open-permission-settings"
+                    data-testid="open-calendar-permission-settings"
+                    onclick={open_calendar_permission_settings}
+                  >
+                    Open Calendar Settings
+                  </button>
+                {/if}
               {:else}
                 Provide an .ics export from Calendar.app: File → Export →
                 uncheck "Events" only if you also export Tasks separately.

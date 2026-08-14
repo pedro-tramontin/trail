@@ -754,6 +754,20 @@ pub fn run() {
             commands::check_mic_permission_cmd,
             commands::request_mic_permission_cmd,
             commands::mic_permission_deep_link_url_cmd,
+            // §X-4 — per-OS calendar permission deep-link IPC
+            // command. The wizard's EventKit hint (see
+            // `StepAsk.svelte`'s calendar row + the calendar
+            // permission denied callout) uses this to resolve
+            // the per-OS URL the frontend hands to the system
+            // browser handler when the user clicks "Open
+            // Calendar Settings". On Linux + `de == None`
+            // (DE can't be detected) the command returns a
+            // structured error string the frontend uses to
+            // render the "open Settings → Privacy → Calendar
+            // manually" labeled fallback. See
+            // `commands::calendar_permission_deep_link_url_for`
+            // for the per-OS dispatch table.
+            commands::calendar_permission_deep_link_url,
             list_collectors,
             run_collector_now,
             set_collector_enabled,

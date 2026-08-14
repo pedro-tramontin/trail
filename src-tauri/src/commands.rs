@@ -1,6 +1,21 @@
 //! Tauri command handlers — kept separate from `lib.rs` so the test
 //! module has its own scope and so `lib.rs` stays a thin shim that
 //! only registers the handlers.
+//!
+//! Per-OS runtime selectors (test seams):
+//!   - [`calendar_permission_deep_link_url_for`] — picks the right
+//!     per-OS URL (Apple system-preferences / gnome-control-center
+//!     / systemsettings5 / ms-settings) for the EventKit
+//!     permission hint. The Tauri command
+//!     [`calendar_permission_deep_link_url`] is a thin wrapper.
+//!   - [`crate::keyring::credential_store_name_for`] — picks the
+//!     user-facing label for the OS credential store on each
+//!     platform. Wrapped by the [`credential_store_name`] command.
+//!
+//! These two helpers are pure functions keyed on a `&str` (not
+//! the compile-time `#[cfg]`) so every arm is covered by a single
+//! test run on a single host build. Same seam pattern §X-2 and
+//! §X-3 established.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -573,6 +588,135 @@ pub fn mic_permission_deep_link_url_cmd() -> String {
     crate::voice::permission::mic_permission_deep_link_url().to_string()
 }
 
+// ---------------------------------------------------------------------------
+// §X-4 — Per-OS calendar permission deep-link IPC command.
+//
+// The wizard's calendar row (StepAsk.svelte) tells the user
+// that EventKit needs their permission "the first time you
+// start a capture" — but until §X-4 that hint was a plain-text
+// "System Settings → Privacy → Calendars → Full Calendar
+// Access" string with no way to jump there. This command
+// resolves the per-OS URL the frontend hands to
+// `tauri-plugin-opener` (or, in the v1 build, to a hidden
+// anchor click — see StepAsk.svelte's mic callout for the
+// same pattern).
+//
+// Per-OS URLs:
+//   - macOS: `x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar`
+//   - Linux (GNOME 42+): `gnome-control-center privacy`
+//   - Linux (KDE Plasma): `systemsettings5`
+//   - Linux (DE unknown): no deep link; frontend renders a
+//     labeled "open manually" message
+//   - Windows: `ms-settings:privacy-calendar`
+//
+// On Linux the DE (GNOME vs KDE vs other) genuinely can't
+// be detected from inside a WebView reliably, so the helper
+// returns `Err(CalendarPermissionDeepLinkError::UnknownDE)`
+// when the frontend can't supply a `de` argument. The
+// frontend treats that as "show the labeled fallback" rather
+// than emitting a panic or empty URL.
+//
+// The per-OS dispatch lives in the test seam
+// [`calendar_permission_deep_link_url_for`], which is a pure
+// function keyed on the `target_os` `&str` (not the
+// compile-time `#[cfg]`) so every arm is covered by a
+// single test run on a single host. Same seam pattern
+// §X-3 used for `credential_store_name_for(...)`.
+// ---------------------------------------------------------------------------
+
+/// Error variants for the calendar permission deep-link
+/// helper. `UnknownOS` is reserved for hosts we don't ship
+/// for (FreeBSD, iOS, …); `UnknownDE` is the Linux case
+/// where the WebView can't detect the desktop environment
+/// in use. The frontend uses the variant kind to branch on
+/// the user-visible message.
+#[derive(Debug, thiserror::Error, Clone)]
+pub enum CalendarPermissionDeepLinkError {
+    #[error("Unknown OS: {0} — cannot resolve a calendar permission deep-link URL")]
+    UnknownOS(String),
+    #[error(
+        "Linux DE not detected (could be GNOME, KDE, or other). User must open settings manually."
+    )]
+    UnknownDE,
+}
+
+/// Per-OS user-facing URL for the OS settings pane that
+/// grants the current app access to the calendar. Same shape
+/// as [`crate::keyring::credential_store_name_for`] — pure
+/// function, no state, no I/O, keyed on the supplied
+/// `target_os` `&str` (not the compile-time
+/// `#[cfg(target_os = "...")]`) so the test suite can cover
+/// every arm from a single Linux build host.
+///
+/// | OS      | DE     | Returned string                                                      |
+/// | ------- | ------ | -------------------------------------------------------------------- |
+/// | macOS   | —      | `x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar` |
+/// | Linux   | gnome  | `gnome-control-center privacy`                                       |
+/// | Linux   | kde    | `systemsettings5`                                                    |
+/// | Linux   | other  | `Err(UnknownDE)` — frontend shows the labeled fallback               |
+/// | Windows | —      | `ms-settings:privacy-calendar`                                       |
+/// | other   | —      | `Err(UnknownOS)` — reserved for hosts we don't ship for              |
+///
+/// `de` is ignored on non-Linux OSes (the per-OS URL is
+/// unambiguous for macOS and Windows). On Linux, `None` or
+/// any value other than `"gnome"` / `"kde"` yields
+/// `UnknownDE` so the wizard can show the user a labeled
+/// "open Settings → Privacy → Calendar manually" message
+/// instead of a dead button.
+pub fn calendar_permission_deep_link_url_for(
+    target_os: &str,
+    de: Option<&str>,
+) -> Result<String, CalendarPermissionDeepLinkError> {
+    match target_os {
+        "macos" => Ok(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar".to_string(),
+        ),
+        "linux" => match de {
+            Some("gnome") => Ok("gnome-control-center privacy".to_string()),
+            Some("kde") => Ok("systemsettings5".to_string()),
+            _ => Err(CalendarPermissionDeepLinkError::UnknownDE),
+        },
+        "windows" => Ok("ms-settings:privacy-calendar".to_string()),
+        _ => Err(CalendarPermissionDeepLinkError::UnknownOS(
+            target_os.to_string(),
+        )),
+    }
+}
+
+/// Tauri command: return the per-OS deep-link URL the
+/// frontend hands to the system browser handler when the
+/// user clicks "Open Calendar Settings" on the EventKit
+/// hint. Thin wrapper over
+/// [`calendar_permission_deep_link_url_for`] that resolves
+/// the host's `cfg!(target_os = "...")` once and forwards
+/// the `de` argument verbatim.
+///
+/// On Linux + `de == None` (or `de == Some("other")`) the
+/// helper returns `Err(UnknownDE)`, which Tauri serialises
+/// to a structured error string the frontend can branch on
+/// (the "Open Calendar Settings" button stays hidden, the
+/// labeled fallback message renders).
+///
+/// On the v1 build, `tauri-plugin-opener` is not wired in;
+/// the per-OS schemes (`x-apple.systempreferences:…`,
+/// `gnome-control-center …`, `ms-settings:…`) all work
+/// via a plain anchor click in the system browser handler
+/// (same shape as the mic permission denied callout at
+/// `StepAsk.svelte:808-833`).
+#[tauri::command]
+pub fn calendar_permission_deep_link_url(de: Option<String>) -> Result<String, String> {
+    let target = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unsupported"
+    };
+    calendar_permission_deep_link_url_for(target, de.as_deref()).map_err(|e| e.to_string())
+}
+
 /// Resolve the `~/.trail/` root directory from the loaded config. The
 /// config itself doesn't store its own location (we only ever persist
 /// the raw/drafts subdirs), so we look next to the config file —
@@ -679,5 +823,82 @@ mod tests {
         let r = test_ssh_connection("vps.example.com".into(), 0, "pedro".into()).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("port"));
+    }
+
+    // === §X-4 — per-OS calendar permission deep-link helper ===
+    //
+    // `calendar_permission_deep_link_url_for(target_os, de)` is
+    // a pure function (no state, no I/O) keyed on the supplied
+    // `target_os` `&str` (not the host's `#[cfg(target_os)]`)
+    // so the test suite can cover every arm from a single
+    // Linux build host. Same seam pattern §X-3 used for
+    // `credential_store_name_for(...)` and §X-2 used for
+    // `default_open_script_invoker_for(...)`.
+    //
+    // The unknown-OS fallback (FreeBSD, iOS, …) is asserted
+    // so a future refactor that drops the arm doesn't silently
+    // return a wrong URL on hosts we don't ship for. The
+    // Linux / `de == None` arm is the load-bearing case for
+    // the wizard's "open manually" fallback message.
+
+    #[test]
+    fn calendar_permission_deep_link_url_for_macos_returns_apple_url() {
+        let url = calendar_permission_deep_link_url_for("macos", None)
+            .expect("macos arm should always return Ok");
+        assert_eq!(
+            url, "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar",
+            "macOS arm should return the Apple system-preferences Calendar deep-link"
+        );
+    }
+
+    #[test]
+    fn calendar_permission_deep_link_url_for_linux_gnome_returns_gnome_control_center() {
+        let url = calendar_permission_deep_link_url_for("linux", Some("gnome"))
+            .expect("linux+gnome arm should return Ok");
+        assert_eq!(
+            url, "gnome-control-center privacy",
+            "Linux GNOME arm should return the gnome-control-center privacy URL"
+        );
+    }
+
+    #[test]
+    fn calendar_permission_deep_link_url_for_linux_kde_returns_systemsettings5() {
+        let url = calendar_permission_deep_link_url_for("linux", Some("kde"))
+            .expect("linux+kde arm should return Ok");
+        assert_eq!(
+            url, "systemsettings5",
+            "Linux KDE arm should return the systemsettings5 binary"
+        );
+    }
+
+    #[test]
+    fn calendar_permission_deep_link_url_for_linux_unknown_de_returns_err() {
+        // The webview can't reliably detect the DE — the
+        // frontend passes `None` and the helper returns the
+        // structured `UnknownDE` error so the wizard renders
+        // the "open manually" labeled fallback.
+        let r = calendar_permission_deep_link_url_for("linux", None);
+        assert!(r.is_err(), "linux+None should return UnknownDE");
+        match r.unwrap_err() {
+            CalendarPermissionDeepLinkError::UnknownDE => {}
+            other => panic!("expected UnknownDE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calendar_permission_deep_link_url_for_unknown_os_returns_err() {
+        // FreeBSD, iOS, or any other host we don't ship for —
+        // the helper returns the structured `UnknownOS` error
+        // so a future caller can surface a friendly "OS not
+        // supported" message instead of a panic or an empty
+        // URL.
+        let r = calendar_permission_deep_link_url_for("freebsd", None);
+        assert!(r.is_err(), "freebsd should return UnknownOS");
+        match r.unwrap_err() {
+            CalendarPermissionDeepLinkError::UnknownOS(os) => {
+                assert_eq!(os, "freebsd", "error should carry the original OS name");
+            }
+            other => panic!("expected UnknownOS, got {other:?}"),
+        }
     }
 }
