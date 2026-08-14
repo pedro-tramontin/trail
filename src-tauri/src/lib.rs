@@ -792,6 +792,12 @@ pub fn run() {
             // `~/.trail/collector.json` so the frontend can hand
             // it to the platform's reveal/open handler.
             install::open_collector_script,
+            // §X-3 — per-OS user-facing label of the OS credential
+            // store. Returns the platform-specific name
+            // (Keychain / secret-service / Credential Manager) for
+            // the wizard's "store SSH key" tooltip. Pure function,
+            // no I/O.
+            commands::credential_store_name,
             // Phase 6 §6.6 — install-wizard's "do this later"
             // option. Appends `collector_id` to the
             // `pending_installs` array in `~/.trail/config.json`

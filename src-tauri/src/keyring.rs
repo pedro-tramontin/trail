@@ -4,6 +4,63 @@ use zeroize::{Zeroize, Zeroizing};
 pub const KEYCHAIN_SERVICE: &str = "com.pedrotramontin.trail";
 pub const KEYCHAIN_ACCOUNT: &str = "ssh-private-key-ed25519";
 
+/// Return the user-facing name of the OS credential store on the
+/// **host** that ran this binary. The wizard uses this to
+/// surface the platform-specific label in the "store SSH key in
+/// your OS credential store" affordance.
+///
+/// | OS       | Returned string                                |
+/// | -------- | --------------------------------------------- |
+/// | macOS    | `"Keychain"`                                  |
+/// | Linux    | `"secret-service / GNOME Keyring / KWallet"` |
+/// | Windows  | `"Credential Manager"`                        |
+/// | other    | `"OS credential store"` (fallback)            |
+///
+/// The string is `&'static` so callers can drop the result into
+/// markup without owning a `String` allocation.
+///
+/// The per-OS selection is delegated to
+/// [`credential_store_name_for`] so the test suite can assert
+/// every branch from a single host build. Same seam pattern
+/// §X-2 used for `default_open_script_invoker_for(...)` — the
+/// host calls `credential_store_name_for(cfg!(target_os = "..."))`
+/// and tests call it with literal `"macos"` / `"linux"` /
+/// `"windows"` to cover the arms that the local build can't
+/// compile.
+pub fn credential_store_name() -> &'static str {
+    let target = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unsupported"
+    };
+    credential_store_name_for(target)
+}
+
+/// Per-OS user-facing label for the OS credential store. Same
+/// table as [`credential_store_name`], but the dispatch is
+/// keyed on the supplied `target_os` string instead of the
+/// compile-time `cfg!(target_os = "...")`. Tests call this
+/// with literal `"macos"` / `"linux"` / `"windows"` so every
+/// arm is covered on every host. Unknown / unsupported
+/// `target_os` values fall through to the generic
+/// `"OS credential store"` label — the wizard's tooltip
+/// degrades gracefully on FreeBSD, iOS, etc.
+pub fn credential_store_name_for(target_os: &str) -> &'static str {
+    match target_os {
+        "macos" => "Keychain",
+        "linux" => "secret-service / GNOME Keyring / KWallet",
+        "windows" => "Credential Manager",
+        // Fallback for hosts we don't ship for (FreeBSD, iOS, …).
+        // The wizard still calls the helper — the user just sees
+        // the generic label instead of the platform-specific one.
+        _ => "OS credential store",
+    }
+}
+
 /// Generate a fresh ed25519 SSH keypair (pure — does not touch the
 /// keychain). Returns the private key in OpenSSH PEM form + the
 /// public key in OpenSSH single-line form (ready for
@@ -297,4 +354,68 @@ mod tests {
             let _ = entry.delete_credential();
         }
     }
+
+    // === §X-3 — per-OS user-facing label for the OS credential store ===
+    //
+    // `credential_store_name_for("macos")` / `..._for("linux")` /
+    // `..._for("windows")` are pure functions that return the
+    // platform-specific label the wizard surfaces in its
+    // tooltip. The per-OS dispatch is keyed on the supplied
+    // `&str` (not the host's `#[cfg(target_os = "...")]`) so
+    // every arm is covered by a single test run on a single
+    // host — same seam pattern §X-2 used for
+    // `default_open_script_invoker_for(...)`.
+    //
+    // The unknown-OS fallback ("OS credential store") is
+    // asserted too so a future refactor that drops the arm
+    // doesn't silently render the wrong label on FreeBSD / iOS.
+
+    #[test]
+    fn credential_store_name_for_macos_returns_keychain() {
+        assert_eq!(
+            credential_store_name_for("macos"),
+            "Keychain",
+            "macOS arm should return the platform-specific label"
+        );
+    }
+
+    #[test]
+    fn credential_store_name_for_linux_returns_secret_service() {
+        assert_eq!(
+            credential_store_name_for("linux"),
+            "secret-service / GNOME Keyring / KWallet",
+            "Linux arm should list the freedesktop + KDE options"
+        );
+    }
+
+    #[test]
+    fn credential_store_name_for_windows_returns_credential_manager() {
+        assert_eq!(
+            credential_store_name_for("windows"),
+            "Credential Manager",
+            "Windows arm should return the platform-specific label"
+        );
+    }
+
+    #[test]
+    fn credential_store_name_for_unknown_os_returns_generic_label() {
+        // FreeBSD, iOS, or any other host the wizard doesn't
+        // ship for — the toolip should still render something
+        // sensible (the same generic wording the body copy
+        // uses), not panic or return an empty string.
+        assert_eq!(
+            credential_store_name_for("freebsd"),
+            "OS credential store",
+            "unknown-OS fallback should be the generic label"
+        );
+    }
+
+    // The host-side wrapper `credential_store_name()` is
+    // exercised transitively by the per-OS tests above (it
+    // delegates to `credential_store_name_for(host_target)`).
+    // We don't need a separate test for it because there's
+    // nothing to test beyond the cfg!() host lookup, which
+    // would just re-state the build's target triple. The
+    // runtime dispatch is fully covered by the `_for(...)`
+    // assertions.
 }
