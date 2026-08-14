@@ -838,7 +838,15 @@ static OPEN_SCRIPT_INVOKER: Mutex<Option<OpenScriptInvoker>> = Mutex::new(None);
 /// default invoker) so subsequent tests aren't poisoned by an
 /// earlier test's mock. Returning a guard makes the swap
 /// panic-safe: a test that returns early still resets the slot.
+///
+/// `#[allow(dead_code)]` because no committed test installs a
+/// mock yet — the 3 current §X-2 tests assert the per-OS shape
+/// via `default_open_script_invoker_for(...)` directly. The seam
+/// is kept for the next test that needs to exercise the
+/// production routing path (likely a `headless_launch.rs`
+/// integration test in a follow-up).
 #[cfg(test)]
+#[allow(dead_code)]
 fn set_open_script_invoker<F>(f: F) -> OpenScriptInvokerGuard
 where
     F: FnMut(&Path) -> std::process::Command + Send + 'static,
@@ -854,7 +862,11 @@ where
 /// RAII guard that resets `OPEN_SCRIPT_INVOKER` to `None` (the
 /// default per-OS invoker) when dropped. Only constructed by
 /// `set_open_script_invoker` from `#[cfg(test)]` code.
+///
+/// `#[allow(dead_code)]` mirrors the helper above — see the
+/// rationale on `set_open_script_invoker`.
 #[cfg(test)]
+#[allow(dead_code)]
 struct OpenScriptInvokerGuard {
     /// The previous invoker (if any). Saved so a future "stack"
     /// of nested installs can restore the prior mock; today we
