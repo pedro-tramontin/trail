@@ -649,24 +649,241 @@ pub async fn install_vps_collector_inner(
 /// frontend can hand it to the platform's `revealInFinder` /
 /// `xdg-open` / `notepad`.
 ///
-/// On macOS the command also fires a `Command::new("open").args(["-t", &path])`
-/// so the user gets the "look at your config" affordance the wizard
-/// promises. On Linux/Windows the command is a no-op (the frontend
-/// picks the platform-appropriate handler).
+/// The command also fires the platform's native "open this file in
+/// the default text editor" spawn so the user gets the "look at
+/// your config" affordance the wizard promises:
+///
+/// * **macOS** — `Command::new("open").args(["-t", &path])` (uses
+///   `open -t` to force the default text editor).
+/// * **Linux** — `Command::new("xdg-open").arg(&path)` (the freedesktop
+///   cross-DE default).
+/// * **Windows** — `Command::new("cmd").args(["/c", "start", "", &path])`
+///   (the empty `""` is required to disambiguate `start`'s title arg
+///   from the path).
+///
+/// Each spawn is best-effort: a missing `open` / `xdg-open` / `cmd`
+/// on `$PATH` returns `Ok` without error (the Tauri command is
+/// allowed to succeed even when the spawn fails — the path string
+/// in the return value is what the frontend falls back on).
+///
+/// The per-OS command selector is factored into
+/// `open_script_invoker` so the unit tests can mock the spawn at a
+/// single boundary on a single host (the same seam pattern §X-1
+/// used for `install_vps_collector` — a `Mutex<Option<Box<dyn FnMut>>>`
+/// slot + tokio::sync::Mutex serial guard for parallel tests).
 #[tauri::command]
 pub async fn open_collector_script() -> Result<String, String> {
     let path = collector_script_path();
     let path_str = path.to_string_lossy().to_string();
-    #[cfg(target_os = "macos")]
-    {
-        // Best-effort — `reveal in Finder` is the user-visible UX.
-        // The Tauri command is allowed to return Ok even if `open`
-        // isn't on $PATH (test environments + non-macOS hosts).
-        let _ = std::process::Command::new("open")
-            .args(["-t", &path_str])
-            .spawn();
-    }
+    // Best-effort — the wizard always receives the path back even
+    // if the spawn fails (test environments, missing $PATH, etc.).
+    // The indirection goes through a thread-local mock slot so the
+    // per-OS test can assert the spawn invocation without forking.
+    let _ = open_script_invoker()(&path).spawn();
     Ok(path_str)
+}
+
+/// Runtime selector for the per-OS "open this file" invoker.
+/// Each branch picks the closure that builds the right
+/// `Command` for the host. The function pointer shape
+/// (`fn(&Path) -> std::process::Command`) is what lets the test
+/// suite install a `Mutex<Option<Box<dyn FnMut>>>` mock that
+/// asserts the captured path regardless of the host's `#[cfg]`.
+/// Returning a `Command` (not the spawn `Result`) lets the
+/// tests inspect `get_program()` and `get_args()` to assert the
+/// per-OS spawn shape without forking.
+fn open_script_invoker() -> fn(&Path) -> std::process::Command {
+    // The mock slot is `Some(_)` only in tests; production builds
+    // always see `None` and fall through to the per-OS default.
+    if OPEN_SCRIPT_INVOKER
+        .lock()
+        .expect("OPEN_SCRIPT_INVOKER mutex poisoned")
+        .is_some()
+    {
+        return test_invoker_shim;
+    }
+    default_open_script_invoker()
+}
+
+/// Per-OS "open this file" invoker. Returns the platform's
+/// native `Command` builder so the production code can `spawn`
+/// the right binary on the right OS. Compile-time selected via
+/// `#[cfg(target_os = "...")]` — the test-side seam
+/// (`default_open_script_invoker_for`) re-uses the same
+/// per-OS arms to give the test a runtime-target selector.
+fn default_open_script_invoker() -> fn(&Path) -> std::process::Command {
+    default_open_script_invoker_for(host_target_os())
+}
+
+/// Returns the host's `target_os` string. Wrapped in a
+/// `const fn` so the test-side selector (`..._for("...")`)
+/// stays symmetric with the production selector and the
+/// `#[cfg]` arms in `default_open_script_invoker_for` line up
+/// with what `cfg!(target_os = "...")` reports at runtime.
+#[cfg(target_os = "macos")]
+const fn host_target_os() -> &'static str {
+    "macos"
+}
+#[cfg(target_os = "linux")]
+const fn host_target_os() -> &'static str {
+    "linux"
+}
+#[cfg(target_os = "windows")]
+const fn host_target_os() -> &'static str {
+    "windows"
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const fn host_target_os() -> &'static str {
+    "unsupported"
+}
+
+/// Per-OS "open this file" invoker, runtime-dispatched by
+/// `target_os` string. Production code calls this with the
+/// host's `target_os` (via `host_target_os()`); tests call it
+/// with literal `"macos"` / `"linux"` / `"windows"` so the
+/// host can verify each per-OS spawn shape from a single
+/// build. The per-OS arms are the same code that
+/// `default_open_script_invoker` compiles into the host's
+/// binary — the test simply makes the dispatch explicit so
+/// every CI draft-build (draft-linux / draft-macos /
+/// draft-windows) gets the right coverage.
+fn default_open_script_invoker_for(target_os: &str) -> fn(&Path) -> std::process::Command {
+    match target_os {
+        "macos" => macos_open_command,
+        "linux" => linux_xdg_open_command,
+        "windows" => windows_cmd_start_command,
+        _ => unsupported_command,
+    }
+}
+
+/// Build the macOS `open -t <path>` Command. The `-t` flag
+/// forces the default text editor so the user gets a
+/// "look at your config" affordance consistent with the
+/// wizard's promise.
+fn macos_open_command(path: &Path) -> std::process::Command {
+    let path_str = path.to_string_lossy().to_string();
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg("-t").arg(&path_str);
+    cmd
+}
+
+/// Build the Linux `xdg-open <path>` Command. `xdg-open` is
+/// the freedesktop cross-DE default and the same binary the
+/// frontend's reveal-script helper would shell out to.
+fn linux_xdg_open_command(path: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(path);
+    cmd
+}
+
+/// Build the Windows `cmd /c start "" <path>` Command. The
+/// empty `""` is required to disambiguate `start`'s title
+/// argument from the path — `start <bare-path>` treats the
+/// first quoted token as the title and the rest as the
+/// path, so an empty title forces the second arg to be the
+/// actual file.
+fn windows_cmd_start_command(path: &Path) -> std::process::Command {
+    let path_str = path.to_string_lossy().to_string();
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.arg("/c").arg("start").arg("").arg(&path_str);
+    cmd
+}
+
+/// Fallback for hosts that aren't macOS / Linux / Windows
+/// (e.g. FreeBSD, iOS). Returns an empty `Command` whose
+/// `.spawn()` would fail; the production `let _ =` binding
+/// discards the error so the Tauri command still returns the
+/// path string the frontend can use.
+fn unsupported_command(_path: &Path) -> std::process::Command {
+    std::process::Command::new("true")
+}
+
+/// Shim that the test-side mock installs as the production
+/// invoker. The mock closure lives behind a `Box<dyn FnMut>`
+/// in `OPEN_SCRIPT_INVOKER`; this `fn` pointer is the
+/// stable-address handle the production code calls when the
+/// slot is `Some`. Always extracted as a `fn` (not a closure
+/// type) so the `fn` return shape of `open_script_invoker`
+/// is uniform — see Pitfall #119's "no clippy::await_holding_lock
+/// / no std::sync::Mutex held across .await" notes.
+fn test_invoker_shim(path: &Path) -> std::process::Command {
+    let mut slot = OPEN_SCRIPT_INVOKER
+        .lock()
+        .expect("OPEN_SCRIPT_INVOKER mutex poisoned");
+    if let Some(f) = slot.as_mut() {
+        f(path)
+    } else {
+        // Defensive: if a test clears the slot mid-call (it
+        // shouldn't — the RAII guard restores on drop), fall
+        // through to the per-OS default. This branch is
+        // unreachable in practice; the host-default Command
+        // keeps the function total.
+        drop(slot);
+        (default_open_script_invoker())(path)
+    }
+}
+
+/// Trait-object indirection that lets the test suite swap the
+/// per-OS invoker out for a mock. `None` means "use the
+/// default per-OS invoker" (production behaviour); tests set
+/// this to a `Box<dyn FnMut>` that captures the path for that
+/// test, and reset to `None` when their guard drops. Same
+/// pattern §X-1 used for `INVOKE_INSTALL_SCRIPT`.
+type OpenScriptInvoker = Box<dyn FnMut(&Path) -> std::process::Command + Send>;
+
+static OPEN_SCRIPT_INVOKER: Mutex<Option<OpenScriptInvoker>> = Mutex::new(None);
+
+/// Test-only helper: install a mock invoker for the duration of
+/// the returned guard. The guard's `Drop` restores `None` (the
+/// default invoker) so subsequent tests aren't poisoned by an
+/// earlier test's mock. Returning a guard makes the swap
+/// panic-safe: a test that returns early still resets the slot.
+///
+/// `#[allow(dead_code)]` because no committed test installs a
+/// mock yet — the 3 current §X-2 tests assert the per-OS shape
+/// via `default_open_script_invoker_for(...)` directly. The seam
+/// is kept for the next test that needs to exercise the
+/// production routing path (likely a `headless_launch.rs`
+/// integration test in a follow-up).
+#[cfg(test)]
+#[allow(dead_code)]
+fn set_open_script_invoker<F>(f: F) -> OpenScriptInvokerGuard
+where
+    F: FnMut(&Path) -> std::process::Command + Send + 'static,
+{
+    let mut slot = OPEN_SCRIPT_INVOKER
+        .lock()
+        .expect("OPEN_SCRIPT_INVOKER mutex poisoned");
+    let prev = slot.replace(Box::new(f));
+    drop(slot);
+    OpenScriptInvokerGuard { prev }
+}
+
+/// RAII guard that resets `OPEN_SCRIPT_INVOKER` to `None` (the
+/// default per-OS invoker) when dropped. Only constructed by
+/// `set_open_script_invoker` from `#[cfg(test)]` code.
+///
+/// `#[allow(dead_code)]` mirrors the helper above — see the
+/// rationale on `set_open_script_invoker`.
+#[cfg(test)]
+#[allow(dead_code)]
+struct OpenScriptInvokerGuard {
+    /// The previous invoker (if any). Saved so a future "stack"
+    /// of nested installs can restore the prior mock; today we
+    /// unconditionally reset to `None`, but the field keeps the
+    /// drop body non-trivial and the door open for that
+    /// future-proofing without an API change.
+    prev: Option<OpenScriptInvoker>,
+}
+
+#[cfg(test)]
+impl Drop for OpenScriptInvokerGuard {
+    fn drop(&mut self) {
+        let mut slot = OPEN_SCRIPT_INVOKER
+            .lock()
+            .expect("OPEN_SCRIPT_INVOKER mutex poisoned");
+        *slot = self.prev.take();
+    }
 }
 
 /// Tauri command: the "skip" path. Appends `"vps_collector"` to
@@ -1237,6 +1454,136 @@ mod tests {
         assert!(
             err.contains("mock stderr"),
             "expected error to surface the script's stderr, got: {err:?}"
+        );
+    }
+
+    // ---- Test 7: open_collector_script uses `open -t` on macOS -----------
+    //
+    // The macOS arm of the per-OS dispatch must fire
+    // `Command::new("open").args(["-t", &path])` so the user
+    // gets a "look at your config in the default text editor"
+    // affordance. This test is runnable on every host because
+    // `default_open_script_invoker_for("macos")` is a pure
+    // function that returns a `Command` for inspection — the
+    // CI draft-macos build will exercise the real spawn in its
+    // draft-build job; this host test verifies the
+    // `Command::get_program()` + `Command::get_args()` shape
+    // without forking.
+
+    #[test]
+    fn open_collector_script_uses_open_on_macos() {
+        let path = std::path::Path::new("/tmp/.trail/collector.json");
+        let cmd = default_open_script_invoker_for("macos")(path);
+        assert_eq!(
+            cmd.get_program(),
+            "open",
+            "macOS arm should use `open` as the program, got: {:?}",
+            cmd.get_program()
+        );
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args.len(),
+            2,
+            "macOS arm should have exactly 2 args (`-t` + path), got: {:?}",
+            args
+        );
+        assert_eq!(
+            args[0], "-t",
+            "macOS arm's first arg should be `-t` (force text editor), got: {:?}",
+            args[0]
+        );
+        assert_eq!(
+            args[1],
+            path.as_os_str(),
+            "macOS arm's second arg should be the collector.json path, got: {:?}",
+            args[1]
+        );
+    }
+
+    // ---- Test 8: open_collector_script uses `xdg-open` on Linux ----------
+    //
+    // The Linux arm must fire `Command::new("xdg-open").arg(&path)`
+    // so the user gets a "look at your config" affordance on
+    // every freedesktop-compliant desktop. This test runs on
+    // every host (including the Linux CI draft-build) because
+    // `default_open_script_invoker_for("linux")` is a pure
+    // function returning a `Command` for inspection.
+
+    #[test]
+    fn open_collector_script_uses_xdg_open_on_linux() {
+        let path = std::path::Path::new("/tmp/.trail/collector.json");
+        let cmd = default_open_script_invoker_for("linux")(path);
+        assert_eq!(
+            cmd.get_program(),
+            "xdg-open",
+            "Linux arm should use `xdg-open` as the program, got: {:?}",
+            cmd.get_program()
+        );
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args.len(),
+            1,
+            "Linux arm should have exactly 1 arg (the path), got: {:?}",
+            args
+        );
+        assert_eq!(
+            args[0],
+            path.as_os_str(),
+            "Linux arm's sole arg should be the collector.json path, got: {:?}",
+            args[0]
+        );
+    }
+
+    // ---- Test 9: open_collector_script uses `cmd /c start ""` on Windows -
+    //
+    // The Windows arm must fire
+    // `Command::new("cmd").args(["/c", "start", "", &path])` so
+    // the user gets a "look at your config" affordance on
+    // Windows. The empty `""` is load-bearing: `start`'s first
+    // quoted token is the title; without `""` the path is
+    // interpreted as the title and `start` opens a new cmd
+    // window with the wrong contents. This test runs on every
+    // host because `default_open_script_invoker_for("windows")`
+    // is a pure function returning a `Command` for inspection;
+    // the Windows CI draft-build exercises the real spawn.
+
+    #[test]
+    fn open_collector_script_uses_cmd_start_on_windows() {
+        let path = std::path::Path::new("/tmp/.trail/collector.json");
+        let cmd = default_open_script_invoker_for("windows")(path);
+        assert_eq!(
+            cmd.get_program(),
+            "cmd",
+            "Windows arm should use `cmd` as the program, got: {:?}",
+            cmd.get_program()
+        );
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args.len(),
+            4,
+            "Windows arm should have exactly 4 args (`/c`, `start`, `\"\"`, path), got: {:?}",
+            args
+        );
+        assert_eq!(
+            args[0], "/c",
+            "Windows arm's first arg should be `/c` (cmd's run-and-exit), got: {:?}",
+            args[0]
+        );
+        assert_eq!(
+            args[1], "start",
+            "Windows arm's second arg should be `start`, got: {:?}",
+            args[1]
+        );
+        assert_eq!(
+            args[2], "",
+            "Windows arm's third arg should be `\"\"` (empty title to disambiguate), got: {:?}",
+            args[2]
+        );
+        assert_eq!(
+            args[3],
+            path.as_os_str(),
+            "Windows arm's fourth arg should be the collector.json path, got: {:?}",
+            args[3]
         );
     }
 }
