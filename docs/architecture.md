@@ -16,7 +16,7 @@ The repository is a Cargo workspace with three members.
 
 | Crate | Purpose |
 |---|---|
-| `src-tauri` | Tauri 2 tray-icon app with auto-pop windows (`trail_lib`). The only user-facing surface. Owns the `TrayIcon`, the Svelte 5 UI, the IPC command surface, the local summarizer (via `ollama`), the voice capture, and the SSH transport. |
+| `src-tauri` | Tauri 2 tray-icon app with auto-pop windows (`trail_lib`). The only user-facing surface. Owns the `TrayIcon`, the Svelte 5 UI, the IPC command surface, the local summarizer (via `ollama`), the voice capture (cross-platform via per-OS cpal backends: CoreAudio on macOS, ALSA on Linux, WASAPI on Windows), and the SSH transport. |
 | `crates/trail-collector` | A single static Rust binary that runs on the VPS. Three CLI modes (`--health`, `--once`, `--validate`) and three collector source kinds (`github`, `claude_sessions`, `calendar`). Bundled into the macOS `.app` via `cargo-bundle`'s `bundled` field (the binary is placed at `src-tauri/resources/trail-collector` so the Tauri install command can scp it to the VPS). |
 | `tests/fixtures/mock-ssh-server` | A tiny mock SSH server used by the install module's unit tests on headless hosts. |
 
