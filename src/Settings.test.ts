@@ -151,12 +151,74 @@ describe("Settings.svelte (placeholder shell)", () => {
     // the row stands out from the rest of Settings.
     expect(state.className).toContain("state-denied");
     expect(state.textContent).toMatch(/Permission:\s*denied/);
-    // The deep-link button appears in the denied state —
-    // it's how the user reaches the per-OS privacy pane.
+    // The deep-link button appears in the denied state — it's
+    // how the user reaches the per-OS privacy pane.
     const btn = await screen.findByTestId("settings-open-permission");
     expect(btn).toBeTruthy();
     expect(btn.textContent).toMatch(/Open Privacy Settings/);
     // "Test microphone" is still present.
     expect(screen.getByTestId("settings-test-microphone")).toBeTruthy();
+  });
+
+  // §X-5 / Phase 11 §11.3 — the `SshKeySettings` panel is
+  // mounted inside the Settings shell. The Settings
+  // placeholder's `data-testid="settings-shell"` is the parent;
+  // we assert the SSH-key panel's `data-testid="ssh-key-settings"`
+  // appears in the rendered tree, which is the structural
+  // contract §X-3 / §X-5 carry (the panel's per-state UI is
+  // exercised by `src/lib/SshKeySettings.test.ts`'s 4 cases,
+  // one per `KeyringHint` variant).
+  it("(f) SSH-key settings panel is mounted", async () => {
+    // The SshKeySettings panel fires three IPCs on mount in
+    // parallel (`keyring_hint`, `credential_store_name`,
+    // `get_ssh_public_key`). All four existing Settings tests
+    // already default-resolve every IPC through the
+    // beforeEach `mockInvoke.mockImplementation` — but those
+    // defaults return `Promise.resolve(undefined)` for any
+    // command not in the whitelist, which would reject the
+    // type contract on `keyring_hint` (the panel expects a
+    // typed `KeyringHint` variant, not `undefined`). Add an
+    // explicit mock for the three new commands here so the
+    // panel mounts cleanly under the existing harness.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "check_mic_permission_cmd")
+        return Promise.resolve("granted");
+      if (cmd === "mic_permission_deep_link_url_cmd")
+        return Promise.resolve("pavucontrol:");
+      if (cmd === "keyring_hint")
+        return Promise.resolve({ kind: "key_pair" });
+      if (cmd === "credential_store_name")
+        return Promise.resolve("secret-service / GNOME Keyring / KWallet");
+      if (cmd === "get_ssh_public_key")
+        return Promise.resolve("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA");
+      return Promise.resolve(undefined);
+    });
+
+    render(Settings, { props: { onreset: () => {} } });
+
+    // The SshKeySettings panel renders inside the same shell
+    // — `findByTestId` waits for the onMount microtask to
+    // flush so the panel's `data-testid` is present. We
+    // specifically wait on the KeyPair-state test id (the
+    // IPC `keyring_hint` is the slower of the three onMount
+    // IPCs the panel fires), which transitively guarantees
+    // the `credential_store_name` IPC has also resolved.
+    const panel = await screen.findByTestId("ssh-key-settings");
+    expect(panel).toBeTruthy();
+    await screen.findByTestId("ssh-key-settings-key-pair");
+    // The panel header shows the per-OS credential store
+    // label (the §X-3 work — same per-OS dispatch this
+    // assertion covers transitively).
+    expect(panel.textContent).toMatch(
+      /secret-service \/ GNOME Keyring \/ KWallet/,
+    );
+    // The KeyPair state renders the success row + the Copy
+    // and Regenerate buttons. (The full per-state UI is
+    // covered by `SshKeySettings.test.ts`'s 4 cases; here we
+    // just assert the panel is wired into Settings.svelte's
+    // rendered tree.)
+    expect(screen.getByTestId("ssh-key-settings-key-pair")).toBeTruthy();
+    expect(screen.getByTestId("ssh-key-settings-copy")).toBeTruthy();
+    expect(screen.getByTestId("ssh-key-settings-regenerate")).toBeTruthy();
   });
 });

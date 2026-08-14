@@ -812,6 +812,17 @@ pub fn run() {
             // the wizard's "store SSH key" tooltip. Pure function,
             // no I/O.
             commands::credential_store_name,
+            // §X-5 / Phase 11 §11.1 — typed `KeyringHint` probe
+            // for the wizard's SSH-key settings panel
+            // (`SshKeySettings.svelte`). The frontend branches on
+            // `hint.kind` to render one of 4 UI states (Empty /
+            // PublicOnly / KeyPair / Unavailable) instead of
+            // guessing from a missing `Some` vs. `None`. The
+            // pure-function seam is
+            // `keyring::keyring_hint_for(has_public, has_private)`
+            // — see `commands::keyring_hint` + `keyring.rs` for
+            // the per-OS probe implementation.
+            commands::keyring_hint,
             // Phase 6 §6.6 — install-wizard's "do this later"
             // option. Appends `collector_id` to the
             // `pending_installs` array in `~/.trail/config.json`

@@ -11,8 +11,14 @@
 //!   - [`crate::keyring::credential_store_name_for`] — picks the
 //!     user-facing label for the OS credential store on each
 //!     platform. Wrapped by the [`credential_store_name`] command.
+//!   - [`crate::keyring::keyring_hint_for`] — pure-function
+//!     mapping from `(has_public, has_private)` to the
+//!     discrete [`crate::keyring::KeyringHint`] variant.
+//!     Wrapped by the [`keyring_hint`] command, which is the
+//!     Phase 11 §11.1 surface for `SshKeySettings.svelte`'s 4
+//!     conditional UI states (§11.3).
 //!
-//! These two helpers are pure functions keyed on a `&str` (not
+//! These helpers are pure functions keyed on a `&str` (not
 //! the compile-time `#[cfg]`) so every arm is covered by a single
 //! test run on a single host build. Same seam pattern §X-2 and
 //! §X-3 established.
@@ -52,6 +58,37 @@ pub fn build_transport(config_path: PathBuf) -> Result<Box<dyn Transport>, Strin
 #[tauri::command]
 pub fn credential_store_name() -> &'static str {
     keyring::credential_store_name()
+}
+
+/// Tauri command: probe the OS credential store and return a typed
+/// [`crate::keyring::KeyringHint`] describing what's there. Phase 11
+/// §11.1 + §11.3 — the wizard's SSH-key settings panel
+/// (`SshKeySettings.svelte`) invokes this on mount and renders one
+/// of 4 UI states based on `hint.kind`:
+///
+/// | `hint.kind`        | UI copy                                                       |
+/// | ------------------ | ------------------------------------------------------------- |
+/// | `empty`            | "No SSH key yet" + "Generate SSH key" button                  |
+/// | `public_only`      | "Your public key is stored but the private key is missing" — re-generate |
+/// | `key_pair`         | "Your SSH key is stored" + "Copy public key" + "Regenerate" buttons |
+/// | `unavailable`      | "The OS credential store is unavailable (reason: X)" labeled fallback |
+///
+/// The command flattens [`crate::keyring::KeyringError`] into a
+/// `String` for the Tauri IPC boundary, mirroring the
+/// `credential_store_name()` shape (which is itself a thin
+/// wrapper — same seam pattern §X-3 established).
+#[tauri::command]
+pub fn keyring_hint() -> keyring::KeyringHint {
+    // `keyring_hint()` returns `Ok(KeyringHint::Unavailable { .. })`
+    // for the "OS credential store is unreachable" case, so the
+    // frontend sees a structured variant it can branch on, not an
+    // IPC error. Genuine `Err` paths are reserved for programming
+    // bugs (the `ssh-key` parse path or an `Entry::new` panic) —
+    // those become a flat error string the UI surfaces in the
+    // Unavailable fallback.
+    keyring::keyring_hint().unwrap_or_else(|e| keyring::KeyringHint::Unavailable {
+        reason: format!("keyring probe failed: {e}"),
+    })
 }
 
 /// Tauri command: probe the configured transport (SSH reachability +
