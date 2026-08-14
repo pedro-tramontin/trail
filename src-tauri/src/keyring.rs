@@ -1,8 +1,38 @@
+use serde::{Deserialize, Serialize};
 use ssh_key::PrivateKey;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const KEYCHAIN_SERVICE: &str = "com.pedrotramontin.trail";
 pub const KEYCHAIN_ACCOUNT: &str = "ssh-private-key-ed25519";
+
+/// What's in the OS credential store for this app's SSH key.
+///
+/// Phase 11 §11.1 typed enum — replaces the loose
+/// `Result<Option<String>, _>` return shape
+/// [`read_public_from_keychain`] used to expose. The wizard's
+/// SSH-key settings panel (§11.3) branches on this enum to
+/// render one of 4 UI states (Empty / PublicOnly / KeyPair /
+/// Unavailable) instead of guessing from a missing `Some` vs.
+/// `None`. Each variant is a discrete state — no booleans,
+/// no "missing private key" inferred from absence.
+///
+/// The serde tagging is `#[serde(tag = "kind", rename_all = "snake_case")]`
+/// so the Svelte side sees `{ kind: "key_pair", ... }` /
+/// `{ kind: "unavailable", reason: "..." }` / etc. — the
+/// TypeScript side can do `if (hint.kind === "key_pair")`
+/// without a per-variant payload wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeyringHint {
+    /// No key has been generated/stored yet.
+    Empty,
+    /// A public key is stored but no private key was found.
+    PublicOnly,
+    /// Both public and private keys are stored.
+    KeyPair,
+    /// The keyring is unavailable on this OS or in this profile.
+    Unavailable { reason: String },
+}
 
 /// Return the user-facing name of the OS credential store on the
 /// **host** that ran this binary. The wizard uses this to
@@ -118,6 +148,15 @@ pub fn generate_and_store() -> Result<String, KeyringError> {
 
 /// Read the public key for an existing keypair in the keychain, or
 /// `None` if no keypair is stored yet.
+///
+/// §X-5 / Phase 11 §11.1 — this function's `Option<String>`
+/// return shape stays as-is for backward compatibility (the
+/// wizard's "Test connection" + onboarding flow still want the
+/// raw public key string). The new typed probe for the SSH-key
+/// settings panel lives in [`keyring_hint`] / [`keyring_hint_for`]
+/// — it wraps this function internally and lifts the result
+/// into the discrete [`KeyringHint`] variant the Svelte panel
+/// branches on.
 pub fn read_public_from_keychain() -> Result<Option<String>, KeyringError> {
     let entry =
         keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(KeyringError::Keyring)?;
@@ -138,6 +177,93 @@ pub fn read_public_from_keychain() -> Result<Option<String>, KeyringError> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(KeyringError::Keyring(e)),
     }
+}
+
+/// Pure-function mapping from the (has_public, has_private) tuple
+/// to the discrete [`KeyringHint`] variant. Lives in its own
+/// function so the test suite can assert all 4 states from a
+/// single host build — the I/O half ([`keyring_hint`]) is
+/// `#[ignore]`'d on CI hosts without an OS keychain, but the
+/// mapping table here is pure and runs everywhere.
+///
+/// The (false, true) corner — private key without a matching
+/// public key — is **not reachable** in the v1 generator:
+/// [`generate_and_store`] writes the private key PEM into the
+/// keychain and returns the public key derived from it via
+/// [`read_public_from_keychain`]. If the PEM in the keychain
+/// is a valid OpenSSH private key, deriving the public key is
+/// a deterministic, infallible operation, so the public-key
+/// side will always be present whenever the private side is.
+/// We collapse this unreachable input to [`KeyringHint::KeyPair`]
+/// (i.e. "the credential store has something we can use") so
+/// the UI never surfaces a confusing "private only, public
+/// missing" state that the generator cannot actually produce.
+pub fn keyring_hint_for(has_public: bool, has_private: bool) -> KeyringHint {
+    match (has_public, has_private) {
+        (false, false) => KeyringHint::Empty,
+        (true, false) => KeyringHint::PublicOnly,
+        // Both (true, true) and (false, true) collapse to KeyPair.
+        // The (false, true) input is a documented unreachability —
+        // see the doc comment above — and a future refactor that
+        // makes it reachable (e.g. a manually-imported PEM that
+        // ssh-key can't round-trip) will still render the panel
+        // sensibly rather than crashing.
+        (true, true) | (false, true) => KeyringHint::KeyPair,
+    }
+}
+
+/// Probe the OS credential store and return a typed
+/// [`KeyringHint`] describing what's there. Phase 11 §11.1
+/// surface for the wizard's SSH-key settings panel (§11.3):
+/// the frontend branches on `hint.kind` to render the
+/// Empty / PublicOnly / KeyPair / Unavailable UI states.
+///
+/// The actual lookup is delegated to
+/// [`read_public_from_keychain`] (for the public key) and the
+/// raw `keyring::Entry::get_password` call (for the private
+/// key presence check — we don't materialise the PEM twice).
+/// If the keychain itself is unreachable on this OS / profile,
+/// we return [`KeyringHint::Unavailable`] with a short
+/// human-readable reason string instead of an `Err`, so the
+/// UI can render the labeled fallback message rather than
+/// surfacing an IPC error.
+///
+/// `Err` is reserved for genuine programming bugs (an
+/// `Entry::new` failure, an `ssh-key` parse failure on a
+/// stored PEM). The "keychain is fine, it's just empty" case
+/// returns `Ok(KeyringHint::Empty)` — that's a normal state,
+/// not an error.
+pub fn keyring_hint() -> Result<KeyringHint, KeyringError> {
+    let entry = match keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        Ok(e) => e,
+        Err(e) => {
+            return Ok(KeyringHint::Unavailable {
+                reason: format!("keychain entry init failed: {e}"),
+            });
+        }
+    };
+    // Probe the private key (the raw PEM). We use the raw
+    // `get_password` rather than `read_public_from_keychain`
+    // because we need the *presence* bit, not the public
+    // key bytes — pulling the public key requires parsing the
+    // PEM, which can fail and would conflate "the PEM is
+    // garbage" with "no entry exists". The two lookups are
+    // idempotent + cheap (both hit the same OS credential).
+    let has_private = match entry.get_password() {
+        Ok(_) => true,
+        Err(keyring::Error::NoEntry) => false,
+        Err(e) => {
+            return Ok(KeyringHint::Unavailable {
+                reason: format!("keychain get_password failed: {e}"),
+            });
+        }
+    };
+    // The public key is a deterministic derivation from the
+    // private PEM. If the PEM parses, the public key is
+    // present (we re-use `read_public_from_keychain` so the
+    // SSH-key parse path is exercised in exactly one place).
+    let has_public = read_public_from_keychain()?.is_some();
+    Ok(keyring_hint_for(has_public, has_private))
 }
 
 fn store_in_keychain(pem: &str) -> Result<(), KeyringError> {
@@ -418,4 +544,78 @@ mod tests {
     // would just re-state the build's target triple. The
     // runtime dispatch is fully covered by the `_for(...)`
     // assertions.
+
+    // === §X-5 / Phase 11 §11.1 — `KeyringHint` mapping table ===
+    //
+    // `keyring_hint_for(has_public, has_private)` is a pure
+    // function (no I/O, no state) keyed on two bools. The
+    // table below enumerates all 4 input pairs so a future
+    // refactor that drops an arm or misroutes a tuple doesn't
+    // silently shift the UI between Empty / PublicOnly /
+    // KeyPair / Unavailable. The host-side wrapper
+    // `keyring_hint()` is exercised transitively by the
+    // keychain-touching `#[ignore]`'d tests above (same
+    // delegation pattern as `credential_store_name()`).
+
+    #[test]
+    fn keyring_hint_for_false_false_returns_empty() {
+        // Fresh-install case — the user just ran onboarding and
+        // hasn't generated the SSH key yet. The wizard's
+        // SSH-key settings panel renders "No SSH key yet" +
+        // the "Generate SSH key" button.
+        assert_eq!(
+            keyring_hint_for(false, false),
+            KeyringHint::Empty,
+            "(false, false) should map to Empty (no key generated/stored yet)"
+        );
+    }
+
+    #[test]
+    fn keyring_hint_for_true_false_returns_public_only() {
+        // Half-state — a public key is on disk but the private
+        // PEM is missing (corrupt keychain, user wiped the
+        // credential, OS upgrade, etc.). The wizard renders
+        // the "your public key is stored but the private key
+        // is missing — re-generate" recovery row.
+        assert_eq!(
+            keyring_hint_for(true, false),
+            KeyringHint::PublicOnly,
+            "(true, false) should map to PublicOnly (public key present, private key missing)"
+        );
+    }
+
+    #[test]
+    fn keyring_hint_for_true_true_returns_key_pair() {
+        // Happy path — both keys are in the OS credential store.
+        // The wizard renders "Your SSH key is stored" + the
+        // "Copy public key" + "Regenerate" buttons.
+        assert_eq!(
+            keyring_hint_for(true, true),
+            KeyringHint::KeyPair,
+            "(true, true) should map to KeyPair (both keys present)"
+        );
+    }
+
+    #[test]
+    fn keyring_hint_for_false_true_collapses_to_key_pair() {
+        // Documented unreachability — see the doc comment on
+        // `keyring_hint_for` above. The v1 generator
+        // (`generate_and_store`) always writes both halves
+        // (private PEM in keychain, public key derived from
+        // it on demand via `read_public_from_keychain`).
+        // Deriving the public key from a valid OpenSSH
+        // private key is deterministic and infallible, so
+        // the (false, true) input is not reachable from the
+        // current code paths. We collapse it to `KeyPair` so
+        // a future refactor that makes it reachable (e.g. a
+        // manually-imported PEM that ssh-key can't round-trip
+        // back into a public key) still renders a sensible
+        // "your SSH key is stored" panel instead of crashing
+        // or showing an unreachable "public missing" state.
+        assert_eq!(
+            keyring_hint_for(false, true),
+            KeyringHint::KeyPair,
+            "(false, true) should collapse to KeyPair (documented unreachability — the v1 generator always writes both halves; see the doc comment)"
+        );
+    }
 }
