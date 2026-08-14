@@ -168,11 +168,14 @@ pub struct SummarizerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportConfig {
     /// `"tailscale" | "ssh"`. `"tailscale"` uses the MagicDNS hostname;
-    /// `"ssh"` uses the keychain-stored ed25519 key from item 1-2.
+    /// `"ssh"` uses the OS-credential-store-stored ed25519 key from
+    /// item 1-2 (macOS Keychain / Linux secret-service / Windows
+    /// Credential Manager — see `credential_store_name()`).
     pub method: String,
     /// Filesystem path to the SSH private key (only meaningful for
-    /// `method == "ssh"`; the prod path uses the macOS Keychain
-    /// instead and leaves this `None`).
+    /// `method == "ssh"`; the prod path uses the OS credential store
+    /// (macOS Keychain / Linux secret-service / Windows Credential
+    /// Manager) and leaves this `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key_path: Option<String>,
 }
@@ -372,16 +375,13 @@ impl OnboardingEnvelope {
         // renders. The list is trimmed + empties dropped,
         // matching the github row's `repos` parser.
         let browser_history = if self.browser_history.selected {
-            self.browser_history
-                .notes
-                .as_deref()
-                .map(|n| {
-                    n.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
+            self.browser_history.notes.as_deref().map(|n| {
+                n.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
         } else {
             None
         };
