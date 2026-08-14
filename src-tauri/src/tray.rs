@@ -50,6 +50,14 @@ pub enum MenuEntry {
     /// "Hotkey conflict" — visible only when another app owns
     /// the push-to-talk shortcut.
     HotkeyConflict,
+    /// "Hotkey: <backend>" — readout that names which hotkey
+    /// backend (X11 / KDE / Portal / Wlroots / Tray-only / Carbon
+    /// / Win32) is active on the current host. The user uses it
+    /// to know where the shortcut binding lives — per D3 the
+    /// capture subsystem stays reachable via the tray-icon click
+    /// regardless of which backend (or `Tray-only` Noop) is
+    /// active, but the binding ownership differs.
+    HotkeyBackend { label: &'static str },
     /// "Quit Trail" — always visible (the tray is the only
     /// way to exit the menu-bar app).
     Quit,
@@ -58,13 +66,16 @@ pub enum MenuEntry {
 #[allow(dead_code)] // consumed by the v1 §5.9 menu-builder wiring
 impl MenuEntry {
     /// Human-readable label (what the menu builder renders).
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> String {
         match self {
-            MenuEntry::StartRecording => "Start recording",
-            MenuEntry::StopRecording => "Stop recording",
-            MenuEntry::OpenMicSettings { .. } => "Open Mic Settings",
-            MenuEntry::HotkeyConflict => "Hotkey conflict (another app owns this shortcut)",
-            MenuEntry::Quit => "Quit Trail",
+            MenuEntry::StartRecording => "Start recording".to_string(),
+            MenuEntry::StopRecording => "Stop recording".to_string(),
+            MenuEntry::OpenMicSettings { .. } => "Open Mic Settings".to_string(),
+            MenuEntry::HotkeyConflict => {
+                "Hotkey conflict (another app owns this shortcut)".to_string()
+            }
+            MenuEntry::HotkeyBackend { label } => format!("Hotkey: {label}"),
+            MenuEntry::Quit => "Quit Trail".to_string(),
         }
     }
 }
@@ -175,6 +186,15 @@ pub fn filtered_items(state: TrayState) -> Vec<MenuEntry> {
         items.push(MenuEntry::HotkeyConflict);
     }
 
+    // Hotkey backend readout (D3). Always present so the user
+    // knows which backend owns the binding — X11 / Wlroots / KDE
+    // / Portal / Tray-only on Linux, Carbon / Win32 elsewhere.
+    // The `Tray-only` label is the NoopBackend fallback (capture
+    // stays reachable via the tray-icon click regardless).
+    items.push(MenuEntry::HotkeyBackend {
+        label: crate::voice::active_backend_label(),
+    });
+
     // Quit is always last and always present.
     items.push(MenuEntry::Quit);
 
@@ -205,24 +225,53 @@ mod tests {
 
     #[test]
     fn idle_granted_shows_start_and_quit_only() {
-        // Baseline idle state: Start + Quit, no conditional items.
+        // Baseline idle state: Start + Quit + HotkeyBackend readout,
+        // no conditional items. The HotkeyBackend item is always
+        // present (per D3 the user needs to know which backend owns
+        // the binding); its label is host-specific so we assert
+        // presence-by-variant, not label equality.
         let items = filtered_items(TrayState::idle_permitted());
-        assert_eq!(
-            items,
-            vec![MenuEntry::StartRecording, MenuEntry::Quit],
-            "idle + granted must yield StartRecording + Quit"
+        assert!(
+            items.contains(&MenuEntry::StartRecording),
+            "idle + granted must include StartRecording"
+        );
+        assert!(
+            items.contains(&MenuEntry::Quit),
+            "idle + granted must include Quit"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|e| matches!(e, MenuEntry::HotkeyBackend { .. })),
+            "HotkeyBackend readout must always be present"
+        );
+        assert!(
+            !items.contains(&MenuEntry::OpenMicSettings {
+                deep_link_url: String::new()
+            }),
+            "OpenMicSettings must NOT appear for Granted permission"
         );
     }
 
     #[test]
     fn recording_hides_start_shows_stop() {
-        // Active capture: Start is hidden, Stop is shown.
+        // Active capture: Start is hidden, Stop is shown. The
+        // HotkeyBackend readout is always present.
         let state = recording(TrayState::idle_permitted());
         let items = filtered_items(state);
-        assert_eq!(
-            items,
-            vec![MenuEntry::StopRecording, MenuEntry::Quit],
-            "recording state must surface StopRecording, never StartRecording"
+        assert!(
+            items.contains(&MenuEntry::StopRecording),
+            "recording state must surface StopRecording"
+        );
+        assert!(
+            !items.contains(&MenuEntry::StartRecording),
+            "recording state must NOT surface StartRecording"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|e| matches!(e, MenuEntry::HotkeyBackend { .. })),
+            "HotkeyBackend readout must always be present"
         );
     }
 
