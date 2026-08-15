@@ -26,8 +26,20 @@
 //! inside the `calendar` candidate's `notes` (e.g. "auto-discovered
 //! 3 calendars") so the wizard UI can show a richer hint; the typed
 //! `Vec<DetectedCalendar>` itself is consumed by the LLM step
-//! (`llm.rs`, Phase B) and rendered as a multi-select picker. The
-//! pattern mirrors the per-detector shape used by
+//! (`llm.rs`, Phase B) and rendered as a multi-select picker.
+//!
+//! `scan_gnome_calendar_calendars` is the alias detector for users
+//! who install only the GNOME Calendar GUI (no Evolution MUA). It
+//! walks the same on-disk roots as `scan_evolution_calendars`
+//! (because GNOME Calendar piggybacks on evolution-data-server) but
+//! emits each `.ics` with `client = "gnome_calendar"` so the Ask step
+//! renders the right label for those users. Two heuristics gate the
+//! emission: `gnome-calendar` must be on the user's PATH, and
+//! `evolution` must NOT be (when Evolution is installed, ECD-1
+//! already labels the entries). The ics_path dedup is a defensive
+//! safety net — the heuristic gates are the authoritative control.
+//!
+//! The pattern mirrors the per-detector shape used by
 //! `scan_chrome_history` / `scan_firefox_history`: pure function of
 //! `(home, platform)`, platform-aware so non-Linux targets return
 //! empty.
@@ -51,6 +63,37 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// ECD-2 — GNOME Calendar alias heuristic mocks
+// ---------------------------------------------------------------------------
+//
+// The "is `gnome-calendar` installed?" / "is `evolution` installed?"
+// heuristics are environment-dependent (they shell out to `which`),
+// which makes them hard to test from a deterministic unit suite. We
+// mirror the `install.rs` thread-local mock seam pattern (see
+// `INVOKE_INSTALL_SCRIPT` / `set_install_script_invoker`): the
+// heuristic functions consult a `Mutex<Option<bool>>` slot; in
+// production the slot is `None` and the function falls through to a
+// `which`-style probe; in tests the slot is `Some(value)` and the
+// function returns that value verbatim.
+//
+// The slot is a `Mutex<Option<bool>>` rather than an `AtomicBool` so
+// the tests' `with_heuristics(...)` helper can save + restore the
+// previous value across a body via an RAII guard (panic-safe). When
+// no mock is set, the production code runs `which gnome-calendar`
+// (or `which evolution`) — no `which` crate, just
+// `std::process::Command` per the no-new-dep rule.
+
+/// Test-only mock slot for `is_gnome_calendar_installed_for`. `None`
+/// in production — fall through to the `which` probe. `Some(b)` in
+/// tests — return `b` verbatim.
+static GNOME_CALENDAR_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Test-only mock slot for `is_evolution_installed_for`. Same shape
+/// as `GNOME_CALENDAR_PRESENT`.
+static EVOLUTION_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -99,12 +142,15 @@ pub struct CollectorCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedCalendar {
     /// Stable identifier of the mail/calendar client that produced
-    /// this detection. Today: `"evolution"`. ECD-2 will add
-    /// `"gnome_calendar"` as an alias pointing at the same on-disk
-    /// `.ics` files; ECD-3+ will add `"thunderbird"`,
-    /// `"korganizer"`, `"outlook"`. Matches the `client` column
-    /// proposed for the new `email_calendar_candidates` field in
-    /// the answers schema (proposal §"Architecture sketch").
+    /// this detection. Values in use: `"evolution"` (the on-disk
+    /// `.ics` files under `~/.local/share/evolution/calendar/...`)
+    /// and `"gnome_calendar"` (the alias detector for users who
+    /// install only the GNOME Calendar GUI; same on-disk files,
+    /// distinct user-facing label). Future per-client detectors
+    /// (`"thunderbird"`, `"korganizer"`, `"outlook"`) will land in
+    /// ECD-3+. Matches the `client` column proposed for the new
+    /// `email_calendar_candidates` field in the answers schema
+    /// (proposal §"Architecture sketch").
     pub client: String,
     /// Human-readable profile identifier for the source. For
     /// Evolution this is the `<source>` directory name
@@ -585,6 +631,186 @@ pub fn scan_evolution_calendars(home: &Path, platform: &Platform) -> Vec<Detecte
     out
 }
 
+/// GNOME Calendar (alias) detector. Walks the SAME on-disk roots as
+/// [`scan_evolution_calendars`] and emits one `DetectedCalendar`
+/// per `.ics` file with `client = "gnome_calendar"`. The detector is
+/// gated by two heuristics (both thread-local mockable for tests):
+///
+/// 1. **GNOME Calendar installed?** (`is_gnome_calendar_installed_for`)
+///    — required gate. We only label a calendar as `gnome_calendar`
+///    if the `gnome-calendar` binary is on the user's PATH (Linux
+///    only; on non-Linux the GUI alias is meaningless — Evolution is
+///    not installed there and macOS uses EventKit, not evolution-
+///    data-server).
+/// 2. **Evolution NOT installed?** (`is_evolution_installed_for`) —
+///    when Evolution is installed, [`scan_evolution_calendars`]
+///    already emits the same paths with `client = "evolution"`. Emitting
+///    again here would create duplicate user-visible rows (the Ask
+///    step would render each `.ics` twice, once with each label).
+///
+/// The two heuristics are independent — the four quadrants map onto:
+/// | Evolution | GNOME Calendar | ECD-2 output                         |
+/// |-----------|----------------|--------------------------------------|
+/// | installed | installed      | empty (ECD-1 emits `evolution`)      |
+/// | installed | not installed  | empty (gnome-calendar heuristic)     |
+/// | not       | installed      | emit with `client = "gnome_calendar"`|
+/// | not       | not installed  | empty (gnome-calendar heuristic)     |
+///
+/// The ics_path dedup (a defensive `HashSet` over ECD-1's output) is
+/// the spec-named control: even if a future heuristic mis-classifies,
+/// the dedup catches the path collision. In the four-quadrant matrix
+/// above the heuristic + dedup always agree.
+///
+/// `home` is the user's home dir (the caller resolves `$HOME` or
+/// passes a test fixture); `platform` is the runtime-detected
+/// [`Platform`] so the function returns empty on non-Linux
+/// targets (matching ECD-1's pattern). The function is a pure
+/// read-walk — no Mutex held across `.await`, no `OnceLock`.
+pub fn scan_gnome_calendar_calendars(home: &Path, platform: &Platform) -> Vec<DetectedCalendar> {
+    // Non-Linux short-circuit — matches ECD-1's pattern. The
+    // platform check fires BEFORE the heuristic check so a non-Linux
+    // host never shells out to `which`.
+    if !matches!(platform, Platform::Linux) {
+        return Vec::new();
+    }
+    // GNOME Calendar must actually be installed — otherwise the
+    // `gnome_calendar` label is misleading (the user has no GUI to
+    // show their calendar). The mock slot is consulted first so
+    // tests don't shell out to `which`.
+    if !is_gnome_calendar_installed_for(platform) {
+        return Vec::new();
+    }
+    // Evolution takes the labels when it's installed — emit nothing.
+    // The user has Evolution → they see Evolution labels (from ECD-1).
+    // The user has only GNOME Calendar → we relabel the same .ics
+    // files as `gnome_calendar` so the wizard renders the right GUI.
+    if is_evolution_installed_for(platform) {
+        return Vec::new();
+    }
+    // Walk the same roots as ECD-1, emitting each `.ics` with the
+    // `gnome_calendar` client label. No dedup-vs-ECD-1 here: when
+    // only GNOME Calendar is installed, ECD-1's heuristic gate
+    // (which lives in ECD-1's detector — same `is_evolution_installed`
+    // check) also suppresses its emission, so the on-disk .ics
+    // files are surfaced ONCE under the `gnome_calendar` label.
+    let mut out = Vec::new();
+    let mut visited_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in [
+        home.join(".local")
+            .join("share")
+            .join("evolution")
+            .join("calendar"),
+        home.join(".config").join("evolution").join("calendar"),
+    ] {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue, // no Evolution store yet — empty result
+        };
+        for entry in entries.flatten() {
+            let source_dir = entry.path();
+            if !source_dir.is_dir() {
+                continue;
+            }
+            let source_name = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // Dedupe across the two roots — same shape as ECD-1's
+            // visited_sources walk; documented inline there.
+            if !visited_sources.insert(source_name.clone()) {
+                continue;
+            }
+            let email = load_source_email(home, &source_name);
+            let profile_label = format_source_profile(&source_name, email.as_deref());
+
+            let cal_entries = match std::fs::read_dir(&source_dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for cal in cal_entries.flatten() {
+                let ics_path = cal.path();
+                if !ics_path.is_file() {
+                    continue;
+                }
+                let ext = ics_path.extension().and_then(|s| s.to_str());
+                if ext != Some("ics") {
+                    continue;
+                }
+                if is_empty_calendar_stub(&ics_path) {
+                    continue;
+                }
+                // No path-dedup here: the `is_evolution_installed_for`
+                // gate above already excludes the "both installed"
+                // case (where ECD-1 emits under `evolution`). When
+                // only GNOME Calendar is installed, this loop is the
+                // sole emitter — same .ics files, `gnome_calendar`
+                // label.
+                let display_name = parse_x_evolution_calendar_name(&ics_path);
+                out.push(DetectedCalendar {
+                    client: "gnome_calendar".to_string(),
+                    profile: Some(profile_label.clone()),
+                    display_name,
+                    ics_path,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Test seam + production probe for "is the `gnome-calendar` binary
+/// on this user's PATH?". In tests the [`GNOME_CALENDAR_PRESENT`]
+/// slot is `Some(value)` and we return `value` verbatim — the
+/// production probe is skipped. In production the slot is `None`
+/// and we shell out to `which gnome-calendar` via
+/// `std::process::Command` (no new dep). Non-Linux platforms always
+/// return `false`: the GUI alias is meaningless on macOS (which uses
+/// EventKit) and Windows (which has no evolution-data-server).
+fn is_gnome_calendar_installed_for(platform: &Platform) -> bool {
+    if !matches!(platform, Platform::Linux) {
+        return false;
+    }
+    if let Some(mocked) = GNOME_CALENDAR_PRESENT
+        .lock()
+        .expect("GNOME_CALENDAR_PRESENT mutex poisoned")
+        .as_ref()
+    {
+        return *mocked;
+    }
+    probe_binary_on_path("gnome-calendar")
+}
+
+/// Test seam + production probe for "is the `evolution` binary on
+/// this user's PATH?". Same shape as
+/// [`is_gnome_calendar_installed_for`]; see that function's docs.
+fn is_evolution_installed_for(platform: &Platform) -> bool {
+    if !matches!(platform, Platform::Linux) {
+        return false;
+    }
+    if let Some(mocked) = EVOLUTION_PRESENT
+        .lock()
+        .expect("EVOLUTION_PRESENT mutex poisoned")
+        .as_ref()
+    {
+        return *mocked;
+    }
+    probe_binary_on_path("evolution")
+}
+
+/// Run `which <binary>` (POSIX) via `std::process::Command`. Returns
+/// `true` iff the binary is on PATH. We don't care about the path
+/// `which` prints — just the exit code. We use `Command::new("which")`
+/// rather than the `which` crate to honor the no-new-dep rule (the
+/// existing codebase does the same for `gh auth status` at
+/// `probe_gh_auth`).
+fn probe_binary_on_path(binary: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(binary)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// Read `<home>/.config/evolution/sources/<source_name>.source`
 /// and try to pull an email out of it. Evolution's `.source`
 /// files are JSON-ish (key-value lines, not strict JSON); the
@@ -843,16 +1069,40 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                     // actual `Vec<DetectedCalendar>` is
                     // surfaced by `scan_evolution_calendars`
                     // directly (the LLM step consumes that).
+                    //
+                    // ECD-2 — also probe the GNOME Calendar
+                    // alias detector. When the user has GNOME
+                    // Calendar installed (and Evolution is NOT),
+                    // the GNOME Calendar detector emits with a
+                    // distinct `client = "gnome_calendar"` label.
+                    // When both are installed, ECD-2 emits
+                    // nothing (the heuristic + ics_path dedup
+                    // keep ECD-1's `evolution` label as the
+                    // user-facing row). The combined vector is
+                    // what the LLM step consumes.
                     let detected = scan_evolution_calendars(home, platform);
+                    let detected_gnome = scan_gnome_calendar_calendars(home, platform);
                     let count = detected.len();
-                    let notes = if count > 0 {
-                        Some(format!(
+                    let gnome_count = detected_gnome.len();
+                    let notes = match (count > 0, gnome_count > 0) {
+                        (true, true) => Some(format!(
+                            "evolution calendar store present; \
+                             auto-discovered {count} {} + \
+                             {gnome_count} GNOME Calendar {}",
+                            if count == 1 { "calendar" } else { "calendars" },
+                            if gnome_count == 1 { "alias" } else { "aliases" },
+                        )),
+                        (true, false) => Some(format!(
                             "evolution calendar store present; \
                              auto-discovered {count} {}",
                             if count == 1 { "calendar" } else { "calendars" }
-                        ))
-                    } else {
-                        None
+                        )),
+                        (false, true) => Some(format!(
+                            "GNOME Calendar detected; \
+                             auto-discovered {gnome_count} {}",
+                            if gnome_count == 1 { "calendar" } else { "calendars" },
+                        )),
+                        (false, false) => None,
                     };
                     return finalize(
                         "calendar",
@@ -1962,5 +2212,261 @@ mod tests {
             notes.contains("auto-discovered 2 calendars"),
             "notes must report the discovered count; got: {notes}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ECD-2 — GNOME Calendar alias detector
+    //
+    // GNOME Calendar piggybacks on evolution-data-server, so the on-disk
+    // `.ics` files are identical to ECD-1's walk. We treat GNOME Calendar
+    // as a SEPARATE `client` label so the Ask step renders "GNOME Calendar"
+    // for users who install only that GUI (no Evolution MUA).
+    //
+    // The detector has two heuristics, both thread-local mockable for
+    // tests:
+    //   - `is_gnome_calendar_installed_for(platform)` — required gate.
+    //   - `is_evolution_installed_for(platform)` — gate that suppresses
+    //     emission when Evolution is installed (ECD-1 emits the entries
+    //     with `client = "evolution"` in that case; emitting here would
+    //     duplicate the user-visible row).
+    //
+    // The ics_path dedup in the implementation (build a HashSet from
+    // ECD-1's output) is a defensive layer; the heuristic gates are the
+    // authoritative control.
+    // -----------------------------------------------------------------------
+
+    /// Run `body` with both heuristic mocks set to `gc_installed` and
+    /// `evolution_installed`. The guard restores the previous values on
+    /// drop (panic-safe), so subsequent tests start from the
+    /// "no mock" default.
+    fn with_heuristics<F>(gc_installed: bool, evolution_installed: bool, body: F)
+    where
+        F: FnOnce(),
+    {
+        let prev_gc = GNOME_CALENDAR_PRESENT.lock().expect("heuristic mutex").replace(gc_installed);
+        let prev_ev = EVOLUTION_PRESENT.lock().expect("heuristic mutex").replace(evolution_installed);
+        let _restore = HeuristicsGuard { prev_gc, prev_ev };
+        body();
+    }
+
+    /// RAII guard that restores both heuristic mocks on drop.
+    struct HeuristicsGuard {
+        prev_gc: Option<bool>,
+        prev_ev: Option<bool>,
+    }
+
+    impl Drop for HeuristicsGuard {
+        fn drop(&mut self) {
+            let mut gc = GNOME_CALENDAR_PRESENT.lock().expect("heuristic mutex");
+            *gc = self.prev_gc;
+            let mut ev = EVOLUTION_PRESENT.lock().expect("heuristic mutex");
+            *ev = self.prev_ev;
+        }
+    }
+
+    /// Value-asserting dedup test (write FIRST per ECD-1 lesson f).
+    /// When BOTH Evolution and GNOME Calendar are installed, ECD-2 must
+    /// NOT emit — ECD-1 already covers the paths with
+    /// `client = "evolution"`. Asserting `len() == 0` is not enough;
+    /// we also assert the SET of ics_paths is empty, so a regression
+    /// that emits with the wrong label (e.g. `"evolution"` instead of
+    /// `"gnome_calendar"`) would still be caught.
+    #[test]
+    fn scan_gnome_calendar_alias_dedups_when_both_installed() {
+        let home = TempHome::new();
+        // Three ECD-1 calendars in a single source — the same fixture
+        // shape as ECD-1's `finds_ics_per_source` so the orchestrator
+        // and ECD-2 see the same paths.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/a.ics",
+            &evolution_ics("A"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/b.ics",
+            &evolution_ics("B"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/c.ics",
+            &evolution_ics("C"),
+        );
+        with_heuristics(/* gc_installed */ true, /* evolution_installed */ true, || {
+            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+            // Length assertion: ECD-2 must emit 0 entries (all
+            // already covered by ECD-1).
+            assert!(
+                gnome.is_empty(),
+                "when both Evolution and GNOME Calendar are installed, ECD-2 must emit 0 entries; got {gnome:?}"
+            );
+            // Value assertion: the SET of ics_paths must also be
+            // empty. A regression that emits entries with the
+            // wrong client label (e.g. still tagged "evolution")
+            // would be caught here because the set would be
+            // non-empty even if the count happened to be 0 in
+            // some other test setup.
+            let paths: std::collections::HashSet<PathBuf> =
+                gnome.iter().map(|c| c.ics_path.clone()).collect();
+            assert!(
+                paths.is_empty(),
+                "ics_path set must be empty when dedup fires; got {paths:?}"
+            );
+            // Belt-and-braces: the dedup must also keep ECD-2's
+            // entries out of the orchestrator's combined output.
+            // (Simulate the orchestrator's flatten step.)
+            let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
+            let combined: Vec<_> = evolution.iter().chain(gnome.iter()).collect();
+            let unique_paths: std::collections::HashSet<&PathBuf> =
+                combined.iter().map(|c| &c.ics_path).collect();
+            assert_eq!(
+                unique_paths.len(),
+                3,
+                "combined output must have exactly 3 unique ics_paths (ECD-1's 3, ECD-2 added 0)"
+            );
+            for c in &combined {
+                assert_eq!(
+                    c.client, "evolution",
+                    "all combined entries must carry the evolution label when Evolution is installed; got client={:?}",
+                    c.client
+                );
+            }
+        });
+    }
+
+    /// Smoke test (write SECOND per ECD-1 lesson f). Locks in the
+    /// test seam for non-Linux platforms — ECD-2 must short-circuit
+    /// before any heuristic check runs (so the heuristic mocks can
+    /// be set to `true` and the function still returns empty).
+    #[test]
+    fn scan_gnome_calendar_alias_empty_on_non_linux() {
+        let home = TempHome::new();
+        // Stage the fixture so a Linux run would find at least one
+        // calendar — that way the "empty on non-Linux" assertion
+        // can't be masked by a missing fixture.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234/cal.ics",
+            &evolution_ics("Cal"),
+        );
+        for platform in [
+            Platform::Macos,
+            Platform::Other("windows".to_string()),
+            Platform::Other("freebsd".to_string()),
+        ] {
+            // Heuristics set to true to confirm the platform gate
+            // fires BEFORE the heuristic check — otherwise the
+            // test would only prove "false heuristic → empty".
+            with_heuristics(true, true, || {
+                let gnome = scan_gnome_calendar_calendars(home.path(), &platform);
+                assert!(
+                    gnome.is_empty(),
+                    "non-Linux platform {platform:?} must return empty regardless of heuristics; got {gnome:?}"
+                );
+            });
+        }
+    }
+
+    /// When Evolution is NOT installed but GNOME Calendar IS, ECD-2
+    /// walks the same roots as ECD-1 and emits each `.ics` with
+    /// `client = "gnome_calendar"` so the Ask step renders
+    /// "GNOME Calendar" labels for these users.
+    #[test]
+    fn scan_gnome_calendar_alias_emits_only_when_gnome_calendar_installed() {
+        let home = TempHome::new();
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/work.ics",
+            &evolution_ics("Work"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/personal.ics",
+            &evolution_ics("Personal"),
+        );
+        with_heuristics(/* gc_installed */ true, /* evolution_installed */ false, || {
+            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+            assert_eq!(
+                gnome.len(),
+                2,
+                "expected 2 entries (one per .ics file); got {gnome:?}"
+            );
+            for cal in &gnome {
+                // The whole point of ECD-2: every entry carries the
+                // `gnome_calendar` label, not `evolution`.
+                assert_eq!(
+                    cal.client, "gnome_calendar",
+                    "all entries must carry the gnome_calendar client label; got {:?}",
+                    cal.client
+                );
+                assert!(cal.ics_path.extension().and_then(|s| s.to_str()) == Some("ics"));
+                assert!(cal.profile.is_some());
+            }
+            // ics_paths must match the fixture.
+            let paths: std::collections::HashSet<PathBuf> =
+                gnome.iter().map(|c| c.ics_path.clone()).collect();
+            assert!(paths.iter().any(|p| p.ends_with("work.ics")));
+            assert!(paths.iter().any(|p| p.ends_with("personal.ics")));
+            // Display names survive the relabel.
+            assert!(gnome.iter().any(|c| c.display_name.as_deref() == Some("Work")));
+            assert!(gnome.iter().any(|c| c.display_name.as_deref() == Some("Personal")));
+        });
+    }
+
+    /// When NEITHER Evolution nor GNOME Calendar is installed, ECD-2
+    /// returns empty — the heuristic gates both suppress emission.
+    #[test]
+    fn scan_gnome_calendar_alias_empty_when_neither_installed() {
+        let home = TempHome::new();
+        // Stage a real fixture — the "empty" outcome must come from
+        // the heuristic gate, not from a missing fixture.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/work.ics",
+            &evolution_ics("Work"),
+        );
+        with_heuristics(/* gc_installed */ false, /* evolution_installed */ false, || {
+            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+            assert!(
+                gnome.is_empty(),
+                "neither Evolution nor GNOME Calendar installed must yield empty; got {gnome:?}"
+            );
+        });
+    }
+
+    /// When only Evolution is installed (no GNOME Calendar), ECD-2
+    /// returns empty — the heuristic gate suppresses emission because
+    /// ECD-1 will already label the entries with `client = "evolution"`.
+    /// This is the "evolution-only" counterpart of
+    /// `emits_only_when_gnome_calendar_installed` and proves the
+    /// client-label distinction is real (not "every .ics file ends up
+    /// with whatever label was last assigned").
+    #[test]
+    fn scan_gnome_calendar_alias_emits_with_separate_client_label() {
+        let home = TempHome::new();
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/work.ics",
+            &evolution_ics("Work"),
+        );
+        // Only Evolution installed, no GNOME Calendar — the heuristic
+        // gates suppress ECD-2 entirely. ECD-1 still emits with the
+        // `evolution` label (proving the orchestrator's combined
+        // output is correctly partitioned: ECD-1 rows say
+        // "evolution", ECD-2 rows are absent).
+        with_heuristics(/* gc_installed */ false, /* evolution_installed */ true, || {
+            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+            assert!(
+                gnome.is_empty(),
+                "only Evolution installed (no GNOME Calendar) must yield empty ECD-2 output; got {gnome:?}"
+            );
+            // ECD-1 still emits with the evolution label — proving
+            // the "separate client label" contract: when ECD-2 DOES
+            // emit (in the only-gnome-calendar case), it uses a
+            // distinct label from ECD-1.
+            let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
+            assert_eq!(evolution.len(), 1, "ECD-1 must still emit 1 entry");
+            assert_eq!(evolution[0].client, "evolution");
+        });
     }
 }
