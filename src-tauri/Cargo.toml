@@ -95,6 +95,18 @@ cpal = { workspace = true }
 # macOS-gated by mistake; the Linux/Win32 backends are real and
 # exercised on their respective platforms.
 global-hotkey = { workspace = true }
+# 2026-08-16 (ECD-3) — rusqlite for the Thunderbird calendar
+# detector. Same crate + same `bundled` feature as the
+# trail-collector browser-history module; we need a read-only
+# sqlite open to sanity-check each `cache.sqlite` under
+# `~/.thunderbird/<profile>/calendar-data/cache/<cal_id>/` so
+# we don't report half-written caches as detections. The
+# workspace pin already declares the right feature set; we
+# re-declare it here for explicitness (per the same
+# `default-features` rationale as `reqwest` above — Cargo
+# otherwise warns that the per-crate `default-features` is
+# "ignored").
+rusqlite = { workspace = true }
 
 # Phase 5 §5.7 — macOS mic permission detection. `objc2` is the
 # modern safe wrapper around the Objective-C runtime (replacing
