@@ -17,6 +17,21 @@
 //! consumes this report to render checkboxes for the user to opt
 //! into per-collector.
 //!
+//! ## Per-mail-client calendar detectors
+//!
+//! In addition to the per-source `CollectorCandidate` rows above,
+//! `scan_evolution_calendars` walks the user's Evolution calendar
+//! store and returns a `Vec<DetectedCalendar>` — one entry per
+//! discovered `.ics` file. The orchestrator surfaces the count
+//! inside the `calendar` candidate's `notes` (e.g. "auto-discovered
+//! 3 calendars") so the wizard UI can show a richer hint; the typed
+//! `Vec<DetectedCalendar>` itself is consumed by the LLM step
+//! (`llm.rs`, Phase B) and rendered as a multi-select picker. The
+//! pattern mirrors the per-detector shape used by
+//! `scan_chrome_history` / `scan_firefox_history`: pure function of
+//! `(home, platform)`, platform-aware so non-Linux targets return
+//! empty.
+//!
 //! ## Status semantics
 //!
 //! - [`CollectorStatus::Available`] — we found evidence that the
@@ -66,6 +81,50 @@ pub struct CollectorCandidate {
     pub evidence: EvidenceKind,
     pub confidence: f32,
     pub notes: Option<String>,
+}
+
+/// One calendar discovered by a per-mail-client detector. Returned
+/// by [`scan_evolution_calendars`] (and, in a follow-up, by the
+/// Thunderbird/KOrganizer/Outlook detectors proposed in
+/// `2026-08-14_email-calendar-discovery-proposal.md`). The
+/// orchestrator layer above consumes these and the LLM step (Phase
+/// B, `llm.rs`) surfaces them as a multi-select picker in
+/// `StepAsk.svelte`.
+///
+/// The struct deliberately does NOT depend on [`CollectorCandidate`]:
+/// the per-detector scan is a typed value, not a `CollectorCandidate`
+/// row — the wiring that turns a `Vec<DetectedCalendar>` into
+/// `ScanReport`-shaped metadata is left to the higher-level
+/// orchestrator (and lives in the future ECD-2/ECD-3 PRs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectedCalendar {
+    /// Stable identifier of the mail/calendar client that produced
+    /// this detection. Today: `"evolution"`. ECD-2 will add
+    /// `"gnome_calendar"` as an alias pointing at the same on-disk
+    /// `.ics` files; ECD-3+ will add `"thunderbird"`,
+    /// `"korganizer"`, `"outlook"`. Matches the `client` column
+    /// proposed for the new `email_calendar_candidates` field in
+    /// the answers schema (proposal §"Architecture sketch").
+    pub client: String,
+    /// Human-readable profile identifier for the source. For
+    /// Evolution this is the `<source>` directory name
+    /// (e.g. `"On This Computer"`, `"Google"`, `"CalDAV — \
+    /// work@example.com"`) optionally combined with the per-source
+    /// email when the `~/.config/evolution/sources/*.source` JSON
+    /// can be parsed. `None` when the source has no `.source` file
+    /// or the JSON is malformed (the detector still returns the
+    /// calendar — the profile label is just less rich).
+    pub profile: Option<String>,
+    /// Per-calendar display name extracted from the `.ics`'s
+    /// `X-EVOLUTION-CALENDAR` property. `None` when the property
+    /// is absent (a fresh, never-touched Evolution install writes
+    /// `.ics` files without the property until the user opens the
+    /// calendar in the GUI).
+    pub display_name: Option<String>,
+    /// Absolute path to the `.ics` file. This is the path the
+    /// collector (`crates/trail-collector/src/collectors/calendar/ical.rs`)
+    /// later reads; the scanner never reads it during onboarding.
+    pub ics_path: PathBuf,
 }
 
 /// Coarse tri-state. See module-level docs for semantics.
@@ -414,6 +473,226 @@ fn scan_github(home: &Path, _platform: &Platform) -> CollectorCandidate {
     finalize("github", "GitHub activity", status, evidence, notes)
 }
 
+/// Evolution (GNOME) calendar detector. Walks
+/// `~/.local/share/evolution/calendar/<source>/*.ics` AND
+/// `~/.config/evolution/calendar/<source>/*.ics` (Evolution's
+/// XDG-compliant data layout keeps the calendar blobs under
+/// `XDG_DATA_HOME` and the source metadata under `XDG_CONFIG_HOME`).
+/// Each `.ics` file becomes one [`DetectedCalendar`].
+///
+/// Per proposal §"Per-detector implementation notes → Evolution":
+/// - `<source>` is the directory name; the system account
+///   (`local@*/`) is recognised but its calendars are only
+///   emitted when the source directory holds at least one
+///   non-empty `.ics` (Evolution ships a `local@local-…` stub on
+///   a fresh install that points at an empty `system-calendar.ics`;
+///   we skip stubs and only emit real ones).
+/// - `X-EVOLUTION-CALENDAR` is the per-calendar display name
+///   property Evolution writes when a calendar is opened in the
+///   GUI. We parse it with a tiny inline line-fold parser (iCal
+///   line folding is "any line beginning with whitespace is a
+///   continuation of the previous line" — RFC 5545 §3.1).
+/// - When `~/.config/evolution/sources/<source-uid>.source` is a
+///   valid JSON file with a `parent[1].text` field, we append
+///   that email to the profile label (e.g.
+///   `"CalDAV — work@example.com"`). Malformed `.source` files
+///   are ignored — we still return the calendar, the profile
+///   just lacks the email.
+///
+/// `home` is the user's home dir (the caller resolves `$HOME` or
+/// passes a test fixture); `platform` is the runtime-detected
+/// [`Platform`] so the function returns empty on non-Linux
+/// targets (the test seam matches the per-detector pattern used
+/// by `scan_chrome_history`/`scan_firefox_history`). The function
+/// is a pure read-walk — no Mutex, no OnceLock.
+pub fn scan_evolution_calendars(home: &Path, platform: &Platform) -> Vec<DetectedCalendar> {
+    // Non-Linux short-circuit: matches the per-detector pattern
+    // used by `scan_chrome_history` and `scan_firefox_history`.
+    // We deliberately don't `#[cfg(target_os = "linux")]`-gate
+    // the function — keeping it compileable on macOS lets the
+    // test suite assert the platform skip on a Linux build host.
+    if !matches!(platform, Platform::Linux) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut visited_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in [
+        home.join(".local")
+            .join("share")
+            .join("evolution")
+            .join("calendar"),
+        home.join(".config").join("evolution").join("calendar"),
+    ] {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue, // no Evolution store yet — empty result
+        };
+        for entry in entries.flatten() {
+            let source_dir = entry.path();
+            if !source_dir.is_dir() {
+                continue;
+            }
+            let source_name = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // Dedupe: the two roots (`.local/share/...` and
+            // `.config/...`) can both point at the same source
+            // when Evolution is configured with XDG dirs set to
+            // overlap (rare but legal). Walk each source once.
+            if !visited_sources.insert(source_name.clone()) {
+                continue;
+            }
+            // Load the per-source email metadata once per source.
+            // `load_source_email` returns `None` for missing or
+            // malformed `.source` files — we don't fail the scan.
+            let email = load_source_email(home, &source_name);
+            let profile_label = format_source_profile(&source_name, email.as_deref());
+
+            let cal_entries = match std::fs::read_dir(&source_dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for cal in cal_entries.flatten() {
+                let ics_path = cal.path();
+                if !ics_path.is_file() {
+                    continue;
+                }
+                let ext = ics_path.extension().and_then(|s| s.to_str());
+                if ext != Some("ics") {
+                    continue;
+                }
+                // Skip the empty-stub system account. Evolution
+                // ships a `local@local-…` stub on fresh installs
+                // whose `system-calendar.ics` is zero bytes; we
+                // only emit the calendar when the file is
+                // non-empty AND carries at least one
+                // BEGIN:VCALENDAR marker (so we don't emit a
+                // half-written scratch file).
+                if is_empty_calendar_stub(&ics_path) {
+                    continue;
+                }
+                let display_name = parse_x_evolution_calendar_name(&ics_path);
+                out.push(DetectedCalendar {
+                    client: "evolution".to_string(),
+                    profile: Some(profile_label.clone()),
+                    display_name,
+                    ics_path,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Read `<home>/.config/evolution/sources/<source_name>.source`
+/// and try to pull an email out of it. Evolution's `.source`
+/// files are JSON-ish (key-value lines, not strict JSON); the
+/// only field we care about is `parent[1].text` which carries
+/// the user's email for CalDAV/IMAP sources. Returns `None` on
+/// any parse failure — the scanner is best-effort.
+fn load_source_email(home: &Path, source_name: &str) -> Option<String> {
+    let path = home
+        .join(".config")
+        .join("evolution")
+        .join("sources")
+        .join(format!("{source_name}.source"));
+    let raw = std::fs::read_to_string(&path).ok()?;
+    for line in raw.lines() {
+        // The format Evolution actually uses looks like:
+        // `[parent[1].text]` / `... value: ...` then the value
+        // on subsequent lines. We grep for the marker line and
+        // return the trimmed next non-empty line.
+        if line.trim_start().starts_with("[parent[1].text]") {
+            // The actual value sits on the following line(s).
+            // Walk forward to the first non-empty line.
+            for next in raw.lines().skip_while(|l| l.trim().is_empty()) {
+                let trimmed = next.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('[') {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compose the `profile` label shown to the user. The base label
+/// is the source directory name (e.g. `"local@local-…"`,
+/// `"Google"`, `"CalDAV — work"`); when an email is available
+/// we append it in parens so the user can disambiguate
+/// multiple CalDAV sources.
+fn format_source_profile(source_name: &str, email: Option<&str>) -> String {
+    match email {
+        Some(addr) if !addr.is_empty() => format!("{source_name} ({addr})"),
+        _ => source_name.to_string(),
+    }
+}
+
+/// A "stub" Evolution system calendar: the file exists, is a
+/// regular file, but is zero bytes (or carries only an empty
+/// `BEGIN:VCALENDAR` / `END:VCALENDAR` envelope with no events).
+/// Evolution creates the stub on first launch so the system
+/// source has *something* to point at; we don't want to surface
+/// it as a user-meaningful calendar.
+fn is_empty_calendar_stub(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true;
+    };
+    if meta.len() == 0 {
+        return true;
+    }
+    // Cheap heuristic: a stub has BEGIN:VCALENDAR but no
+    // BEGIN:VEVENT. We do a single read (the file is small;
+    // Evolution calendar files are <1 MB even with years of
+    // events) and look for the marker.
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    raw.contains("BEGIN:VCALENDAR") && !raw.contains("BEGIN:VEVENT")
+}
+
+/// Extract the `X-EVOLUTION-CALENDAR` property value from the
+/// `.ics` file. Returns `None` when the property is absent or
+/// the file can't be read. We only need the first occurrence —
+/// the property is meant to appear once per calendar.
+fn parse_x_evolution_calendar_name(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut current = String::new();
+    let mut first_line = true;
+    for line in raw.lines() {
+        // RFC 5545 §3.1: a line starting with a space or tab
+        // is a continuation of the previous logical line. We
+        // un-fold by accumulating into `current`.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            current.push_str(line.trim_start());
+            continue;
+        }
+        // Non-continuation line: the previous logical line (in
+        // `current`) just ended. If it was `X-EVOLUTION-CALENDAR`,
+        // return its value. Skip the check on the very first
+        // iteration when `current` is empty.
+        if !first_line {
+            if let Some(rest) = current.strip_prefix("X-EVOLUTION-CALENDAR") {
+                if let Some(v) = rest.strip_prefix(':') {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+        current = line.to_string();
+        first_line = false;
+    }
+    // Flush the trailing logical line (no terminator newline).
+    if !first_line {
+        if let Some(rest) = current.strip_prefix("X-EVOLUTION-CALENDAR") {
+            if let Some(v) = rest.strip_prefix(':') {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Calendar: macOS Calendar.app + the `~/Library/Calendars/*.ics`
 /// saved-state files. Linux fallback: `~/.config/evolution/` or
 /// `~/.local/share/evolution/` (GNOME Evolution). On other OSes we
@@ -491,7 +770,9 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 "calendar",
                                 "Calendar events",
                                 CollectorStatus::Unavailable,
-                                EvidenceKind::FileExists { path: PathBuf::new() },
+                                EvidenceKind::FileExists {
+                                    path: PathBuf::new(),
+                                },
                                 Some(
                                     "EventKit access denied. Open System \
                                      Settings → Privacy & Security → \
@@ -553,12 +834,32 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
             ];
             for dir in &candidates {
                 if let Some(ev) = probe_dir(dir) {
+                    // Probe the per-source `.ics` files (the
+                    // detector introduced for ECD-1 — the
+                    // evolution-calendar auto-discover). The
+                    // count goes into `notes` so the wizard
+                    // shows "evolution: N calendars" without
+                    // having to invoke a second command. The
+                    // actual `Vec<DetectedCalendar>` is
+                    // surfaced by `scan_evolution_calendars`
+                    // directly (the LLM step consumes that).
+                    let detected = scan_evolution_calendars(home, platform);
+                    let count = detected.len();
+                    let notes = if count > 0 {
+                        Some(format!(
+                            "evolution calendar store present; \
+                             auto-discovered {count} {}",
+                            if count == 1 { "calendar" } else { "calendars" }
+                        ))
+                    } else {
+                        None
+                    };
                     return finalize(
                         "calendar",
                         "Calendar events",
                         CollectorStatus::Available,
                         ev,
-                        None,
+                        notes,
                     );
                 }
             }
@@ -958,7 +1259,13 @@ fn scan_opera_history(home: &Path, platform: &Platform) -> CollectorCandidate {
         );
     }
     if let Some(ev) = probe_file(&path) {
-        return finalize("opera_history", "Opera history", CollectorStatus::Available, ev, None);
+        return finalize(
+            "opera_history",
+            "Opera history",
+            CollectorStatus::Available,
+            ev,
+            None,
+        );
     }
     finalize(
         "opera_history",
@@ -998,7 +1305,13 @@ fn scan_safari_history(home: &Path, platform: &Platform) -> CollectorCandidate {
         );
     }
     if let Some(ev) = probe_file(&path) {
-        return finalize("safari_history", "Safari history", CollectorStatus::Available, ev, None);
+        return finalize(
+            "safari_history",
+            "Safari history",
+            CollectorStatus::Available,
+            ev,
+            None,
+        );
     }
     finalize(
         "safari_history",
@@ -1287,7 +1600,9 @@ mod tests {
             Platform::Macos => home
                 .path()
                 .join("Library/Application Support/Firefox/Profiles/abcd1234.default-release"),
-            Platform::Linux => home.path().join(".mozilla/firefox/abcd1234.default-release"),
+            Platform::Linux => home
+                .path()
+                .join(".mozilla/firefox/abcd1234.default-release"),
             Platform::Other(_) => return, // skip on Other platforms
         };
         std::fs::create_dir_all(&profile_dir).unwrap();
@@ -1425,6 +1740,227 @@ mod tests {
             v.status,
             CollectorStatus::Unavailable,
             "empty extensions dir must not be reported as available"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ECD-1 — Evolution calendar auto-discover detector
+    // -----------------------------------------------------------------------
+
+    /// Helper to write a non-stub `.ics` file (one with
+    /// BEGIN:VEVENT, so the stub-skip heuristic doesn't reject it).
+    /// `body` carries the full file contents.
+    fn write_ics(home: &TempHome, rel: &str, body: &str) -> PathBuf {
+        let p = home.path().join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    /// Minimal iCalendar body carrying an `X-EVOLUTION-CALENDAR`
+    /// property and one VEVENT so the detector accepts it as
+    /// non-empty.
+    fn evolution_ics(display_name: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\r\n\
+             VERSION:2.0\r\n\
+             PRODID:-//GNOME//Evolution {display_name}//EN\r\n\
+             X-EVOLUTION-CALENDAR:{display_name}\r\n\
+             BEGIN:VEVENT\r\n\
+             UID:stub@example.com\r\n\
+             SUMMARY:hello\r\n\
+             END:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+        )
+    }
+
+    /// `scan_evolution_calendars` on a fixture dir returns one
+    /// `DetectedCalendar` per non-stub `.ics` file, with the source
+    /// dir name carried in `profile` and the `X-EVOLUTION-CALENDAR`
+    /// value carried in `display_name`.
+    #[test]
+    fn scan_evolution_calendars_finds_ics_per_source() {
+        let home = TempHome::new();
+        // Two sources, three calendars total: source `1234567890`
+        // has 2 calendars (one with a display name, one without);
+        // source `google-9876` has 1 calendar with a display name.
+        // The system stub (`local@local-0`) is written but must
+        // be skipped.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/work-calendar.ics",
+            &evolution_ics("Work Calendar"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234567890/personal.ics",
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:p@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/google-9876/birthdays.ics",
+            &evolution_ics("Birthdays"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/local@local-0/system-calendar.ics",
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n",
+        );
+
+        let detected = scan_evolution_calendars(home.path(), &Platform::Linux);
+        // Expect 3 calendars: 2 from `1234567890`, 1 from
+        // `google-9876`. The `local@local-0/system-calendar.ics`
+        // stub has BEGIN:VCALENDAR but no BEGIN:VEVENT → skipped.
+        assert_eq!(
+            detected.len(),
+            3,
+            "expected 3 detected calendars, got {detected:?}"
+        );
+        for cal in &detected {
+            assert_eq!(cal.client, "evolution");
+            assert!(cal.ics_path.extension().and_then(|s| s.to_str()) == Some("ics"));
+            assert!(cal.profile.is_some());
+        }
+        // Verify the display names came back where expected.
+        let work_cal = detected
+            .iter()
+            .find(|c| c.display_name.as_deref() == Some("Work Calendar"))
+            .expect("Work Calendar must be present");
+        assert!(work_cal.ics_path.ends_with("work-calendar.ics"));
+        let birthdays = detected
+            .iter()
+            .find(|c| c.display_name.as_deref() == Some("Birthdays"))
+            .expect("Birthdays must be present");
+        assert!(birthdays.ics_path.ends_with("google-9876/birthdays.ics"));
+        // The unnamed calendar (no X-EVOLUTION-CALENDAR property)
+        // comes back with `display_name: None`.
+        let unnamed = detected
+            .iter()
+            .find(|c| c.display_name.is_none())
+            .expect("unnamed calendar must be present");
+        assert!(unnamed.ics_path.ends_with("personal.ics"));
+    }
+
+    /// The per-source email extracted from
+    /// `~/.config/evolution/sources/*.source` (the `parent[1].text`
+    /// field) is appended to the profile label.
+    #[test]
+    fn scan_evolution_calendars_picks_up_source_email() {
+        let home = TempHome::new();
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/9876543210/work.ics",
+            &evolution_ics("Work"),
+        );
+        // Write a `.source` file in Evolution's key=value line
+        // format (not strict JSON, but with the `[parent[1].text]`
+        // header the detector looks for).
+        std::fs::create_dir_all(home.path().join(".config/evolution/sources")).unwrap();
+        std::fs::write(
+            home.path()
+                .join(".config/evolution/sources/9876543210.source"),
+            "[Calendar]\n[parent[1].text]\nwork@example.com\n",
+        )
+        .unwrap();
+
+        let detected = scan_evolution_calendars(home.path(), &Platform::Linux);
+        assert_eq!(detected.len(), 1);
+        let cal = &detected[0];
+        let profile = cal.profile.as_deref().expect("profile must be populated");
+        assert!(
+            profile.contains("work@example.com"),
+            "profile must carry the source email; got: {profile}"
+        );
+        assert!(
+            profile.contains("9876543210"),
+            "profile must carry the source directory name; got: {profile}"
+        );
+    }
+
+    /// Non-Linux platforms return empty — the detector is
+    /// Evolution-specific and the test seam matches the existing
+    /// per-detector pattern.
+    #[test]
+    fn scan_evolution_calendars_empty_on_non_linux() {
+        let home = TempHome::new();
+        // Stage the fixture so a Linux run would find at least
+        // one calendar — that way the "empty on non-Linux"
+        // assertion can't be masked by a missing fixture.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/1234/cal.ics",
+            &evolution_ics("Cal"),
+        );
+        for platform in [
+            Platform::Macos,
+            Platform::Other("windows".to_string()),
+            Platform::Other("freebsd".to_string()),
+        ] {
+            let detected = scan_evolution_calendars(home.path(), &platform);
+            assert!(
+                detected.is_empty(),
+                "non-Linux platform {platform:?} must return empty; got {detected:?}"
+            );
+        }
+    }
+
+    /// The system account (`local@*/`) stub — the empty
+    /// `BEGIN:VCALENDAR` envelope Evolution writes on a fresh
+    /// install — must be skipped.
+    #[test]
+    fn scan_evolution_calendars_skips_system_account_stub() {
+        let home = TempHome::new();
+        // Stub: BEGIN:VCALENDAR but no VEVENT.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/local@local-0/system-calendar.ics",
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n",
+        );
+        // Real calendar in a non-system source — must be emitted.
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/abc/work.ics",
+            &evolution_ics("Work"),
+        );
+        let detected = scan_evolution_calendars(home.path(), &Platform::Linux);
+        assert_eq!(
+            detected.len(),
+            1,
+            "stub must be skipped, real calendar must be kept; got {detected:?}"
+        );
+        assert!(detected[0].ics_path.ends_with("work.ics"));
+    }
+
+    /// The orchestrator wires the detector's count into the
+    /// `calendar` candidate's `notes` so the wizard UI shows
+    /// "auto-discovered N calendars" without a second IPC call.
+    #[test]
+    fn scan_calendar_linux_notes_carry_evolution_count() {
+        let home = TempHome::new();
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/abc/work.ics",
+            &evolution_ics("Work"),
+        );
+        write_ics(
+            &home,
+            ".local/share/evolution/calendar/abc/personal.ics",
+            &evolution_ics("Personal"),
+        );
+        let platform = Platform::Linux;
+        let report = scan_laptop_with_config(
+            &platform,
+            home.path(),
+            &home.path().join(".trail/config.json"),
+        );
+        let c = find(&report, "calendar");
+        assert_eq!(c.status, CollectorStatus::Available);
+        let notes = c.notes.as_deref().unwrap_or("");
+        assert!(
+            notes.contains("auto-discovered 2 calendars"),
+            "notes must report the discovered count; got: {notes}"
         );
     }
 }
