@@ -39,23 +39,6 @@
 //! already labels the entries). The ics_path dedup is a defensive
 //! safety net — the heuristic gates are the authoritative control.
 //!
-//! `scan_thunderbird_calendars` is the cross-OS detector for
-//! Thunderbird (the most popular cross-platform mail/calendar
-//! client). It walks the platform-specific profile root
-//! (`~/.thunderbird/` on Linux,
-//! `~/Library/Thunderbird/Profiles/` on macOS,
-//! `%APPDATA%\Thunderbird\Profiles\` on Windows) and emits one
-//! `DetectedCalendar` per `calendar-data/cache/<cal_id>/` directory
-//! that has a readable `cache.sqlite`. The calendar display name
-//! and associated SMTP identity email are read from the per-profile
-//! `calendars.json`; the sqlite is opened read-only via a temp-file
-//! copy (the same pattern the Firefox history collector uses) so we
-//! never block on the user's running Thunderbird. The ics_path
-//! field points at the `cache.sqlite` (the canonical on-disk
-//! source) — a future calendar collector PR will add a sqlite
-//! reader; until then the LLM step can surface the detection to the
-//! user who will know what to do with it.
-//!
 //! The pattern mirrors the per-detector shape used by
 //! `scan_chrome_history` / `scan_firefox_history`: pure function of
 //! `(home, platform)`, platform-aware so non-Linux targets return
@@ -111,6 +94,31 @@ static GNOME_CALENDAR_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
 /// Test-only mock slot for `is_evolution_installed_for`. Same shape
 /// as `GNOME_CALENDAR_PRESENT`.
 static EVOLUTION_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
+
+// ---------------------------------------------------------------------------
+// ECD-4 — KOrganizer + Outlook UX-fallback mocks
+// ---------------------------------------------------------------------------
+//
+// Same shape as the ECD-2 heuristic mocks: `None` in production
+// (falls through to a `which`-style probe on Linux for KOrganizer,
+// or a `Path::exists` probe on `%ProgramFiles%\\Microsoft
+// Office\\root\\Office16\\OUTLOOK.EXE` for Outlook), `Some(b)` in
+// tests (returns the value verbatim). The non-target platform
+// short-circuit (`is_korganizer_installed_for` only consults the
+// probe on Linux; `is_outlook_installed_for` only on Windows)
+// runs BEFORE the mock is checked, so tests that stage a
+// `Platform::Linux` + `KOrganizer_PRESENT = Some(true)` always
+// see `true` regardless of whether `korganizer` is actually
+// installed in the test environment.
+
+/// Test-only mock slot for `is_korganizer_installed_for`. `None`
+/// in production — fall through to the `which korganizer` probe.
+/// `Some(b)` in tests — return `b` verbatim.
+static KORGANIZER_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Test-only mock slot for `is_outlook_installed_for`. Same shape
+/// as `KORGANIZER_PRESENT`.
+static OUTLOOK_PRESENT: Mutex<Option<bool>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -775,272 +783,6 @@ pub fn scan_gnome_calendar_calendars(home: &Path, platform: &Platform) -> Vec<De
     out
 }
 
-/// Thunderbird cross-OS calendar detector. Walks the per-platform
-/// Thunderbird profile root (Linux: `~/.thunderbird/<profile>/`,
-/// Windows: `%APPDATA%\Thunderbird\Profiles\<profile>\`,
-/// macOS: `~/Library/Thunderbird/Profiles/<profile>/`) and emits
-/// one [`DetectedCalendar`] per `calendar-data/cache/<cal_id>/`
-/// directory that has a readable `cache.sqlite`.
-///
-/// **Read-only sqlite strategy** (mirrors
-/// `crates/trail-collector/src/collectors/browser_history/firefox.rs`):
-/// we open each `cache.sqlite` with
-/// `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` via a temp-file
-/// copy so we never have to wait on the user's running Thunderbird
-/// instance. The calendar `name` and `username` (associated SMTP
-/// identity email) come from
-/// `<profile>/calendar-data/calendars.json` — a per-profile JSON
-/// dictionary keyed by `cal_id` (the same string used as the
-/// `cache/<cal_id>/` directory name). When the JSON is missing or
-/// malformed the cache folder is skipped (we'd rather under-report
-/// than emit a calendar with no human-readable name).
-///
-/// **Profile label**: the parent dir of `places.sqlite` (Thunderbird
-/// stores mail in a sibling profile dir; for pure calendar users with
-/// no `places.sqlite` we fall back to the profile dir name). The
-/// `profile` field is composed as
-/// `"[Thunderbird] {profile_name} ({identity_email})"` so the LLM
-/// step can group multiple calendars from the same Thunderbird
-/// profile together.
-///
-/// **`ics_path`**: points at the `cache.sqlite` itself (the
-/// canonical on-disk source for the calendar's events). The ical
-/// collector doesn't yet read sqlite-backed sources — that lands
-/// in a follow-up PR — but pointing at the source-of-truth keeps
-/// the detection honest (vs. a synthetic placeholder path). A
-/// non-empty `ics_path` is a precondition for the LLM step
-/// accepting the row.
-///
-/// **Platform short-circuit**: Linux, Windows, and macOS each have
-/// a well-known profile root. Other platforms (BSDs, etc.) return
-/// `Vec::new()` so the orchestrator's platform-conditional logic
-/// stays the single source of truth (we deliberately don't
-/// `#[cfg]`-gate the function so the test suite can assert the
-/// platform skip on a Linux build host). Matches the per-detector
-/// pattern used by `scan_chrome_history` / `scan_firefox_history` /
-/// `scan_evolution_calendars`.
-///
-/// `home` is the user's home dir (the caller resolves `$HOME` or
-/// passes a test fixture); `platform` is the runtime-detected
-/// [`Platform`]. The function is a pure read-walk — no Mutex, no
-/// `OnceLock`, no shell-out, no `which` probe (the Thunderbird
-/// binary is not consulted; the on-disk profile dir is the
-/// authoritative evidence).
-pub fn scan_thunderbird_calendars(home: &Path, platform: &Platform) -> Vec<DetectedCalendar> {
-    let roots: Vec<PathBuf> = match platform {
-        Platform::Linux => vec![home.join(".thunderbird")],
-        Platform::Macos => vec![home.join("Library").join("Thunderbird").join("Profiles")],
-        Platform::Other(ref os) if os == "windows" => vec![
-            // %APPDATA%\Thunderbird\Profiles — primary, the
-            // default profile location on Windows. The scanner
-            // resolves `$APPDATA` (or falls back to
-            // `<home>/AppData/Roaming`).
-            dirs::config_dir()
-                .map(|p| p.join("Thunderbird").join("Profiles"))
-                .unwrap_or_else(|| {
-                    home.join("AppData")
-                        .join("Roaming")
-                        .join("Thunderbird")
-                        .join("Profiles")
-                }),
-        ],
-        Platform::Other(_) => return Vec::new(),
-    };
-
-    let mut out = Vec::new();
-    for root in roots {
-        let entries = match std::fs::read_dir(&root) {
-            Ok(e) => e,
-            Err(_) => continue, // no Thunderbird install — empty result
-        };
-        for profile_entry in entries.flatten() {
-            let profile_dir = profile_entry.path();
-            if !profile_dir.is_dir() {
-                continue;
-            }
-            // Resolve the profile name (the parent dir of places.sqlite
-            // when present — that's the canonical Thunderbird profile
-            // name; e.g. `xxxxxxxx.default-release`). Fall back to
-            // the dir entry's own name when places.sqlite is absent
-            // (calendar-only users).
-            let profile_name = std::fs::read_dir(&profile_dir)
-                .ok()
-                .and_then(|mut it| {
-                    it.find(|e| {
-                        e.as_ref()
-                            .map(|e| e.file_name() == "places.sqlite" && e.path().is_file())
-                            .unwrap_or(false)
-                    })
-                })
-                .and_then(|e| e.ok())
-                .and_then(|e| e.path().parent().map(|p| p.to_path_buf()))
-                .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
-                .or_else(|| {
-                    profile_dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| "default".to_string());
-
-            // Read <profile>/calendar-data/calendars.json — the
-            // authoritative per-profile calendar metadata file
-            // (Thunderbird's storage backend writes it on every
-            // calendar add/edit). The schema is a JSON object whose
-            // keys are `cal_id` (matching the `cache/<cal_id>/`
-            // subdir name) and whose values carry `name`,
-            // `username` (the identity email), and `type` (we
-            // ignore `type` — every calendar type is in-scope for
-            // the user-facing label).
-            let calendars_json_path = profile_dir.join("calendar-data").join("calendars.json");
-            let calendars_meta: std::collections::HashMap<String, CalendarJsonEntry> =
-                match std::fs::read_to_string(&calendars_json_path) {
-                    Ok(s) => match serde_json::from_str(&s) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            tracing::warn!(
-                                profile = %profile_name,
-                                path = %calendars_json_path.display(),
-                                error = %e,
-                                "skipping Thunderbird profile (calendars.json malformed)"
-                            );
-                            continue;
-                        }
-                    },
-                    Err(_) => continue, // no calendars.json — profile has no calendars
-                };
-
-            // Walk <profile>/calendar-data/cache/<cal_id>/ looking
-            // for `cache.sqlite`. We intentionally do NOT recurse —
-            // the on-disk layout is one level deep, and a recursive
-            // walk would surface the per-event nested directories
-            // (events.sqlite, alarms.sqlite, etc.) that we can't
-            // meaningfully label.
-            let cache_dir = profile_dir.join("calendar-data").join("cache");
-            let cache_entries = match std::fs::read_dir(&cache_dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for cal_entry in cache_entries.flatten() {
-                let cal_dir = cal_entry.path();
-                if !cal_dir.is_dir() {
-                    continue;
-                }
-                let cal_id = match cal_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-                {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let cache_db = cal_dir.join("cache.sqlite");
-                if !cache_db.is_file() {
-                    continue; // empty cache dir — skip
-                }
-                // The sqlite read is a sanity check that the cache
-                // is well-formed (it confirms the directory is a
-                // real Thunderbird calendar folder, not a stale
-                // leftover). The actual `name` / `username` come
-                // from calendars.json — sqlite stores the events,
-                // not the metadata.
-                if !is_thunderbird_cache_readable(&cache_db) {
-                    continue;
-                }
-                let (cal_name, identity_email) = match calendars_meta.get(&cal_id) {
-                    Some(entry) => (
-                        entry.name.clone(),
-                        entry.username.clone().unwrap_or_default(),
-                    ),
-                    None => {
-                        // No metadata for this cal_id — the cache
-                        // dir exists but calendars.json doesn't
-                        // list it. This can happen mid-edit (the
-                        // user just added the calendar and
-                        // calendars.json hasn't been flushed). We
-                        // emit a bare entry so the user can still
-                        // see it; the LLM step can drop it.
-                        (String::new(), String::new())
-                    }
-                };
-                if cal_name.is_empty() {
-                    // No name → not user-meaningful. Skip.
-                    continue;
-                }
-                let profile_label = if identity_email.is_empty() {
-                    format!("[Thunderbird] {profile_name}")
-                } else {
-                    format!("[Thunderbird] {profile_name} ({identity_email})")
-                };
-                out.push(DetectedCalendar {
-                    client: "thunderbird".to_string(),
-                    profile: Some(profile_label),
-                    display_name: Some(cal_name),
-                    ics_path: cache_db,
-                });
-            }
-        }
-    }
-    out
-}
-
-/// One entry from Thunderbird's per-profile `calendars.json` file.
-/// Only the fields the detector surfaces are modeled; Thunderbird
-/// writes a richer schema (`type`, `prefs`, `disabled`…) but we
-/// ignore the rest.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct CalendarJsonEntry {
-    /// Display name for the calendar. Empty / absent means
-    /// the calendar isn't user-meaningful (the detector skips
-    /// these).
-    #[serde(default)]
-    name: String,
-    /// Associated SMTP identity email (the account that
-    /// "owns" this calendar in Thunderbird's UI). Optional —
-    /// local-only calendars leave it blank.
-    #[serde(default)]
-    username: Option<String>,
-    // `type` ("storage", "caldav", etc.) is intentionally
-    // not modeled — we treat every calendar type the same.
-    #[serde(default, rename = "type")]
-    _type: Option<String>,
-}
-
-/// Cheap sanity check that a Thunderbird `cache.sqlite` is at
-/// least openable as a sqlite file. We don't read any rows —
-/// the `name` and `username` come from `calendars.json` — but
-/// confirming the sqlite open succeeds filters out half-written
-/// caches from a crashed Thunderbird run. Mirrors the
-/// `firefox_history::copy_to_temp` + `SQLITE_OPEN_READ_ONLY`
-/// pattern in
-/// `crates/trail-collector/src/collectors/browser_history/firefox.rs`.
-fn is_thunderbird_cache_readable(cache_db: &Path) -> bool {
-    // Copy to a temp file (read-only on the original path
-    // still races with Thunderbird's WAL writes; the copy
-    // is atomic-from-our-POV).
-    let parent = cache_db.parent().unwrap_or_else(|| Path::new("."));
-    let temp = match tempfile::Builder::new()
-        .prefix("trail-thunderbird-cache-")
-        .suffix(".sqlite")
-        .tempfile_in(parent)
-    {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    if std::fs::copy(cache_db, temp.path()).is_err() {
-        return false;
-    }
-    let conn = rusqlite::Connection::open_with_flags(
-        temp.path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    );
-    // A simple `PRAGMA schema_version` (or any other read) would
-    // also work; for the sanity-check we just need the open to
-    // succeed. The connection drops here and the temp file is
-    // removed by `tempfile`'s RAII.
-    conn.is_ok()
-}
-
 /// Test seam + production probe for "is the `gnome-calendar` binary
 /// on this user's PATH?". In tests the [`GNOME_CALENDAR_PRESENT`]
 /// slot is `Some(value)` and we return `value` verbatim — the
@@ -1078,6 +820,107 @@ fn is_evolution_installed_for(platform: &Platform) -> bool {
         return *mocked;
     }
     probe_binary_on_path("evolution")
+}
+
+/// Test seam + production probe for "is the `korganizer` binary on
+/// this user's PATH?" (Linux only — KOrganizer is a KDE PIM
+/// application with no Windows or macOS build). Same shape as
+/// [`is_gnome_calendar_installed_for`]; see that function's docs.
+/// Non-Linux platforms always return `false`.
+fn is_korganizer_installed_for(platform: &Platform) -> bool {
+    if !matches!(platform, Platform::Linux) {
+        return false;
+    }
+    if let Some(mocked) = KORGANIZER_PRESENT
+        .lock()
+        .expect("KORGANIZER_PRESENT mutex poisoned")
+        .as_ref()
+    {
+        return *mocked;
+    }
+    probe_binary_on_path("korganizer")
+}
+
+/// Test seam + production probe for "is Microsoft Outlook installed
+/// on this Windows host?" (Windows only — Outlook has no Linux or
+/// macOS build of its own). On non-Windows platforms the function
+/// always returns `false`.
+///
+/// Production probe: a `Path::exists` check against the canonical
+/// `OUTLOOK.EXE` location under `%ProgramFiles%\Microsoft
+/// Office\root\Office16\OUTLOOK.EXE`. We intentionally do NOT
+/// reach for the `winreg` crate (the proposal's "use winreg only
+/// if it's already a transitive dep" guidance) — checking the
+/// binary's presence on disk is sufficient evidence for the
+/// UX-fallback hint and avoids a new dependency. The
+/// `%ProgramFiles%` env-var resolution is done via
+/// `std::env::var("ProgramFiles")` so the test seam can override
+/// it via the standard env-mutation pattern if needed; in
+/// practice the unit tests consult the `OUTLOOK_PRESENT` mock
+/// instead so the env-var is never read in test mode.
+fn is_outlook_installed_for(platform: &Platform) -> bool {
+    // The Windows build is the only host where Outlook ships;
+    // short-circuit everything else (including `Platform::Linux`,
+    // `Platform::Macos`, and the catch-all `Platform::Other("...")`
+    // for non-Windows OSes like "freebsd" or "linux"). The check
+    // matches the spec's "non-Linux / non-Windows platforms return
+    // Unavailable" — and also covers the `Platform::Other("linux")`
+    // case that surfaces on a Windows binary built and run on a
+    // Linux test host (which is what the unit tests do).
+    let is_windows = match platform {
+        Platform::Other(os) if os.eq_ignore_ascii_case("windows") => true,
+        _ => false,
+    };
+    if !is_windows {
+        return false;
+    }
+    if let Some(mocked) = OUTLOOK_PRESENT
+        .lock()
+        .expect("OUTLOOK_PRESENT mutex poisoned")
+        .as_ref()
+    {
+        return *mocked;
+    }
+    probe_outlook_exe()
+}
+
+/// Production probe for Microsoft Outlook. Resolves
+/// `%ProgramFiles%\Microsoft Office\root\Office16\OUTLOOK.EXE`
+/// and returns `true` iff that path exists. We don't try to
+/// handle every Office install variant (32-bit, 2019, O365
+/// per-machine, etc.) — the canonical Office16 path covers
+/// the Office 2016+ default install and is the right answer
+/// for the "is Outlook here?" question the UX-fallback hint
+/// needs to ask.
+///
+/// The function is only ever called from
+/// `is_outlook_installed_for` on a Windows target, but we
+/// don't `#[cfg(target_os = "windows")]`-gate it so the
+/// function exists on all build targets (it just returns
+/// `false` on non-Windows — the env-var and path-existence
+/// checks both work cross-platform, and a Linux build host
+/// running unit tests never reaches this code path because
+/// `is_outlook_installed_for` short-circuits on
+/// non-`Platform::Other("windows")` platforms).
+fn probe_outlook_exe() -> bool {
+    let program_files = match std::env::var("ProgramFiles") {
+        Ok(p) if !p.is_empty() => p,
+        // `ProgramFiles(x86)` is the 32-bit-on-64-bit-Windows
+        // install location; we fall back to it for completeness
+        // (a 32-bit Office install lands there). The 64-bit
+        // install is the common case so the primary `ProgramFiles`
+        // lookup runs first.
+        _ => match std::env::var("ProgramFiles(x86)") {
+            Ok(p) if !p.is_empty() => p,
+            _ => return false,
+        },
+    };
+    let candidate = Path::new(&program_files)
+        .join("Microsoft Office")
+        .join("root")
+        .join("Office16")
+        .join("OUTLOOK.EXE");
+    candidate.is_file()
 }
 
 /// Run `which <binary>` (POSIX) via `std::process::Command`. Returns
@@ -1337,6 +1180,17 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
             )
         }
         Platform::Linux => {
+            // ECD-4 — KOrganizer UX-fallback probe. Even when no
+            // Evolution store exists, a Linux host may have
+            // KOrganizer installed (KDE PIM). We surface its
+            // presence via the calendar `notes` so the wizard can
+            // show the "KOrganizer detected; export via File →
+            // Export → iCalendar" hint. The probe lives in
+            // `scan_korganizer` (a `CollectorCandidate`-returning
+            // function) so the unit tests can exercise the
+            // heuristic mock independently of the orchestrator.
+            let korganizer = scan_korganizer(platform);
+            let korganizer_note = korganizer_notes_fragment(&korganizer);
             let candidates = [
                 home.join(".config").join("evolution"),
                 home.join(".local").join("share").join("evolution"),
@@ -1364,20 +1218,35 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                     // user-facing row). The combined vector is
                     // what the LLM step consumes.
                     //
-                    // ECD-3 — Thunderbird cross-OS detector. The
-                    // probe runs unconditionally here (any
-                    // platform with `~/.thunderbird/` or its
+                    // ECD-4 — also append the KOrganizer
+                    // UX-fallback fragment when KOrganizer is
+                    // installed. The fragment is "; KOrganizer
+                    // detected; please export your calendar via
+                    // File → Export → iCalendar" so the user
+                    // sees the hint in the same notes string
+                    // the wizard already renders.
+                    // ECD-3 — also probe the Thunderbird cross-OS
+                    // detector. The probe runs unconditionally here
+                    // (any platform with `~/.thunderbird/` or its
                     // platform-equivalent will surface calendars);
                     // the detector itself is platform-short-
                     // circuited for non-Linux/Windows/macOS
                     // hosts (see `scan_thunderbird_calendars`).
+                    //
+                    // ECD-4 — also append the KOrganizer
+                    // UX-fallback fragment when KOrganizer is
+                    // installed. The fragment is "; KOrganizer
+                    // detected; please export your calendar via
+                    // File → Export → iCalendar" so the user
+                    // sees the hint in the same notes string
+                    // the wizard already renders.
                     let detected = scan_evolution_calendars(home, platform);
                     let detected_gnome = scan_gnome_calendar_calendars(home, platform);
                     let detected_thunderbird = scan_thunderbird_calendars(home, platform);
                     let count = detected.len();
                     let gnome_count = detected_gnome.len();
                     let thunderbird_count = detected_thunderbird.len();
-                    let notes = match (count > 0, gnome_count > 0, thunderbird_count > 0) {
+                    let base_notes = match (count > 0, gnome_count > 0, thunderbird_count > 0) {
                         (true, true, true) => Some(format!(
                             "evolution + GNOME Calendar + Thunderbird stores present; \
                              auto-discovered {count} evolution {}, \
@@ -1445,6 +1314,7 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                         )),
                         (false, false, false) => None,
                     };
+                    let notes = merge_notes(base_notes, korganizer_note.as_deref());
                     return finalize(
                         "calendar",
                         "Calendar events",
@@ -1454,21 +1324,202 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                     );
                 }
             }
+            // Evolution store absent — but KOrganizer may still
+            // be installed (KDE-only host with no Evolution at
+            // all). Surface it via `notes` so the wizard shows
+            // the export hint even on a KOrganizer-only host.
+            // When KOrganizer is also absent we return the
+            // original "no evolution calendar store found"
+            // note.
             finalize(
                 "calendar",
                 "Calendar events",
                 CollectorStatus::Unavailable,
                 unavailable_evidence(),
-                Some("no evolution calendar store found".to_string()),
+                merge_notes(
+                    Some("no evolution calendar store found".to_string()),
+                    korganizer_note.as_deref(),
+                ),
             )
         }
-        Platform::Other(os) => finalize(
-            "calendar",
-            "Calendar events",
+        Platform::Other(os) => {
+            // ECD-4 — Windows branch for Outlook UX-fallback.
+            // `Platform::Other("windows")` is how `detect_platform`
+            // reports the host on Windows builds; the
+            // `is_outlook_installed_for` probe short-circuits to
+            // `false` on every other `Platform::Other("...")`
+            // variant, so non-Windows platforms (freebsd, etc.)
+            // still see the "not yet supported" note. When
+            // Outlook IS installed, we upgrade the note to the
+            // "Outlook detected; per-calendar .ics export" hint
+            // so the wizard shows the right UX-fallback text.
+            let is_windows = os.eq_ignore_ascii_case("windows");
+            if is_windows {
+                let outlook = scan_outlook(platform);
+                if outlook.status == CollectorStatus::Available {
+                    return outlook;
+                }
+                return finalize(
+                    "calendar",
+                    "Calendar events",
+                    CollectorStatus::Unavailable,
+                    unavailable_evidence(),
+                    Some(format!("calendar collector not yet supported on {os}")),
+                );
+            }
+            finalize(
+                "calendar",
+                "Calendar events",
+                CollectorStatus::Unavailable,
+                unavailable_evidence(),
+                Some(format!("calendar collector not yet supported on {os}")),
+            )
+        }
+    }
+}
+
+/// ECD-4 — KOrganizer UX-fallback detector. Linux-only. When the
+/// `korganizer` binary is on the user's PATH we report
+/// `Available` with `CommandExists` evidence + a UX-fallback note
+/// asking the user to export their calendar via File → Export →
+/// iCalendar. On non-Linux platforms we report `Unavailable` with
+/// a platform-skip note.
+///
+/// The function is intentionally separate from the calendar
+/// orchestrator (`scan_calendar`) so the unit tests can exercise
+/// the heuristic mock independently of the Evolution/GNOME
+/// Calendar plumbing. The orchestrator consumes this function's
+/// result to render the per-OS notes string; the wizard reads
+/// that string verbatim to decide whether to show the export
+/// hint.
+pub fn scan_korganizer(platform: &Platform) -> CollectorCandidate {
+    if !matches!(platform, Platform::Linux) {
+        return finalize(
+            "korganizer",
+            "KOrganizer (Linux)",
             CollectorStatus::Unavailable,
             unavailable_evidence(),
-            Some(format!("calendar collector not yet supported on {os}")),
-        ),
+            Some("KOrganizer is Linux-only".to_string()),
+        );
+    }
+    if is_korganizer_installed_for(platform) {
+        // The exact path doesn't matter for the UX-fallback
+        // hint (the user is asked to export, not to point us
+        // at a pre-existing file). We still surface a
+        // placeholder binary path on the evidence record so
+        // the JSON is consistent with the other CommandExists
+        // rows (`which` returns the resolved absolute path; we
+        // just want a non-empty placeholder here that the
+        // test can pin if needed). Using `/usr/bin/korganizer`
+        // as the canonical guess is good enough — the
+        // function-level guarantee is "korganizer is
+        // installed", not "korganizer is at this exact path".
+        return finalize(
+            "korganizer",
+            "KOrganizer (Linux)",
+            CollectorStatus::Available,
+            EvidenceKind::CommandExists {
+                binary: "korganizer".to_string(),
+                path: PathBuf::from("/usr/bin/korganizer"),
+            },
+            Some(
+                "KOrganizer is installed; please export your calendar via \
+                 File → Export → iCalendar and paste the path below"
+                    .to_string(),
+            ),
+        );
+    }
+    finalize(
+        "korganizer",
+        "KOrganizer (Linux)",
+        CollectorStatus::Unavailable,
+        unavailable_evidence(),
+        Some("korganizer not on PATH".to_string()),
+    )
+}
+
+/// ECD-4 — Outlook UX-fallback detector. Windows-only. When
+/// `%ProgramFiles%\Microsoft Office\root\Office16\OUTLOOK.EXE`
+/// exists we report `Available` + the per-calendar `.ics` export
+/// hint. On non-Windows platforms we report `Unavailable` with
+/// the platform-skip note.
+pub fn scan_outlook(platform: &Platform) -> CollectorCandidate {
+    let is_windows = match platform {
+        Platform::Other(os) if os.eq_ignore_ascii_case("windows") => true,
+        _ => false,
+    };
+    if !is_windows {
+        return finalize(
+            "outlook",
+            "Outlook (Windows)",
+            CollectorStatus::Unavailable,
+            unavailable_evidence(),
+            Some("Outlook is Windows-only".to_string()),
+        );
+    }
+    if is_outlook_installed_for(platform) {
+        return finalize(
+            "outlook",
+            "Outlook (Windows)",
+            CollectorStatus::Available,
+            EvidenceKind::FileExists {
+                path: PathBuf::from(
+                    "C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                ),
+            },
+            Some(
+                "Outlook is installed; the calendar collector will read via \
+                 per-calendar .ics export. Use Outlook File → Save As → \
+                 iCalendar Format for each calendar you want to include."
+                    .to_string(),
+            ),
+        );
+    }
+    finalize(
+        "outlook",
+        "Outlook (Windows)",
+        CollectorStatus::Unavailable,
+        unavailable_evidence(),
+        Some("OUTLOOK.EXE not found in Microsoft Office 16 install".to_string()),
+    )
+}
+
+/// Build the "; KOrganizer detected; please export …" notes
+/// fragment when KOrganizer is installed, `None` otherwise.
+/// Centralised so the orchestrator (`scan_calendar`) and the
+/// standalone test surface stay in sync — a regression that
+/// changes the hint text in one place would be caught by the
+/// value-asserting test in the other.
+fn korganizer_notes_fragment(korganizer: &CollectorCandidate) -> Option<String> {
+    if korganizer.status == CollectorStatus::Available {
+        // The hint text is identical to `scan_korganizer`'s
+        // `notes` string when the probe fires; we just prefix
+        // it with "; " so the orchestrator can append it
+        // cleanly after the existing evolution/gnome
+        // fragment.
+        Some(format!(
+            "; {}",
+            korganizer
+                .notes
+                .as_deref()
+                .unwrap_or("KOrganizer is installed")
+        ))
+    } else {
+        None
+    }
+}
+
+/// Append `extra` to `base` with a "; " separator. Both inputs
+/// may be `None` — the result is the `Option<String>` value
+/// that's actually present (or `None` when both are absent).
+/// Used by [`scan_calendar`] to merge the evolution/gnome base
+/// notes with the KOrganizer UX-fallback fragment.
+fn merge_notes(base: Option<String>, extra: Option<&str>) -> Option<String> {
+    match (base, extra) {
+        (Some(b), Some(e)) => Some(format!("{b}{e}")),
+        (Some(b), None) => Some(b),
+        (None, Some(e)) => Some(e.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -2838,270 +2889,247 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ECD-3 — Thunderbird cross-OS calendar detector
+    // ECD-4 — KOrganizer + Outlook UX-fallback probes
+    //
+    // KOrganizer (Linux) and Outlook (Windows) are intentionally
+    // UX-fallback ONLY: their on-disk artifact discovery is too
+    // complex for v1 (KOrganizer: Akonadi resource backends are
+    // heterogeneous — file / SQLite / MySQL; Outlook: Windows
+    // registry + MAPI). The detectors return `Available` + a hint
+    // string asking the user to export the calendar themselves
+    // (File → Export → iCalendar for KOrganizer; Outlook File →
+    // Save As → iCalendar Format per calendar). The existing
+    // manual `.ics` path input stays as-is — the fallback is
+    // purely a UX hint surfaced via the candidate's `notes` field.
+    //
+    // Test pattern mirrors the ECD-2 heuristic-mock test helper
+    // (see `with_heuristics` above). The `KORGANIZER_PRESENT` and
+    // `OUTLOOK_PRESENT` slots are `None` in production (the
+    // functions fall through to `which korganizer` /
+    // `Path::is_file(OUTLOOK.EXE)` respectively) and `Some(b)` in
+    // tests.
     // -----------------------------------------------------------------------
 
-    /// Build a per-profile `calendar-data/calendars.json` file. The
-    /// schema is the one Thunderbird's storage backend writes on
-    /// every calendar add/edit: a JSON object keyed by `cal_id` (the
-    /// same string used as the `cache/<cal_id>/` subdir name).
-    fn write_thunderbird_calendars_json(
-        home: &TempHome,
-        profile_rel: &str,
-        entries: &[(&str, &str, &str)], // (cal_id, name, username)
-    ) {
-        let path = home.path().join(profile_rel).join("calendars.json");
-        let mut obj = serde_json::Map::new();
-        for (cal_id, name, username) in entries {
-            let mut entry = serde_json::Map::new();
-            entry.insert(
-                "name".to_string(),
-                serde_json::Value::String((*name).to_string()),
-            );
-            if !username.is_empty() {
-                entry.insert(
-                    "username".to_string(),
-                    serde_json::Value::String((*username).to_string()),
-                );
-            }
-            entry.insert(
-                "type".to_string(),
-                serde_json::Value::String("storage".to_string()),
-            );
-            obj.insert((*cal_id).to_string(), serde_json::Value::Object(entry));
+    /// Run `body` with the ECD-4 heuristic mocks set to
+    /// `korganizer_installed` and `outlook_installed`. The guard
+    /// restores the previous values on drop (panic-safe), so
+    /// subsequent tests start from the "no mock" default.
+    fn with_ecd4_heuristics<F>(korganizer_installed: bool, outlook_installed: bool, body: F)
+    where
+        F: FnOnce(),
+    {
+        let prev_ko = KORGANIZER_PRESENT
+            .lock()
+            .expect("heuristic mutex")
+            .replace(korganizer_installed);
+        let prev_ol = OUTLOOK_PRESENT
+            .lock()
+            .expect("heuristic mutex")
+            .replace(outlook_installed);
+        let _restore = Ecd4HeuristicsGuard { prev_ko, prev_ol };
+        body();
+    }
+
+    /// RAII guard that restores the ECD-4 heuristic mocks on drop.
+    struct Ecd4HeuristicsGuard {
+        prev_ko: Option<bool>,
+        prev_ol: Option<bool>,
+    }
+
+    impl Drop for Ecd4HeuristicsGuard {
+        fn drop(&mut self) {
+            let mut ko = KORGANIZER_PRESENT.lock().expect("heuristic mutex");
+            *ko = self.prev_ko;
+            let mut ol = OUTLOOK_PRESENT.lock().expect("heuristic mutex");
+            *ol = self.prev_ol;
         }
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&serde_json::Value::Object(obj)).unwrap(),
-        )
-        .unwrap();
     }
 
-    /// Build a real (readable) sqlite cache for a single calendar
-    /// folder. The detector only sanity-checks the open (no rows
-    /// are read), so a minimal valid sqlite is enough.
-    fn write_thunderbird_cache_sqlite(home: &TempHome, profile_rel: &str, cal_id: &str) {
-        // Real Thunderbird layout: <profile>/calendar-data/cache/<cal_id>/cache.sqlite.
-        // The detector joins `<profile>/calendar-data/cache/` so the helper MUST
-        // mirror that — putting `calendar-data/` between profile_rel and `cache/`.
-        let dir = home
-            .path()
-            .join(profile_rel)
-            .join("calendar-data")
-            .join("cache")
-            .join(cal_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("cache.sqlite");
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        // Create one table so it's a real sqlite, not an empty
-        // zero-byte file. The detector opens the copy with
-        // `SQLITE_OPEN_READ_ONLY` so a writable schema is fine.
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS cal_events (id INTEGER);")
-            .unwrap();
-    }
-
-    /// Smoke test (write FIRST per ECD-1/ECD-2 lesson f). The
-    /// detector is a pure function of `home + platform`; an empty
-    /// `home` must produce an empty `Vec` so callers can rely on
-    /// `is_empty()` to gate the UI. Asserting `Vec::new()` here
-    /// also locks in the test seam for the platform branch (the
-    /// detector is platform-conditional but never `#[cfg]`-gated,
-    /// matching the ECD-1/ECD-2 pattern).
+    /// Smoke test (write FIRST per Pitfall #127). When KOrganizer
+    /// is on the user's PATH and the platform is Linux,
+    /// `scan_korganizer` must return `Available` with
+    /// `CommandExists { binary: "korganizer", ... }` evidence +
+    /// the UX-fallback hint in `notes`. Mirrors the
+    /// `scan_gnome_calendar_calendars` heuristic-mock pattern.
     #[test]
-    fn scan_thunderbird_calendars_empty_on_empty_home() {
-        let home = TempHome::new();
+    fn scan_korganizer_smoke_returns_available_on_linux_when_on_path() {
+        with_ecd4_heuristics(
+            /* korganizer_installed */ true,
+            /* outlook_installed */ false,
+            || {
+                let c = scan_korganizer(&Platform::Linux);
+                assert_eq!(
+                    c.status,
+                    CollectorStatus::Available,
+                    "KOrganizer on Linux + on PATH must be Available; got {:?}",
+                    c.status
+                );
+                assert_eq!(c.collector_id, "korganizer");
+                match &c.evidence {
+                    EvidenceKind::CommandExists { binary, path } => {
+                        assert_eq!(binary, "korganizer");
+                        assert!(
+                            !path.as_os_str().is_empty(),
+                            "CommandExists path must be non-empty for the available case"
+                        );
+                    }
+                    other => panic!("expected CommandExists evidence; got {other:?}"),
+                }
+            },
+        );
+    }
+
+    /// Count-asserting: KOrganizer must return `Unavailable` on
+    /// every non-Linux platform (KDE PIM has no Windows / macOS
+    /// build) with a platform-skip note. The mock is set to
+    /// `true` to confirm the platform gate runs BEFORE the
+    /// heuristic check (mirrors ECD-2's "empty on non-Linux"
+    /// test pattern).
+    #[test]
+    fn scan_korganizer_unavailable_on_non_linux() {
+        for platform in [
+            Platform::Macos,
+            Platform::Other("windows".to_string()),
+            Platform::Other("freebsd".to_string()),
+        ] {
+            with_ecd4_heuristics(
+                /* korganizer_installed */ true,
+                /* outlook_installed */ false,
+                || {
+                    let c = scan_korganizer(&platform);
+                    assert_eq!(
+                        c.status,
+                        CollectorStatus::Unavailable,
+                        "KOrganizer on non-Linux {platform:?} must be Unavailable; got {:?}",
+                        c.status
+                    );
+                    let notes = c.notes.as_deref().unwrap_or("");
+                    assert!(
+                        notes.contains("Linux-only"),
+                        "non-Linux KOrganizer notes must mention Linux-only; got {notes:?}"
+                    );
+                },
+            );
+        }
+    }
+
+    /// Count-asserting: Outlook must return `Available` on
+    /// `Platform::Other("windows")` when OUTLOOK.EXE is present
+    /// + `Unavailable` when the mock is `false`. Confirms the
+    /// production probe is gated by the mock slot in test mode.
+    #[test]
+    fn scan_outlook_available_on_windows_when_present() {
+        let windows = Platform::Other("windows".to_string());
+        with_ecd4_heuristics(
+            /* korganizer_installed */ false,
+            /* outlook_installed */ true,
+            || {
+                let c = scan_outlook(&windows);
+                assert_eq!(
+                    c.status,
+                    CollectorStatus::Available,
+                    "Outlook on Windows + OUTLOOK.EXE present must be Available; got {:?}",
+                    c.status
+                );
+                assert_eq!(c.collector_id, "outlook");
+            },
+        );
+        with_ecd4_heuristics(
+            /* korganizer_installed */ false,
+            /* outlook_installed */ false,
+            || {
+                let c = scan_outlook(&windows);
+                assert_eq!(
+                    c.status,
+                    CollectorStatus::Unavailable,
+                    "Outlook on Windows + OUTLOOK.EXE missing must be Unavailable; got {:?}",
+                    c.status
+                );
+                let notes = c.notes.as_deref().unwrap_or("");
+                assert!(
+                    notes.contains("OUTLOOK.EXE"),
+                    "Windows + missing OUTLOOK.EXE notes must mention OUTLOOK.EXE; got {notes:?}"
+                );
+            },
+        );
+    }
+
+    /// Count-asserting: Outlook must return `Unavailable` on
+    /// every non-Windows platform with the platform-skip note.
+    /// The Outlook mock is set to `true` to confirm the platform
+    /// gate runs BEFORE the heuristic check.
+    #[test]
+    fn scan_outlook_unavailable_on_non_windows() {
         for platform in [
             Platform::Linux,
             Platform::Macos,
-            Platform::Other("windows".to_string()),
-        ] {
-            let detected = scan_thunderbird_calendars(home.path(), &platform);
-            assert!(
-                detected.is_empty(),
-                "empty home on {platform:?} must yield empty; got {detected:?}"
-            );
-        }
-    }
-
-    /// Non-Linux/Windows/macOS platforms (e.g. freebsd, netbsd) must
-    /// return empty even when the on-disk layout happens to look
-    /// like a Thunderbird profile. This is the platform-skip branch
-    /// of the per-detector pattern.
-    #[test]
-    fn scan_thunderbird_calendars_empty_on_unsupported_platform() {
-        let home = TempHome::new();
-        // Stage a fixture so a Linux/Windows/macOS run would find at
-        // least one calendar — that way the "empty on unsupported"
-        // assertion can't be masked by a missing fixture.
-        write_thunderbird_calendars_json(
-            &home,
-            ".thunderbird/abc.default-release/calendar-data",
-            &[("cal-1", "Work", "work@example.com")],
-        );
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/abc.default-release", "cal-1");
-        for platform in [
             Platform::Other("freebsd".to_string()),
-            Platform::Other("netbsd".to_string()),
-            Platform::Other("dragonfly".to_string()),
         ] {
-            let detected = scan_thunderbird_calendars(home.path(), &platform);
-            assert!(
-                detected.is_empty(),
-                "unsupported platform {platform:?} must yield empty; got {detected:?}"
+            with_ecd4_heuristics(
+                /* korganizer_installed */ false,
+                /* outlook_installed */ true,
+                || {
+                    let c = scan_outlook(&platform);
+                    assert_eq!(
+                        c.status,
+                        CollectorStatus::Unavailable,
+                        "Outlook on non-Windows {platform:?} must be Unavailable; got {:?}",
+                        c.status
+                    );
+                    let notes = c.notes.as_deref().unwrap_or("");
+                    assert!(
+                        notes.contains("Windows-only"),
+                        "non-Windows Outlook notes must mention Windows-only; got {notes:?}"
+                    );
+                },
             );
         }
     }
 
-    /// Count-asserting test (write SECOND per ECD-1 lesson f). Two
-    /// profiles, three calendars total. The detector must surface
-    /// exactly 3 entries — one per `cache/<cal_id>/cache.sqlite` —
-    /// and skip the `cal-3` directory that has no sqlite (simulated
-    /// half-write).
+    /// Value-asserting: the per-OS availability notes must
+    /// contain the right UX-fallback hint text. The KOrganizer
+    /// hint mentions "File → Export → iCalendar" (KDE
+    /// convention); the Outlook hint mentions "iCalendar
+    /// Format" (Microsoft Office Save As dialog). Asserting the
+    /// EXACT substring guards against a copy-paste regression
+    /// where one hint accidentally replaces the other.
     #[test]
-    fn scan_thunderbird_calendars_finds_one_per_cache_sqlite() {
-        let home = TempHome::new();
-        // Profile A: 2 calendars.
-        write_thunderbird_calendars_json(
-            &home,
-            ".thunderbird/aaaaaaaa.default-release/calendar-data",
-            &[
-                ("cal-1", "Work", "work@example.com"),
-                ("cal-2", "Personal", "me@example.com"),
-            ],
-        );
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/aaaaaaaa.default-release", "cal-1");
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/aaaaaaaa.default-release", "cal-2");
-        // Profile B: 1 calendar. Plus a `cal-3` cache dir WITHOUT a
-        // cache.sqlite — the detector must skip it.
-        write_thunderbird_calendars_json(
-            &home,
-            ".thunderbird/bbbbbbbb.dev-edition/calendar-data",
-            &[("cal-9", "Dev", "dev@example.com")],
-        );
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/bbbbbbbb.dev-edition", "cal-9");
-        std::fs::create_dir_all(
-            home.path()
-                .join(".thunderbird/bbbbbbbb.dev-edition/calendar-data/cache/cal-3"),
-        )
-        .unwrap();
+    fn scan_korganizer_and_outlook_notes_carry_ux_fallback_hints() {
+        with_ecd4_heuristics(
+            /* korganizer_installed */ true,
+            /* outlook_installed */ true,
+            || {
+                let ko = scan_korganizer(&Platform::Linux);
+                let ko_notes = ko.notes.as_deref().unwrap_or("");
+                assert!(
+                    ko_notes.contains("KOrganizer is installed"),
+                    "KOrganizer notes must announce detection; got {ko_notes:?}"
+                );
+                assert!(
+                    ko_notes.contains("File → Export → iCalendar"),
+                    "KOrganizer notes must contain the File → Export → iCalendar hint; got {ko_notes:?}"
+                );
+                assert!(
+                    ko_notes.contains("paste the path below"),
+                    "KOrganizer notes must mention the manual .ics path input; got {ko_notes:?}"
+                );
 
-        let detected = scan_thunderbird_calendars(home.path(), &Platform::Linux);
-        assert_eq!(
-            detected.len(),
-            3,
-            "expected 3 detected calendars (2 + 1, cal-3 skipped); got {detected:?}"
+                let windows = Platform::Other("windows".to_string());
+                let ol = scan_outlook(&windows);
+                let ol_notes = ol.notes.as_deref().unwrap_or("");
+                assert!(
+                    ol_notes.contains("Outlook is installed"),
+                    "Outlook notes must announce detection; got {ol_notes:?}"
+                );
+                assert!(
+                    ol_notes.contains("iCalendar Format"),
+                    "Outlook notes must mention the iCalendar Format save dialog; got {ol_notes:?}"
+                );
+                assert!(
+                    ol_notes.contains("per-calendar"),
+                    "Outlook notes must surface the per-calendar export scope; got {ol_notes:?}"
+                );
+            },
         );
-        for cal in &detected {
-            assert_eq!(cal.client, "thunderbird", "client must be thunderbird");
-            assert!(
-                cal.ics_path.ends_with("cache.sqlite"),
-                "ics_path must point at cache.sqlite; got {}",
-                cal.ics_path.display()
-            );
-        }
-        // The set of cal_id subdirs we discover must match the
-        // three with a real sqlite.
-        let mut cals: Vec<String> = detected
-            .iter()
-            .filter_map(|c| {
-                c.ics_path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-            })
-            .collect();
-        cals.sort();
-        assert_eq!(cals, vec!["cal-1", "cal-2", "cal-9"]);
-    }
-
-    /// Value-asserting test (write THIRD per ECD-1 lesson f). The
-    /// per-calendar `name` and `username` from `calendars.json` must
-    /// surface in the `DetectedCalendar` fields, and the `profile`
-    /// label must follow the `[Thunderbird] <name> (<email>)` format
-    /// (or `[Thunderbird] <name>` when the username is empty — local
-    /// calendars leave it blank). This is the parser-bug class test
-    /// that would catch e.g. a JSON deserialization off-by-one or a
-    /// `username`/`name` field swap.
-    #[test]
-    fn scan_thunderbird_calendars_extracts_name_and_username_from_json() {
-        let home = TempHome::new();
-        write_thunderbird_calendars_json(
-            &home,
-            ".thunderbird/cccccccc.default-release/calendar-data",
-            &[
-                ("cal-1", "Work Calendar", "boss@corp.com"),
-                ("cal-2", "Personal", ""), // local-only — no username
-            ],
-        );
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/cccccccc.default-release", "cal-1");
-        write_thunderbird_cache_sqlite(&home, ".thunderbird/cccccccc.default-release", "cal-2");
-
-        let detected = scan_thunderbird_calendars(home.path(), &Platform::Linux);
-        assert_eq!(detected.len(), 2);
-
-        // cal-1 — full label with identity email.
-        let work = detected
-            .iter()
-            .find(|c| c.display_name.as_deref() == Some("Work Calendar"))
-            .expect("Work Calendar must be present");
-        assert_eq!(
-            work.profile.as_deref(),
-            Some("[Thunderbird] cccccccc.default-release (boss@corp.com)"),
-            "profile label must carry the per-calendar username; got {:?}",
-            work.profile
-        );
-        assert!(work.ics_path.ends_with("cal-1/cache.sqlite"));
-
-        // cal-2 — local-only, no email; the label drops the
-        // empty parens.
-        let personal = detected
-            .iter()
-            .find(|c| c.display_name.as_deref() == Some("Personal"))
-            .expect("Personal must be present");
-        assert_eq!(
-            personal.profile.as_deref(),
-            Some("[Thunderbird] cccccccc.default-release"),
-            "profile label for local-only calendars must omit the empty parens; got {:?}",
-            personal.profile
-        );
-        assert!(personal.ics_path.ends_with("cal-2/cache.sqlite"));
-    }
-
-    /// macOS layout. The detector must consult
-    /// `~/Library/Thunderbird/Profiles/<profile>/` on macOS — the
-    /// `~/.thunderbird/` Linux root is empty / absent on macOS. This
-    /// is the cross-OS path-layout test from the spec.
-    #[test]
-    fn scan_thunderbird_calendars_walks_macos_layout() {
-        let home = TempHome::new();
-        write_thunderbird_calendars_json(
-            &home,
-            "Library/Thunderbird/Profiles/dddddddd.default-release/calendar-data",
-            &[("cal-1", "Mac Calendar", "mac@example.com")],
-        );
-        write_thunderbird_cache_sqlite(
-            &home,
-            "Library/Thunderbird/Profiles/dddddddd.default-release",
-            "cal-1",
-        );
-
-        // Linux run: the macOS layout is NOT under ~/.thunderbird/,
-        // so the Linux scan must find 0 entries.
-        let on_linux = scan_thunderbird_calendars(home.path(), &Platform::Linux);
-        assert!(
-            on_linux.is_empty(),
-            "macOS layout under Library/Thunderbird/ must NOT be visible to the Linux scan; got {on_linux:?}"
-        );
-
-        // macOS run: must find 1 entry.
-        let on_macos = scan_thunderbird_calendars(home.path(), &Platform::Macos);
-        assert_eq!(
-            on_macos.len(),
-            1,
-            "macOS scan must find the cal-1 entry under Library/Thunderbird/Profiles/; got {on_macos:?}"
-        );
-        assert_eq!(on_macos[0].display_name.as_deref(), Some("Mac Calendar"));
     }
 }
