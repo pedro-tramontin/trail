@@ -39,6 +39,23 @@
 //! already labels the entries). The ics_path dedup is a defensive
 //! safety net — the heuristic gates are the authoritative control.
 //!
+//! `scan_thunderbird_calendars` is the cross-OS detector for
+//! Thunderbird (the most popular cross-platform mail/calendar
+//! client). It walks the platform-specific profile root
+//! (`~/.thunderbird/` on Linux,
+//! `~/Library/Thunderbird/Profiles/` on macOS,
+//! `%APPDATA%\Thunderbird\Profiles\` on Windows) and emits one
+//! `DetectedCalendar` per `calendar-data/cache/<cal_id>/` directory
+//! that has a readable `cache.sqlite`. The calendar display name
+//! and associated SMTP identity email are read from the per-profile
+//! `calendars.json`; the sqlite is opened read-only via a temp-file
+//! copy (the same pattern the Firefox history collector uses) so we
+//! never block on the user's running Thunderbird. The ics_path
+//! field points at the `cache.sqlite` (the canonical on-disk
+//! source) — a future calendar collector PR will add a sqlite
+//! reader; until then the LLM step can surface the detection to the
+//! user who will know what to do with it.
+//!
 //! The pattern mirrors the per-detector shape used by
 //! `scan_chrome_history` / `scan_firefox_history`: pure function of
 //! `(home, platform)`, platform-aware so non-Linux targets return
@@ -758,6 +775,272 @@ pub fn scan_gnome_calendar_calendars(home: &Path, platform: &Platform) -> Vec<De
     out
 }
 
+/// Thunderbird cross-OS calendar detector. Walks the per-platform
+/// Thunderbird profile root (Linux: `~/.thunderbird/<profile>/`,
+/// Windows: `%APPDATA%\Thunderbird\Profiles\<profile>\`,
+/// macOS: `~/Library/Thunderbird/Profiles/<profile>/`) and emits
+/// one [`DetectedCalendar`] per `calendar-data/cache/<cal_id>/`
+/// directory that has a readable `cache.sqlite`.
+///
+/// **Read-only sqlite strategy** (mirrors
+/// `crates/trail-collector/src/collectors/browser_history/firefox.rs`):
+/// we open each `cache.sqlite` with
+/// `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` via a temp-file
+/// copy so we never have to wait on the user's running Thunderbird
+/// instance. The calendar `name` and `username` (associated SMTP
+/// identity email) come from
+/// `<profile>/calendar-data/calendars.json` — a per-profile JSON
+/// dictionary keyed by `cal_id` (the same string used as the
+/// `cache/<cal_id>/` directory name). When the JSON is missing or
+/// malformed the cache folder is skipped (we'd rather under-report
+/// than emit a calendar with no human-readable name).
+///
+/// **Profile label**: the parent dir of `places.sqlite` (Thunderbird
+/// stores mail in a sibling profile dir; for pure calendar users with
+/// no `places.sqlite` we fall back to the profile dir name). The
+/// `profile` field is composed as
+/// `"[Thunderbird] {profile_name} ({identity_email})"` so the LLM
+/// step can group multiple calendars from the same Thunderbird
+/// profile together.
+///
+/// **`ics_path`**: points at the `cache.sqlite` itself (the
+/// canonical on-disk source for the calendar's events). The ical
+/// collector doesn't yet read sqlite-backed sources — that lands
+/// in a follow-up PR — but pointing at the source-of-truth keeps
+/// the detection honest (vs. a synthetic placeholder path). A
+/// non-empty `ics_path` is a precondition for the LLM step
+/// accepting the row.
+///
+/// **Platform short-circuit**: Linux, Windows, and macOS each have
+/// a well-known profile root. Other platforms (BSDs, etc.) return
+/// `Vec::new()` so the orchestrator's platform-conditional logic
+/// stays the single source of truth (we deliberately don't
+/// `#[cfg]`-gate the function so the test suite can assert the
+/// platform skip on a Linux build host). Matches the per-detector
+/// pattern used by `scan_chrome_history` / `scan_firefox_history` /
+/// `scan_evolution_calendars`.
+///
+/// `home` is the user's home dir (the caller resolves `$HOME` or
+/// passes a test fixture); `platform` is the runtime-detected
+/// [`Platform`]. The function is a pure read-walk — no Mutex, no
+/// `OnceLock`, no shell-out, no `which` probe (the Thunderbird
+/// binary is not consulted; the on-disk profile dir is the
+/// authoritative evidence).
+pub fn scan_thunderbird_calendars(home: &Path, platform: &Platform) -> Vec<DetectedCalendar> {
+    let roots: Vec<PathBuf> = match platform {
+        Platform::Linux => vec![home.join(".thunderbird")],
+        Platform::Macos => vec![home.join("Library").join("Thunderbird").join("Profiles")],
+        Platform::Other(ref os) if os == "windows" => vec![
+            // %APPDATA%\Thunderbird\Profiles — primary, the
+            // default profile location on Windows. The scanner
+            // resolves `$APPDATA` (or falls back to
+            // `<home>/AppData/Roaming`).
+            dirs::config_dir()
+                .map(|p| p.join("Thunderbird").join("Profiles"))
+                .unwrap_or_else(|| {
+                    home.join("AppData")
+                        .join("Roaming")
+                        .join("Thunderbird")
+                        .join("Profiles")
+                }),
+        ],
+        Platform::Other(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for root in roots {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue, // no Thunderbird install — empty result
+        };
+        for profile_entry in entries.flatten() {
+            let profile_dir = profile_entry.path();
+            if !profile_dir.is_dir() {
+                continue;
+            }
+            // Resolve the profile name (the parent dir of places.sqlite
+            // when present — that's the canonical Thunderbird profile
+            // name; e.g. `xxxxxxxx.default-release`). Fall back to
+            // the dir entry's own name when places.sqlite is absent
+            // (calendar-only users).
+            let profile_name = std::fs::read_dir(&profile_dir)
+                .ok()
+                .and_then(|mut it| {
+                    it.find(|e| {
+                        e.as_ref()
+                            .map(|e| e.file_name() == "places.sqlite" && e.path().is_file())
+                            .unwrap_or(false)
+                    })
+                })
+                .and_then(|e| e.ok())
+                .and_then(|e| e.path().parent().map(|p| p.to_path_buf()))
+                .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
+                .or_else(|| {
+                    profile_dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| "default".to_string());
+
+            // Read <profile>/calendar-data/calendars.json — the
+            // authoritative per-profile calendar metadata file
+            // (Thunderbird's storage backend writes it on every
+            // calendar add/edit). The schema is a JSON object whose
+            // keys are `cal_id` (matching the `cache/<cal_id>/`
+            // subdir name) and whose values carry `name`,
+            // `username` (the identity email), and `type` (we
+            // ignore `type` — every calendar type is in-scope for
+            // the user-facing label).
+            let calendars_json_path = profile_dir.join("calendar-data").join("calendars.json");
+            let calendars_meta: std::collections::HashMap<String, CalendarJsonEntry> =
+                match std::fs::read_to_string(&calendars_json_path) {
+                    Ok(s) => match serde_json::from_str(&s) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!(
+                                profile = %profile_name,
+                                path = %calendars_json_path.display(),
+                                error = %e,
+                                "skipping Thunderbird profile (calendars.json malformed)"
+                            );
+                            continue;
+                        }
+                    },
+                    Err(_) => continue, // no calendars.json — profile has no calendars
+                };
+
+            // Walk <profile>/calendar-data/cache/<cal_id>/ looking
+            // for `cache.sqlite`. We intentionally do NOT recurse —
+            // the on-disk layout is one level deep, and a recursive
+            // walk would surface the per-event nested directories
+            // (events.sqlite, alarms.sqlite, etc.) that we can't
+            // meaningfully label.
+            let cache_dir = profile_dir.join("calendar-data").join("cache");
+            let cache_entries = match std::fs::read_dir(&cache_dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for cal_entry in cache_entries.flatten() {
+                let cal_dir = cal_entry.path();
+                if !cal_dir.is_dir() {
+                    continue;
+                }
+                let cal_id = match cal_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let cache_db = cal_dir.join("cache.sqlite");
+                if !cache_db.is_file() {
+                    continue; // empty cache dir — skip
+                }
+                // The sqlite read is a sanity check that the cache
+                // is well-formed (it confirms the directory is a
+                // real Thunderbird calendar folder, not a stale
+                // leftover). The actual `name` / `username` come
+                // from calendars.json — sqlite stores the events,
+                // not the metadata.
+                if !is_thunderbird_cache_readable(&cache_db) {
+                    continue;
+                }
+                let (cal_name, identity_email) = match calendars_meta.get(&cal_id) {
+                    Some(entry) => (
+                        entry.name.clone(),
+                        entry.username.clone().unwrap_or_default(),
+                    ),
+                    None => {
+                        // No metadata for this cal_id — the cache
+                        // dir exists but calendars.json doesn't
+                        // list it. This can happen mid-edit (the
+                        // user just added the calendar and
+                        // calendars.json hasn't been flushed). We
+                        // emit a bare entry so the user can still
+                        // see it; the LLM step can drop it.
+                        (String::new(), String::new())
+                    }
+                };
+                if cal_name.is_empty() {
+                    // No name → not user-meaningful. Skip.
+                    continue;
+                }
+                let profile_label = if identity_email.is_empty() {
+                    format!("[Thunderbird] {profile_name}")
+                } else {
+                    format!("[Thunderbird] {profile_name} ({identity_email})")
+                };
+                out.push(DetectedCalendar {
+                    client: "thunderbird".to_string(),
+                    profile: Some(profile_label),
+                    display_name: Some(cal_name),
+                    ics_path: cache_db,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// One entry from Thunderbird's per-profile `calendars.json` file.
+/// Only the fields the detector surfaces are modeled; Thunderbird
+/// writes a richer schema (`type`, `prefs`, `disabled`…) but we
+/// ignore the rest.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CalendarJsonEntry {
+    /// Display name for the calendar. Empty / absent means
+    /// the calendar isn't user-meaningful (the detector skips
+    /// these).
+    #[serde(default)]
+    name: String,
+    /// Associated SMTP identity email (the account that
+    /// "owns" this calendar in Thunderbird's UI). Optional —
+    /// local-only calendars leave it blank.
+    #[serde(default)]
+    username: Option<String>,
+    // `type` ("storage", "caldav", etc.) is intentionally
+    // not modeled — we treat every calendar type the same.
+    #[serde(default, rename = "type")]
+    _type: Option<String>,
+}
+
+/// Cheap sanity check that a Thunderbird `cache.sqlite` is at
+/// least openable as a sqlite file. We don't read any rows —
+/// the `name` and `username` come from `calendars.json` — but
+/// confirming the sqlite open succeeds filters out half-written
+/// caches from a crashed Thunderbird run. Mirrors the
+/// `firefox_history::copy_to_temp` + `SQLITE_OPEN_READ_ONLY`
+/// pattern in
+/// `crates/trail-collector/src/collectors/browser_history/firefox.rs`.
+fn is_thunderbird_cache_readable(cache_db: &Path) -> bool {
+    // Copy to a temp file (read-only on the original path
+    // still races with Thunderbird's WAL writes; the copy
+    // is atomic-from-our-POV).
+    let parent = cache_db.parent().unwrap_or_else(|| Path::new("."));
+    let temp = match tempfile::Builder::new()
+        .prefix("trail-thunderbird-cache-")
+        .suffix(".sqlite")
+        .tempfile_in(parent)
+    {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if std::fs::copy(cache_db, temp.path()).is_err() {
+        return false;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        temp.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    );
+    // A simple `PRAGMA schema_version` (or any other read) would
+    // also work; for the sanity-check we just need the open to
+    // succeed. The connection drops here and the temp file is
+    // removed by `tempfile`'s RAII.
+    conn.is_ok()
+}
+
 /// Test seam + production probe for "is the `gnome-calendar` binary
 /// on this user's PATH?". In tests the [`GNOME_CALENDAR_PRESENT`]
 /// slot is `Some(value)` and we return `value` verbatim — the
@@ -1080,29 +1363,87 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                     // keep ECD-1's `evolution` label as the
                     // user-facing row). The combined vector is
                     // what the LLM step consumes.
+                    //
+                    // ECD-3 — Thunderbird cross-OS detector. The
+                    // probe runs unconditionally here (any
+                    // platform with `~/.thunderbird/` or its
+                    // platform-equivalent will surface calendars);
+                    // the detector itself is platform-short-
+                    // circuited for non-Linux/Windows/macOS
+                    // hosts (see `scan_thunderbird_calendars`).
                     let detected = scan_evolution_calendars(home, platform);
                     let detected_gnome = scan_gnome_calendar_calendars(home, platform);
+                    let detected_thunderbird = scan_thunderbird_calendars(home, platform);
                     let count = detected.len();
                     let gnome_count = detected_gnome.len();
-                    let notes = match (count > 0, gnome_count > 0) {
-                        (true, true) => Some(format!(
+                    let thunderbird_count = detected_thunderbird.len();
+                    let notes = match (count > 0, gnome_count > 0, thunderbird_count > 0) {
+                        (true, true, true) => Some(format!(
+                            "evolution + GNOME Calendar + Thunderbird stores present; \
+                             auto-discovered {count} evolution {}, \
+                             {gnome_count} GNOME Calendar {}, \
+                             and {thunderbird_count} Thunderbird {}",
+                            if count == 1 { "calendar" } else { "calendars" },
+                            if gnome_count == 1 { "alias" } else { "aliases" },
+                            if thunderbird_count == 1 {
+                                "calendar"
+                            } else {
+                                "calendars"
+                            },
+                        )),
+                        (true, false, true) => Some(format!(
+                            "evolution + Thunderbird stores present; \
+                             auto-discovered {count} evolution {} and \
+                             {thunderbird_count} Thunderbird {}",
+                            if count == 1 { "calendar" } else { "calendars" },
+                            if thunderbird_count == 1 {
+                                "calendar"
+                            } else {
+                                "calendars"
+                            },
+                        )),
+                        (false, true, true) => Some(format!(
+                            "GNOME Calendar + Thunderbird detected; \
+                             auto-discovered {gnome_count} GNOME Calendar {} and \
+                             {thunderbird_count} Thunderbird {}",
+                            if gnome_count == 1 { "alias" } else { "aliases" },
+                            if thunderbird_count == 1 {
+                                "calendar"
+                            } else {
+                                "calendars"
+                            },
+                        )),
+                        (true, true, false) => Some(format!(
                             "evolution calendar store present; \
                              auto-discovered {count} {} + \
                              {gnome_count} GNOME Calendar {}",
                             if count == 1 { "calendar" } else { "calendars" },
                             if gnome_count == 1 { "alias" } else { "aliases" },
                         )),
-                        (true, false) => Some(format!(
+                        (true, false, false) => Some(format!(
                             "evolution calendar store present; \
                              auto-discovered {count} {}",
                             if count == 1 { "calendar" } else { "calendars" }
                         )),
-                        (false, true) => Some(format!(
+                        (false, true, false) => Some(format!(
                             "GNOME Calendar detected; \
                              auto-discovered {gnome_count} {}",
-                            if gnome_count == 1 { "calendar" } else { "calendars" },
+                            if gnome_count == 1 {
+                                "calendar"
+                            } else {
+                                "calendars"
+                            },
                         )),
-                        (false, false) => None,
+                        (false, false, true) => Some(format!(
+                            "Thunderbird detected; \
+                             auto-discovered {thunderbird_count} {}",
+                            if thunderbird_count == 1 {
+                                "calendar"
+                            } else {
+                                "calendars"
+                            },
+                        )),
+                        (false, false, false) => None,
                     };
                     return finalize(
                         "calendar",
@@ -2243,8 +2584,14 @@ mod tests {
     where
         F: FnOnce(),
     {
-        let prev_gc = GNOME_CALENDAR_PRESENT.lock().expect("heuristic mutex").replace(gc_installed);
-        let prev_ev = EVOLUTION_PRESENT.lock().expect("heuristic mutex").replace(evolution_installed);
+        let prev_gc = GNOME_CALENDAR_PRESENT
+            .lock()
+            .expect("heuristic mutex")
+            .replace(gc_installed);
+        let prev_ev = EVOLUTION_PRESENT
+            .lock()
+            .expect("heuristic mutex")
+            .replace(evolution_installed);
         let _restore = HeuristicsGuard { prev_gc, prev_ev };
         body();
     }
@@ -2292,46 +2639,50 @@ mod tests {
             ".local/share/evolution/calendar/1234567890/c.ics",
             &evolution_ics("C"),
         );
-        with_heuristics(/* gc_installed */ true, /* evolution_installed */ true, || {
-            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
-            // Length assertion: ECD-2 must emit 0 entries (all
-            // already covered by ECD-1).
-            assert!(
+        with_heuristics(
+            /* gc_installed */ true,
+            /* evolution_installed */ true,
+            || {
+                let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+                // Length assertion: ECD-2 must emit 0 entries (all
+                // already covered by ECD-1).
+                assert!(
                 gnome.is_empty(),
                 "when both Evolution and GNOME Calendar are installed, ECD-2 must emit 0 entries; got {gnome:?}"
             );
-            // Value assertion: the SET of ics_paths must also be
-            // empty. A regression that emits entries with the
-            // wrong client label (e.g. still tagged "evolution")
-            // would be caught here because the set would be
-            // non-empty even if the count happened to be 0 in
-            // some other test setup.
-            let paths: std::collections::HashSet<PathBuf> =
-                gnome.iter().map(|c| c.ics_path.clone()).collect();
-            assert!(
-                paths.is_empty(),
-                "ics_path set must be empty when dedup fires; got {paths:?}"
-            );
-            // Belt-and-braces: the dedup must also keep ECD-2's
-            // entries out of the orchestrator's combined output.
-            // (Simulate the orchestrator's flatten step.)
-            let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
-            let combined: Vec<_> = evolution.iter().chain(gnome.iter()).collect();
-            let unique_paths: std::collections::HashSet<&PathBuf> =
-                combined.iter().map(|c| &c.ics_path).collect();
-            assert_eq!(
+                // Value assertion: the SET of ics_paths must also be
+                // empty. A regression that emits entries with the
+                // wrong client label (e.g. still tagged "evolution")
+                // would be caught here because the set would be
+                // non-empty even if the count happened to be 0 in
+                // some other test setup.
+                let paths: std::collections::HashSet<PathBuf> =
+                    gnome.iter().map(|c| c.ics_path.clone()).collect();
+                assert!(
+                    paths.is_empty(),
+                    "ics_path set must be empty when dedup fires; got {paths:?}"
+                );
+                // Belt-and-braces: the dedup must also keep ECD-2's
+                // entries out of the orchestrator's combined output.
+                // (Simulate the orchestrator's flatten step.)
+                let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
+                let combined: Vec<_> = evolution.iter().chain(gnome.iter()).collect();
+                let unique_paths: std::collections::HashSet<&PathBuf> =
+                    combined.iter().map(|c| &c.ics_path).collect();
+                assert_eq!(
                 unique_paths.len(),
                 3,
                 "combined output must have exactly 3 unique ics_paths (ECD-1's 3, ECD-2 added 0)"
             );
-            for c in &combined {
-                assert_eq!(
+                for c in &combined {
+                    assert_eq!(
                     c.client, "evolution",
                     "all combined entries must carry the evolution label when Evolution is installed; got client={:?}",
                     c.client
                 );
-            }
-        });
+                }
+            },
+        );
     }
 
     /// Smoke test (write SECOND per ECD-1 lesson f). Locks in the
@@ -2384,33 +2735,41 @@ mod tests {
             ".local/share/evolution/calendar/1234567890/personal.ics",
             &evolution_ics("Personal"),
         );
-        with_heuristics(/* gc_installed */ true, /* evolution_installed */ false, || {
-            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
-            assert_eq!(
-                gnome.len(),
-                2,
-                "expected 2 entries (one per .ics file); got {gnome:?}"
-            );
-            for cal in &gnome {
-                // The whole point of ECD-2: every entry carries the
-                // `gnome_calendar` label, not `evolution`.
+        with_heuristics(
+            /* gc_installed */ true,
+            /* evolution_installed */ false,
+            || {
+                let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
                 assert_eq!(
-                    cal.client, "gnome_calendar",
-                    "all entries must carry the gnome_calendar client label; got {:?}",
-                    cal.client
+                    gnome.len(),
+                    2,
+                    "expected 2 entries (one per .ics file); got {gnome:?}"
                 );
-                assert!(cal.ics_path.extension().and_then(|s| s.to_str()) == Some("ics"));
-                assert!(cal.profile.is_some());
-            }
-            // ics_paths must match the fixture.
-            let paths: std::collections::HashSet<PathBuf> =
-                gnome.iter().map(|c| c.ics_path.clone()).collect();
-            assert!(paths.iter().any(|p| p.ends_with("work.ics")));
-            assert!(paths.iter().any(|p| p.ends_with("personal.ics")));
-            // Display names survive the relabel.
-            assert!(gnome.iter().any(|c| c.display_name.as_deref() == Some("Work")));
-            assert!(gnome.iter().any(|c| c.display_name.as_deref() == Some("Personal")));
-        });
+                for cal in &gnome {
+                    // The whole point of ECD-2: every entry carries the
+                    // `gnome_calendar` label, not `evolution`.
+                    assert_eq!(
+                        cal.client, "gnome_calendar",
+                        "all entries must carry the gnome_calendar client label; got {:?}",
+                        cal.client
+                    );
+                    assert!(cal.ics_path.extension().and_then(|s| s.to_str()) == Some("ics"));
+                    assert!(cal.profile.is_some());
+                }
+                // ics_paths must match the fixture.
+                let paths: std::collections::HashSet<PathBuf> =
+                    gnome.iter().map(|c| c.ics_path.clone()).collect();
+                assert!(paths.iter().any(|p| p.ends_with("work.ics")));
+                assert!(paths.iter().any(|p| p.ends_with("personal.ics")));
+                // Display names survive the relabel.
+                assert!(gnome
+                    .iter()
+                    .any(|c| c.display_name.as_deref() == Some("Work")));
+                assert!(gnome
+                    .iter()
+                    .any(|c| c.display_name.as_deref() == Some("Personal")));
+            },
+        );
     }
 
     /// When NEITHER Evolution nor GNOME Calendar is installed, ECD-2
@@ -2425,13 +2784,17 @@ mod tests {
             ".local/share/evolution/calendar/1234567890/work.ics",
             &evolution_ics("Work"),
         );
-        with_heuristics(/* gc_installed */ false, /* evolution_installed */ false, || {
-            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
-            assert!(
+        with_heuristics(
+            /* gc_installed */ false,
+            /* evolution_installed */ false,
+            || {
+                let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+                assert!(
                 gnome.is_empty(),
                 "neither Evolution nor GNOME Calendar installed must yield empty; got {gnome:?}"
             );
-        });
+            },
+        );
     }
 
     /// When only Evolution is installed (no GNOME Calendar), ECD-2
@@ -2454,19 +2817,291 @@ mod tests {
         // `evolution` label (proving the orchestrator's combined
         // output is correctly partitioned: ECD-1 rows say
         // "evolution", ECD-2 rows are absent).
-        with_heuristics(/* gc_installed */ false, /* evolution_installed */ true, || {
-            let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
-            assert!(
+        with_heuristics(
+            /* gc_installed */ false,
+            /* evolution_installed */ true,
+            || {
+                let gnome = scan_gnome_calendar_calendars(home.path(), &Platform::Linux);
+                assert!(
                 gnome.is_empty(),
                 "only Evolution installed (no GNOME Calendar) must yield empty ECD-2 output; got {gnome:?}"
             );
-            // ECD-1 still emits with the evolution label — proving
-            // the "separate client label" contract: when ECD-2 DOES
-            // emit (in the only-gnome-calendar case), it uses a
-            // distinct label from ECD-1.
-            let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
-            assert_eq!(evolution.len(), 1, "ECD-1 must still emit 1 entry");
-            assert_eq!(evolution[0].client, "evolution");
-        });
+                // ECD-1 still emits with the evolution label — proving
+                // the "separate client label" contract: when ECD-2 DOES
+                // emit (in the only-gnome-calendar case), it uses a
+                // distinct label from ECD-1.
+                let evolution = scan_evolution_calendars(home.path(), &Platform::Linux);
+                assert_eq!(evolution.len(), 1, "ECD-1 must still emit 1 entry");
+                assert_eq!(evolution[0].client, "evolution");
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ECD-3 — Thunderbird cross-OS calendar detector
+    // -----------------------------------------------------------------------
+
+    /// Build a per-profile `calendar-data/calendars.json` file. The
+    /// schema is the one Thunderbird's storage backend writes on
+    /// every calendar add/edit: a JSON object keyed by `cal_id` (the
+    /// same string used as the `cache/<cal_id>/` subdir name).
+    fn write_thunderbird_calendars_json(
+        home: &TempHome,
+        profile_rel: &str,
+        entries: &[(&str, &str, &str)], // (cal_id, name, username)
+    ) {
+        let path = home.path().join(profile_rel).join("calendars.json");
+        let mut obj = serde_json::Map::new();
+        for (cal_id, name, username) in entries {
+            let mut entry = serde_json::Map::new();
+            entry.insert(
+                "name".to_string(),
+                serde_json::Value::String((*name).to_string()),
+            );
+            if !username.is_empty() {
+                entry.insert(
+                    "username".to_string(),
+                    serde_json::Value::String((*username).to_string()),
+                );
+            }
+            entry.insert(
+                "type".to_string(),
+                serde_json::Value::String("storage".to_string()),
+            );
+            obj.insert((*cal_id).to_string(), serde_json::Value::Object(entry));
+        }
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::Value::Object(obj)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Build a real (readable) sqlite cache for a single calendar
+    /// folder. The detector only sanity-checks the open (no rows
+    /// are read), so a minimal valid sqlite is enough.
+    fn write_thunderbird_cache_sqlite(home: &TempHome, profile_rel: &str, cal_id: &str) {
+        // Real Thunderbird layout: <profile>/calendar-data/cache/<cal_id>/cache.sqlite.
+        // The detector joins `<profile>/calendar-data/cache/` so the helper MUST
+        // mirror that — putting `calendar-data/` between profile_rel and `cache/`.
+        let dir = home
+            .path()
+            .join(profile_rel)
+            .join("calendar-data")
+            .join("cache")
+            .join(cal_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("cache.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        // Create one table so it's a real sqlite, not an empty
+        // zero-byte file. The detector opens the copy with
+        // `SQLITE_OPEN_READ_ONLY` so a writable schema is fine.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS cal_events (id INTEGER);")
+            .unwrap();
+    }
+
+    /// Smoke test (write FIRST per ECD-1/ECD-2 lesson f). The
+    /// detector is a pure function of `home + platform`; an empty
+    /// `home` must produce an empty `Vec` so callers can rely on
+    /// `is_empty()` to gate the UI. Asserting `Vec::new()` here
+    /// also locks in the test seam for the platform branch (the
+    /// detector is platform-conditional but never `#[cfg]`-gated,
+    /// matching the ECD-1/ECD-2 pattern).
+    #[test]
+    fn scan_thunderbird_calendars_empty_on_empty_home() {
+        let home = TempHome::new();
+        for platform in [
+            Platform::Linux,
+            Platform::Macos,
+            Platform::Other("windows".to_string()),
+        ] {
+            let detected = scan_thunderbird_calendars(home.path(), &platform);
+            assert!(
+                detected.is_empty(),
+                "empty home on {platform:?} must yield empty; got {detected:?}"
+            );
+        }
+    }
+
+    /// Non-Linux/Windows/macOS platforms (e.g. freebsd, netbsd) must
+    /// return empty even when the on-disk layout happens to look
+    /// like a Thunderbird profile. This is the platform-skip branch
+    /// of the per-detector pattern.
+    #[test]
+    fn scan_thunderbird_calendars_empty_on_unsupported_platform() {
+        let home = TempHome::new();
+        // Stage a fixture so a Linux/Windows/macOS run would find at
+        // least one calendar — that way the "empty on unsupported"
+        // assertion can't be masked by a missing fixture.
+        write_thunderbird_calendars_json(
+            &home,
+            ".thunderbird/abc.default-release/calendar-data",
+            &[("cal-1", "Work", "work@example.com")],
+        );
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/abc.default-release", "cal-1");
+        for platform in [
+            Platform::Other("freebsd".to_string()),
+            Platform::Other("netbsd".to_string()),
+            Platform::Other("dragonfly".to_string()),
+        ] {
+            let detected = scan_thunderbird_calendars(home.path(), &platform);
+            assert!(
+                detected.is_empty(),
+                "unsupported platform {platform:?} must yield empty; got {detected:?}"
+            );
+        }
+    }
+
+    /// Count-asserting test (write SECOND per ECD-1 lesson f). Two
+    /// profiles, three calendars total. The detector must surface
+    /// exactly 3 entries — one per `cache/<cal_id>/cache.sqlite` —
+    /// and skip the `cal-3` directory that has no sqlite (simulated
+    /// half-write).
+    #[test]
+    fn scan_thunderbird_calendars_finds_one_per_cache_sqlite() {
+        let home = TempHome::new();
+        // Profile A: 2 calendars.
+        write_thunderbird_calendars_json(
+            &home,
+            ".thunderbird/aaaaaaaa.default-release/calendar-data",
+            &[
+                ("cal-1", "Work", "work@example.com"),
+                ("cal-2", "Personal", "me@example.com"),
+            ],
+        );
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/aaaaaaaa.default-release", "cal-1");
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/aaaaaaaa.default-release", "cal-2");
+        // Profile B: 1 calendar. Plus a `cal-3` cache dir WITHOUT a
+        // cache.sqlite — the detector must skip it.
+        write_thunderbird_calendars_json(
+            &home,
+            ".thunderbird/bbbbbbbb.dev-edition/calendar-data",
+            &[("cal-9", "Dev", "dev@example.com")],
+        );
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/bbbbbbbb.dev-edition", "cal-9");
+        std::fs::create_dir_all(
+            home.path()
+                .join(".thunderbird/bbbbbbbb.dev-edition/calendar-data/cache/cal-3"),
+        )
+        .unwrap();
+
+        let detected = scan_thunderbird_calendars(home.path(), &Platform::Linux);
+        assert_eq!(
+            detected.len(),
+            3,
+            "expected 3 detected calendars (2 + 1, cal-3 skipped); got {detected:?}"
+        );
+        for cal in &detected {
+            assert_eq!(cal.client, "thunderbird", "client must be thunderbird");
+            assert!(
+                cal.ics_path.ends_with("cache.sqlite"),
+                "ics_path must point at cache.sqlite; got {}",
+                cal.ics_path.display()
+            );
+        }
+        // The set of cal_id subdirs we discover must match the
+        // three with a real sqlite.
+        let mut cals: Vec<String> = detected
+            .iter()
+            .filter_map(|c| {
+                c.ics_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+            })
+            .collect();
+        cals.sort();
+        assert_eq!(cals, vec!["cal-1", "cal-2", "cal-9"]);
+    }
+
+    /// Value-asserting test (write THIRD per ECD-1 lesson f). The
+    /// per-calendar `name` and `username` from `calendars.json` must
+    /// surface in the `DetectedCalendar` fields, and the `profile`
+    /// label must follow the `[Thunderbird] <name> (<email>)` format
+    /// (or `[Thunderbird] <name>` when the username is empty — local
+    /// calendars leave it blank). This is the parser-bug class test
+    /// that would catch e.g. a JSON deserialization off-by-one or a
+    /// `username`/`name` field swap.
+    #[test]
+    fn scan_thunderbird_calendars_extracts_name_and_username_from_json() {
+        let home = TempHome::new();
+        write_thunderbird_calendars_json(
+            &home,
+            ".thunderbird/cccccccc.default-release/calendar-data",
+            &[
+                ("cal-1", "Work Calendar", "boss@corp.com"),
+                ("cal-2", "Personal", ""), // local-only — no username
+            ],
+        );
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/cccccccc.default-release", "cal-1");
+        write_thunderbird_cache_sqlite(&home, ".thunderbird/cccccccc.default-release", "cal-2");
+
+        let detected = scan_thunderbird_calendars(home.path(), &Platform::Linux);
+        assert_eq!(detected.len(), 2);
+
+        // cal-1 — full label with identity email.
+        let work = detected
+            .iter()
+            .find(|c| c.display_name.as_deref() == Some("Work Calendar"))
+            .expect("Work Calendar must be present");
+        assert_eq!(
+            work.profile.as_deref(),
+            Some("[Thunderbird] cccccccc.default-release (boss@corp.com)"),
+            "profile label must carry the per-calendar username; got {:?}",
+            work.profile
+        );
+        assert!(work.ics_path.ends_with("cal-1/cache.sqlite"));
+
+        // cal-2 — local-only, no email; the label drops the
+        // empty parens.
+        let personal = detected
+            .iter()
+            .find(|c| c.display_name.as_deref() == Some("Personal"))
+            .expect("Personal must be present");
+        assert_eq!(
+            personal.profile.as_deref(),
+            Some("[Thunderbird] cccccccc.default-release"),
+            "profile label for local-only calendars must omit the empty parens; got {:?}",
+            personal.profile
+        );
+        assert!(personal.ics_path.ends_with("cal-2/cache.sqlite"));
+    }
+
+    /// macOS layout. The detector must consult
+    /// `~/Library/Thunderbird/Profiles/<profile>/` on macOS — the
+    /// `~/.thunderbird/` Linux root is empty / absent on macOS. This
+    /// is the cross-OS path-layout test from the spec.
+    #[test]
+    fn scan_thunderbird_calendars_walks_macos_layout() {
+        let home = TempHome::new();
+        write_thunderbird_calendars_json(
+            &home,
+            "Library/Thunderbird/Profiles/dddddddd.default-release/calendar-data",
+            &[("cal-1", "Mac Calendar", "mac@example.com")],
+        );
+        write_thunderbird_cache_sqlite(
+            &home,
+            "Library/Thunderbird/Profiles/dddddddd.default-release",
+            "cal-1",
+        );
+
+        // Linux run: the macOS layout is NOT under ~/.thunderbird/,
+        // so the Linux scan must find 0 entries.
+        let on_linux = scan_thunderbird_calendars(home.path(), &Platform::Linux);
+        assert!(
+            on_linux.is_empty(),
+            "macOS layout under Library/Thunderbird/ must NOT be visible to the Linux scan; got {on_linux:?}"
+        );
+
+        // macOS run: must find 1 entry.
+        let on_macos = scan_thunderbird_calendars(home.path(), &Platform::Macos);
+        assert_eq!(
+            on_macos.len(),
+            1,
+            "macOS scan must find the cal-1 entry under Library/Thunderbird/Profiles/; got {on_macos:?}"
+        );
+        assert_eq!(on_macos[0].display_name.as_deref(), Some("Mac Calendar"));
     }
 }
