@@ -147,6 +147,12 @@ pub fn baseline_answers(scan: &ScanReport) -> OnboardingAnswers {
         // Ask step's checkboxes). The future collector
         // that reads these files is built in a follow-up PR.
         browser_history: None,
+        // ECD-5 — baseline never pre-fills remote URLs (the
+        // user must paste them in the Ask step's edit-mode
+        // textarea). Empty list is the common case: the
+        // calendar collector's `remote_calendar` dispatch is
+        // a no-op.
+        remote_calendar_urls: None,
         voice: None,
         review_time: ReviewTimeConfig {
             cadence: "evening".to_string(),

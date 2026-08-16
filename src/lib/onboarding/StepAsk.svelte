@@ -8,6 +8,7 @@
     StepAskState,
     QuestionLogEntry,
   } from "./types";
+  import { validate_remote_calendar_url } from "./types";
 
   /** §17-5 — microphone permission state for the wizard's
    *  denied-callout. Fetched on mount via the new
@@ -483,6 +484,28 @@
         .map((s: string) => s.trim())
         .filter((s: string) => s.length > 0);
     }
+    // ECD-5 — Layer 1 webcal/ICS URL subscription. The
+    // user pastes one `.ics` URL per line in the new
+    // "Calendar URL" row's textarea. Each line is run
+    // through `validate_remote_calendar_url` (rejects
+    // `http://`, `file://`, `mailto:`); invalid lines are
+    // silently dropped (the schema's `Option<Vec<String>>`
+    // can't carry per-line error state, and the user can
+    // see the textarea in edit mode for self-correction).
+    // The LLM is told to leave the field unset, so this
+    // path only matters in Edit mode. When the user is NOT
+    // in Edit mode we preserve the LLM's pre-fill (so
+    // Back-nav doesn't clobber a previously-confirmed
+    // list).
+    let remote_calendar_urls: OnboardingAnswers["remote_calendar_urls"];
+    if ($hoisted.editing) {
+      remote_calendar_urls = $hoisted.edit_remote_calendar_urls
+        .split(/\r?\n/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => validate_remote_calendar_url(s));
+    } else {
+      remote_calendar_urls = answers.remote_calendar_urls;
+    }
     return {
       ...answers,
       claude_sessions_paths,
@@ -492,6 +515,7 @@
       voice,
       calendar_ics,
       browser_history,
+      remote_calendar_urls,
     };
   }
 
@@ -772,8 +796,69 @@
       </li>
 
       <!--
+        ECD-5 (Layer 1 webcal/ICS URL subscription) — Calendar
+        URL row. Sits between the Calendar source row and the
+        Browser-history row so the Ask step's data-source rows
+        mirror the order the supervisor enumerates them in
+        `CollectorLaptopConfig`. The user pastes one or more
+        `.ics` URLs (one per line); each line is validated
+        against the `validate_remote_calendar_url` helper
+        (rejects `http://`, `file://`, `mailto:`, and
+        malformed URLs). Invalid lines are silently dropped
+        when the user clicks Save & continue — the wizard
+        can't carry per-line error state in the
+        `Option<Vec<String>>` schema, so the textarea is the
+        user's self-correction surface. The privacy hint
+        matches the rest of the wizard ("fetched daily from
+        your laptop" — Trail never proxies the URL through
+        the VPS). The LLM is told to leave the field unset, so
+        the pre-edit summary shows "disabled" with a `?`
+        tooltip; entering Edit mode reveals the textarea +
+        paste hint.
+      -->
+      <li class="answer-row" data-testid="row-remote-calendar-urls">
+        <span class="label">Calendar URL (.ics)</span>
+        <span class="value">
+          {#if $hoisted.editing}
+            <textarea
+              rows="3"
+              class="inline-edit"
+              bind:value={$hoisted.edit_remote_calendar_urls}
+              data-testid="edit-remote-calendar-urls"
+              aria-label="Remote .ics URLs (one per line, https:// or webcal://)"
+              placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+            ></textarea>
+            <span class="hint">
+              One URL per line. <code>https://</code> or
+              <code>webcal://</code> only — local files and
+              cleartext <code>http://</code> URLs are rejected.
+              This URL is fetched daily from your laptop. Trail
+              does not send telemetry.
+            </span>
+          {:else if !answers.remote_calendar_urls?.length}
+            <em>disabled</em>
+            <button
+              type="button"
+              class="why"
+              data-testid="why-remote-calendar-urls"
+              aria-label="Why is Calendar URL disabled?"
+              title={disabled_reason("remote_calendar_urls", answers.question_log)}
+            >?</button>
+          {:else}
+            enabled
+            <span
+              class="value-text"
+              data-testid="remote-calendar-urls-summary"
+            >
+              — {answers.remote_calendar_urls.length} URL(s)
+            </span>
+          {/if}
+        </span>
+      </li>
+
+      <!--
         2026-08-11 — Browser history row. Sits between the
-        Calendar row and the Voice capture row so the Ask
+        Calendar URL row and the Voice capture row so the Ask
         step's data-source rows mirror the scanner's
         `candidates` order (chrome_history / brave_history /
         firefox_history / opera_history / safari_history).

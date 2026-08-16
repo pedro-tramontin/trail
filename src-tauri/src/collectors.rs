@@ -573,6 +573,7 @@ mod tests {
             transport_method: "ssh".into(),
             ssh_key_path: None,
             browser_history: Default::default(),
+            remote_calendar_urls: vec![],
         }
     }
 

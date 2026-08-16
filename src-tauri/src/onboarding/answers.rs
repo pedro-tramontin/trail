@@ -63,6 +63,16 @@ pub struct OnboardingAnswers {
     /// captured but not consumed by Phase C.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_history: Option<Vec<String>>,
+    /// ECD-5 (Layer 1 webcal/ICS URL subscription) — list
+    /// of remote `.ics` URLs the user pasted in the Ask
+    /// step. `None` means the field wasn't pre-filled by
+    /// the LLM; the Ask step's edit-mode handles the
+    /// picker UI (a textarea that takes one URL per
+    /// line). Empty `Vec` after edit means the user
+    /// explicitly opted out. Phase C flushes the post-edit
+    /// list to `Config.remote_calendar_urls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_calendar_urls: Option<Vec<String>>,
     /// Voice capture configuration. `None` means "do not enable".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceConfig>,
@@ -101,6 +111,7 @@ impl Default for OnboardingAnswers {
             github: None,
             calendar_ics: None,
             browser_history: None,
+            remote_calendar_urls: None,
             voice: None,
             review_time: ReviewTimeConfig {
                 cadence: "evening".to_string(),
@@ -247,6 +258,15 @@ pub struct OnboardingEnvelope {
     /// in `notes` (comma-separated, matching the
     /// calendar_ics notes convention).
     pub browser_history: AnswerFieldBool,
+    /// ECD-5 — top-level field on the envelope so the
+    /// schema is uniform across the eight required
+    /// fields. The LLM is told to leave this `null`
+    /// (it's a per-user-paste list, not derivable from
+    /// the scan) — the Ask step's edit-mode captures
+    /// the URL list and Phase C flushes it to
+    /// `Config.remote_calendar_urls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_calendar_urls: Option<Vec<String>>,
     pub voice: AnswerFieldVoice,
     pub review_time: AnswerFieldReviewTime,
     pub summarizer: AnswerFieldSummarizer,
@@ -398,6 +418,22 @@ impl OnboardingEnvelope {
             None
         };
 
+        // ECD-5 — remote_calendar_urls. The LLM doesn't
+        // pre-fill this (it's a per-user-paste list, not
+        // derivable from the scan). The wizard's edit-mode
+        // captures the URL list and Phase C writes it
+        // straight to `Config.remote_calendar_urls`. We
+        // pass the field through unchanged — the schema's
+        // top-level `remote_calendar_urls` mirrors the
+        // typed `Option<Vec<String>>` shape. Empty list
+        // after edit is the common "no URLs configured"
+        // path: the calendar collector's `remote_calendar`
+        // dispatch is a no-op. `None` (LLM left it unset)
+        // also defaults to "no URLs configured" — the
+        // supervisor injects an empty `Vec` into the
+        // collector subprocess.
+        let remote_calendar_urls = self.remote_calendar_urls.clone();
+
         let voice = if self.voice.selected {
             Some(VoiceConfig {
                 enabled: true,
@@ -413,6 +449,7 @@ impl OnboardingEnvelope {
             github,
             calendar_ics,
             browser_history,
+            remote_calendar_urls,
             voice,
             review_time: ReviewTimeConfig {
                 cadence: self.review_time.cadence,
@@ -468,6 +505,10 @@ mod tests {
                 notes: Some("chrome".to_string()),
                 evidence_refs: vec!["chrome_history".to_string()],
             },
+            // ECD-5 — LLM leaves the URL list unset (the
+            // schema's `Option<Vec<String>>` defaults to
+            // `None` when the model omits the field).
+            remote_calendar_urls: None,
             voice: AnswerFieldVoice {
                 selected: true,
                 model: "base".to_string(),
@@ -539,6 +580,10 @@ mod tests {
                 notes: Some("chrome".to_string()),
                 evidence_refs: vec!["chrome_history".to_string()],
             },
+            // ECD-5 — LLM leaves the URL list unset (the
+            // schema's `Option<Vec<String>>` defaults to
+            // `None` when the model omits the field).
+            remote_calendar_urls: None,
             voice: AnswerFieldVoice {
                 selected: false,
                 model: "base".to_string(),

@@ -125,6 +125,16 @@
     // built in a follow-up PR; for now this is captured
     // but not consumed by Phase C.
     edit_browser_history: "",
+    // ECD-5 (Layer 1 webcal/ICS URL subscription) — local
+    // edit buffer for the new "Calendar URL" row. Empty by
+    // default (no URLs configured). The user pastes one
+    // `.ics` URL per line in the Edit-mode textarea; the
+    // supervisor injects the validated list into
+    // `CollectorLaptopConfig.remote_calendar_urls` when it
+    // spawns the calendar collector subprocess. The LLM is
+    // told to leave the field unset, so `run_ask` does not
+    // pre-populate this buffer from the LLM's response.
+    edit_remote_calendar_urls: "",
   });
 
   // Step 3 (Transport) — VPS connection details + key

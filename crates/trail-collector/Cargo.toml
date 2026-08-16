@@ -35,6 +35,22 @@ chrono = { workspace = true }
 walkdir = { workspace = true }
 icalendar = { workspace = true }
 rusqlite = { workspace = true }
+# Layer 1 (webcal/ICS URL subscription) per-proposal
+# §"Layer 1 — Webcal/ICS URL subscription". The remote
+# calendar collector (`crates/trail-collector/src/collectors/
+# calendar/remote_calendar.rs`) does a one-shot HTTP GET per
+# URL. We use the workspace-pinned reqwest (rustls-tls only,
+# no native-tls; the `blocking` feature is enabled so the
+# sync collector binary can call `reqwest::blocking::Client`
+# without pulling tokio into a crate that doesn't otherwise
+# need it — src-tauri uses the async `reqwest::Client` from
+# the same pin and that path is unaffected) so the musl
+# cross-compile doesn't drag in OpenSSL — same rationale as
+# `src-tauri/Cargo.toml`'s `reqwest` pin. Pinned here (not
+# inherited from the workspace `dependencies` table) because
+# the existing `trail-collector` Cargo.toml uses inline dep
+# entries everywhere; changing that pattern is out of scope.
+reqwest = { workspace = true }
 # `tempfile` is needed at runtime by the browser-history readers
 # (they copy locked browser SQLite DBs to a temp file before
 # opening them — plan

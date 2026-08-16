@@ -93,6 +93,21 @@ pub struct Config {
     /// configs that haven't been touched since PR #219.
     #[serde(default)]
     pub browser_history: BrowserHistoryConfig,
+    /// ECD-5 (Layer 1 webcal/ICS URL subscription) — list of
+    /// remote `.ics` URLs the user pasted in the wizard's
+    /// Ask step. Empty list (the common case) is the no-op
+    /// path: the calendar collector skips `remote_calendar::run`
+    /// and only reads the local `.ics` file (or EventKit on
+    /// macOS). The supervisor injects this into the per-source
+    /// `CollectorLaptopConfig.remote_calendar_urls` (see
+    /// `crates/trail-collector/src/collectors/mod.rs`) when it
+    /// spawns the calendar collector subprocess.
+    ///
+    /// `#[serde(default)]` keeps backwards-compat with on-disk
+    /// configs that haven't been touched since the
+    /// email-calendar-discovery phase shipped.
+    #[serde(default)]
+    pub remote_calendar_urls: Vec<String>,
 }
 
 /// 2026-08-11 (PR #221): what the laptop-side supervisor passes
@@ -385,7 +400,10 @@ mod tests {
                 path: PathBuf::from("~/Library/Calendars/work.ics"),
             }
         );
-        assert!(cfg.calendar_ics.is_none(), "shim field is cleared post-migration");
+        assert!(
+            cfg.calendar_ics.is_none(),
+            "shim field is cleared post-migration"
+        );
         match &cfg.transport {
             TransportConfig::Ssh {
                 host,

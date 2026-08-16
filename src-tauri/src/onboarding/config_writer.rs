@@ -363,6 +363,20 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
                 .collect(),
             db_paths: Vec::new(), // scanner pass (next commit) fills this
         },
+        // ECD-5 — flush the user's pasted `.ics` URLs to the
+        // on-disk Config. The calendar collector's supervisor
+        // injects this list into the per-source
+        // `CollectorLaptopConfig.remote_calendar_urls` when it
+        // spawns the subprocess. The supervisor's URL
+        // validation (the wizard's `validate_remote_calendar_url`
+        // helper — see `StepAsk.svelte`'s input field) rejects
+        // `http://`, `file://`, and `mailto:` schemes before
+        // they reach this field, so a non-empty list here is
+        // either `https://` or `webcal://`. We don't
+        // re-validate here — the wizard is the load-bearing
+        // gate. Empty list (the common case) is the no-op
+        // path: `remote_calendar::run` is skipped entirely.
+        remote_calendar_urls: answers.remote_calendar_urls.clone().unwrap_or_default(),
     }
 }
 
@@ -624,6 +638,14 @@ mod tests {
             // representative pick list and the
             // all-disabled variant carries `None`.
             browser_history: Some(vec!["chrome".to_string()]),
+            // ECD-5 — representative remote-URL list. The
+            // full-answers variant carries two URLs to
+            // exercise the `remote_calendar_urls` flush
+            // path; the all-disabled variant carries `None`.
+            remote_calendar_urls: Some(vec![
+                "https://calendar.google.com/calendar/ical/foo/public/basic.ics".to_string(),
+                "webcal://example.com/calendar.ics".to_string(),
+            ]),
             voice: Some(VoiceConfig {
                 enabled: true,
                 model: "base".to_string(),
@@ -652,6 +674,12 @@ mod tests {
             calendar_ics: None,
             // 2026-08-11 — see full_answers() comment.
             browser_history: None,
+            // ECD-5 — baseline never pre-fills remote URLs
+            // (the user must paste them in the Ask step's
+            // edit-mode textarea). Empty list is the common
+            // case: the calendar collector's `remote_calendar`
+            // dispatch is a no-op.
+            remote_calendar_urls: None,
             voice: None,
             review_time: ReviewTimeConfig {
                 cadence: "morning".to_string(),
@@ -767,6 +795,11 @@ mod tests {
             transport_method: "ssh".to_string(),
             ssh_key_path: None,
             browser_history: Default::default(),
+            // ECD-5 — atomic-write test doesn't exercise
+            // the remote-calendar path, so leave the URL
+            // list empty (the no-op path in the calendar
+            // collector).
+            remote_calendar_urls: Vec::new(),
         };
         write_config(&v1, &dest).expect("initial write");
 
