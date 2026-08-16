@@ -107,6 +107,14 @@ global-hotkey = { workspace = true }
 # otherwise warns that the per-crate `default-features` is
 # "ignored").
 rusqlite = { workspace = true }
+# 2026-08-16 (ECD-3) — `tempfile` for the Thunderbird detector's
+# temp-file copy of each `cache.sqlite` (the read-only sqlite open
+# races with Thunderbird's WAL writes; the same pattern is used by
+# the trail-collector browser-history module). `tempfile` is
+# already a dev-dep; promoting it to a regular dep keeps the
+# production code path honest. The crate is tiny (~one file for
+# the RAII wrapper) and adds no new transitive deps.
+tempfile = { workspace = true }
 
 # Phase 5 §5.7 — macOS mic permission detection. `objc2` is the
 # modern safe wrapper around the Objective-C runtime (replacing
