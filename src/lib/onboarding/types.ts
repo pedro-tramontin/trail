@@ -128,6 +128,21 @@ export interface OnboardingAnswers {
    *  reads these files is built in a follow-up PR; for now
    *  this is captured but not consumed. */
   browser_history: string[] | null;
+  /** ECD-5 (Layer 1 webcal/ICS URL subscription) — list of
+   *  remote `.ics` URLs the user pasted on the new
+   *  "Calendar URL" row. `null` means the LLM didn't
+   *  pre-fill it (the common case — the LLM is told to
+   *  leave it null because the URL list is a per-user-paste
+   *  input, not derivable from the scan). Empty list is the
+   *  post-edit "no URLs configured" state (the user
+   *  explicitly cleared the field). Non-empty lists must
+   *  contain only `https://` or `webcal://` URLs — the
+   *  wizard's `validate_remote_calendar_url` helper rejects
+   *  `http://`, `file://`, and `mailto:` schemes before they
+   *  reach this field. Phase C flushes the post-edit list to
+   *  `Config.remote_calendar_urls` (see
+   *  `src-tauri/src/onboarding/config_writer.rs`). */
+  remote_calendar_urls: string[] | null;
   voice: VoiceConfig | null;
   review_time: ReviewTimeConfig;
   summarizer: SummarizerConfig;
@@ -300,6 +315,19 @@ export interface StepAskState {
    *  add the corresponding `BrowserSource` enum on
    *  `CollectorLaptopConfig`. */
   edit_browser_history: string;
+  /** ECD-5 (Layer 1 webcal/ICS URL subscription) — local
+   *  edit buffer for the new "Calendar URL" row. Mirrors the
+   *  `edit_claude_paths` / `edit_github_repos` pattern: a
+   *  newline-separated list rendered as a `<textarea>`. The
+   *  user pastes one `.ics` URL per line. `build_edited_answers`
+   *  splits + trims + drops empties, runs each remaining line
+   *  through `validate_remote_calendar_url` (rejects
+   *  `http://`, `file://`, `mailto:`), and writes the
+   *  validated list to `answers.remote_calendar_urls`. Empty
+   *  by default (no URLs configured). The LLM is told to
+   *  leave the field unset in its answer — `run_ask` does not
+   *  pre-populate this buffer from the LLM's response. */
+  edit_remote_calendar_urls: string;
 }
 
 /** Step 3 (Transport) state. All fields are user-visible
@@ -388,6 +416,11 @@ export const MOCK_ANSWERS: OnboardingAnswers = {
   // MOCK so the new "Browser history" row shows the
   // "disabled" state in tests (no LLM pre-fill).
   browser_history: null,
+  // ECD-5 — calendar URL list. Default null in MOCK so the
+  // new "Calendar URL" row shows the "disabled" state in
+  // tests (no LLM pre-fill, matching the schema's
+  // `Option<Vec<String>>` shape).
+  remote_calendar_urls: null,
   voice: null,
   review_time: { cadence: "evening", hour_utc: 18 },
   summarizer: { backend: "stub", model: "stub" },
@@ -414,3 +447,47 @@ export const MOCK_ANSWERS: OnboardingAnswers = {
     },
   ],
 };
+
+/**
+ * ECD-5 (Layer 1 webcal/ICS URL subscription) — validate a
+ * remote `.ics` URL the user pasted on the new "Calendar
+ * URL" row. Returns `true` if the URL is a syntactically
+ * well-formed `https://` or `webcal://` URL with a non-empty
+ * host; `false` otherwise. The validation is intentionally
+ * permissive on the path/query (we don't want to over-fit on
+ * specific calendar servers) and strict on the scheme (we
+ * must reject `http://` to avoid cleartext fetches, and
+ * `file://` / `mailto:` to avoid local-fs reads or mailto
+ * handlers). Exported separately from `StepAsk.svelte` so the
+ * vitest suite can exercise the edge cases directly without
+ * rendering the wizard component.
+ *
+ * The on-disk Config field accepts `webcal://` unchanged (the
+ * Rust side rewrites it to `https://` at fetch time — see
+ * `crates/trail-collector/src/collectors/calendar/remote_calendar.rs`),
+ * so we accept both schemes here.
+ */
+export function validate_remote_calendar_url(raw: string): boolean {
+  const s = raw.trim();
+  if (s.length === 0) return false;
+  // Use the URL constructor as the first gate — it parses
+  // the scheme + host + path atomically and rejects
+  // malformed input (e.g. "not a url"). The constructor
+  // accepts both `https://` and `webcal://` because the
+  // `webcal:` scheme is a non-special URL but parses without
+  // throwing.
+  let parsed: URL;
+  try {
+    parsed = new URL(s);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "webcal:") {
+    return false;
+  }
+  // Reject "https://" with no host (the URL constructor
+  // accepts "https:/path" with an empty host — that's not a
+  // calendar URL).
+  if (parsed.hostname.length === 0) return false;
+  return true;
+}

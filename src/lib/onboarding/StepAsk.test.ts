@@ -2,7 +2,7 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import StepAsk from "./StepAsk.svelte";
 import { writable, type Writable } from "svelte/store";
-import { MOCK_SCAN_REPORT, MOCK_ANSWERS } from "./types";
+import { MOCK_SCAN_REPORT, MOCK_ANSWERS, validate_remote_calendar_url } from "./types";
 import type { OnboardingAnswers, StepAskState } from "./types";
 
 const { invoke_mock } = vi.hoisted(() => {
@@ -37,6 +37,12 @@ function fresh_state(): Writable<StepAskState> {
     edit_calendar_source: "event_kit",
     edit_ics_paths: "",
     edit_browser_history: "",
+    // ECD-5 — Calendar URL list. Empty by default (no
+    // URLs configured). The Edit-mode textarea pre-fills
+    // from this buffer; the post-edit value is split +
+    // validated and written to
+    // `answers.remote_calendar_urls`.
+    edit_remote_calendar_urls: "",
   });
 }
 
@@ -312,6 +318,10 @@ describe("StepAsk.svelte", () => {
       edit_calendar_source: "event_kit" as const,
       edit_ics_paths: "",
       edit_browser_history: "",
+      // ECD-5 — pre-populated back-nav scenario mirrors the
+      // wizard root's default. Empty list = "no URLs
+      // configured".
+      edit_remote_calendar_urls: "",
     });
     render(StepAsk, {
       props: {
@@ -671,5 +681,127 @@ describe("StepAsk.svelte", () => {
     const hint = await screen.findByText(/wasn't detected/);
     expect(hint).toBeTruthy();
     expect(hint.textContent).toMatch(/open Settings/);
+  });
+
+  // ECD-5 — Layer 1 webcal/ICS URL subscription. The 3
+  // cases below mirror the per-item brief's "2-3 vitest
+  // cases for URL validation": one that exercises the
+  // pure helper (no DOM) and two that exercise the
+  // wizard-component round-trip (Edit-mode input +
+  // post-Next answers payload).
+  //
+  // The pure-helper case uses the same load-bearing
+  // allow/reject matrix as the Rust side's URL filter
+  // (`https://` / `webcal://` accepted; `http://`,
+  // `file://`, `mailto:`, and malformed URLs rejected).
+  // The round-trip cases use the textarea's testid
+  // (`edit-remote-calendar-urls`) and assert the
+  // validated list lands in `answers.remote_calendar_urls`.
+
+  it("(s) validate_remote_calendar_url accepts https:// and webcal://, rejects http/file/mailto/malformed", () => {
+    // ECD-5 — pure-helper unit test. The validation matrix
+    // is the load-bearing contract between the wizard and
+    // the Rust supervisor (config_writer.rs flushes the
+    // post-edit list to Config.remote_calendar_urls without
+    // re-validation — the wizard is the load-bearing gate).
+    // Must accept:
+    expect(
+      validate_remote_calendar_url(
+        "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
+      ),
+    ).toBe(true);
+    expect(
+      validate_remote_calendar_url("webcal://example.com/calendar.ics"),
+    ).toBe(true);
+    // Must reject:
+    expect(validate_remote_calendar_url("http://example.com/cal.ics")).toBe(
+      false,
+      "cleartext http is rejected (privacy)",
+    );
+    expect(validate_remote_calendar_url("file:///etc/passwd")).toBe(
+      false,
+      "file:// is rejected (local fs read prevention)",
+    );
+    expect(validate_remote_calendar_url("mailto:foo@example.com")).toBe(
+      false,
+      "mailto: is rejected (handler prevention)",
+    );
+    expect(validate_remote_calendar_url("not a url")).toBe(
+      false,
+      "garbage is rejected",
+    );
+    expect(validate_remote_calendar_url("")).toBe(
+      false,
+      "empty string is rejected",
+    );
+  });
+
+  it("(t) calendar URL row: Edit-mode textarea + valid URL round-trips through build_edited_answers", async () => {
+    // ECD-5 — wizard-component round-trip. The user pastes
+    // one https:// URL in the new "Calendar URL" row,
+    // clicks Save & continue, and the URL lands in
+    // `answers.remote_calendar_urls`. Pre-PR there was no
+    // row at all; the field is new.
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    const edit = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(edit);
+    const textarea = screen.getByTestId(
+      "edit-remote-calendar-urls",
+    ) as HTMLTextAreaElement;
+    expect(textarea).toBeTruthy();
+    expect(textarea.placeholder).toMatch(/calendar\.google\.com/);
+    await fireEvent.input(textarea, {
+      target: {
+        value: "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
+      },
+    });
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.remote_calendar_urls).toEqual([
+      "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
+    ]);
+  });
+
+  it("(u) calendar URL row: mixed valid+invalid lines — only valid URLs land in the answers payload", async () => {
+    // ECD-5 — regression for the URL-validation matrix.
+    // The user pastes a multi-line textarea with two valid
+    // URLs and three invalid lines (cleartext, file://,
+    // garbage). The post-Next answers payload must contain
+    // ONLY the two valid URLs. This is the load-bearing
+    // guarantee the Rust side relies on — the supervisor
+    // trusts the wizard's filter and doesn't re-validate.
+    const on_next = vi.fn();
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next },
+    });
+    const edit = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(edit);
+    const textarea = screen.getByTestId(
+      "edit-remote-calendar-urls",
+    ) as HTMLTextAreaElement;
+    await fireEvent.input(textarea, {
+      target: {
+        value: [
+          "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
+          "http://insecure.example.com/cal.ics",
+          "webcal://example.com/calendar.ics",
+          "file:///etc/passwd",
+          "not a url",
+        ].join("\n"),
+      },
+    });
+    const next = screen.getByTestId("ask-next");
+    await fireEvent.click(next);
+    expect(on_next).toHaveBeenCalledTimes(1);
+    const called_with = on_next.mock.calls[0][0] as OnboardingAnswers;
+    expect(called_with.remote_calendar_urls).toEqual([
+      "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
+      "webcal://example.com/calendar.ics",
+    ]);
   });
 });

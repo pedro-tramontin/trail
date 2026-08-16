@@ -965,6 +965,11 @@ mod tests {
             transport_method: "ssh".into(),
             ssh_key_path: Some(PathBuf::from("~/.ssh/id_trail")),
             browser_history: Default::default(),
+            // ECD-5 — install tests don't exercise the
+            // remote-calendar path, so leave the URL list
+            // empty (the no-op path in the calendar
+            // collector).
+            remote_calendar_urls: Vec::new(),
         }
     }
 
