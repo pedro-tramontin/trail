@@ -159,6 +159,27 @@ pub struct CollectorLaptopConfig {
     /// `.hermes/plans/2026-08-11_browser-history-collector.md`.
     #[serde(default)]
     pub browser_history: browser_history::BrowserHistoryInput,
+    /// Layer 1 (webcal/ICS URL subscription) per-proposal
+    /// §"Layer 1 — Webcal/ICS URL subscription". One or
+    /// more `.ics` URLs the user pasted in the wizard's
+    /// Ask step. The supervisor injects this from
+    /// `Config.remote_calendar_urls`. The calendar
+    /// collector's `mod.rs::run` dispatches to
+    /// `remote_calendar::run` when the list is non-empty;
+    /// the resulting envelope is merged with the local
+    /// `.ics` file path's envelope before the supervisor
+    /// writes `raw/calendar.json`. Empty list (the common
+    /// case for users who only have a local `.ics` export)
+    /// is a no-op.
+    ///
+    /// `#[serde(default)]` keeps backwards-compat with
+    /// on-disk LaptopCfg blobs that pre-date the
+    /// email-calendar-discovery phase — serde will
+    /// default the field to `Vec::new()` when the JSON
+    /// omits the key, and `run` treats that as "no
+    /// remote URLs configured".
+    #[serde(default)]
+    pub remote_calendar_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -191,9 +212,9 @@ pub mod github;
 // (`super::super::synth_X::synthesize`) without exposing them on the
 // library's public surface.
 #[allow(unused_imports, dead_code)]
-pub(crate) mod synth_calendar;
-#[allow(unused_imports, dead_code)]
 pub(crate) mod synth_browser_history;
+#[allow(unused_imports, dead_code)]
+pub(crate) mod synth_calendar;
 #[allow(unused_imports, dead_code)]
 pub(crate) mod synth_claude;
 #[allow(unused_imports, dead_code)]

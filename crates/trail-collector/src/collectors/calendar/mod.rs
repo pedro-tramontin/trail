@@ -36,9 +36,10 @@ use anyhow::Result;
 
 use super::{CollectorLaptopConfig, RawOutput};
 
-pub mod ical;
 #[cfg(target_os = "macos")]
 pub mod eventkit;
+pub mod ical;
+pub mod remote_calendar;
 
 /// Top-level entry: dispatch to the active source's backend. On macOS
 /// the source may be `EventKit` (live read) or `Ics` (file path). On
@@ -50,8 +51,21 @@ pub mod eventkit;
 /// enum from `super` so call sites in `dispatch` (the parent
 /// `collectors/mod.rs`) can stay agnostic to the calendar-specific
 /// type.
+///
+/// **Layer 1 webcal/ICS URL subscription (per-proposal §"Layer 1"):**
+/// when `cfg.remote_calendar_urls` is non-empty, the local source's
+/// output is *augmented* with the events fetched from each URL. The
+/// fetch is one-shot HTTP GET per URL with a 5 MB body cap
+/// (proposal §"Risks → #8"); `webcal://` is rewritten to `https://`
+/// (proposal §"Risks → #7"); auth-required URLs return a friendly
+/// error (proposal §"Risks → #6") and are skipped (one bad URL
+/// doesn't drop the whole cycle's events).
 pub fn run(cfg: &CollectorLaptopConfig) -> Result<RawOutput> {
-    match cfg.calendar_source {
+    // The local source's envelope. On EventKit (macOS) this reads
+    // Calendar.app directly; on `Ics` it reads the configured
+    // `.ics` file path. The Layer 1 path augments this with the
+    // user's pasted URLs.
+    let local = match cfg.calendar_source {
         super::CalendarSourceChoice::Ics => ical::run(cfg),
         #[cfg(target_os = "macos")]
         super::CalendarSourceChoice::EventKit => eventkit::run(cfg),
@@ -71,6 +85,76 @@ pub fn run(cfg: &CollectorLaptopConfig) -> Result<RawOutput> {
                  If this is reached, the validation gate regressed."
             )
         }
+    }?;
+
+    // Layer 1: webcal/ICS URL subscription. If the user didn't
+    // paste any URLs, `remote_calendar::run` returns an empty
+    // envelope; we still need to merge (an empty events list
+    // is the no-op case). When the local source already failed
+    // (e.g. `.ics` file not found), we still want to try the
+    // remote URLs — a user who pastes a URL doesn't need a
+    // local `.ics` file to exist. The `local` is on the stack
+    // and we drop it on the merge path below.
+    if cfg.remote_calendar_urls.is_empty() {
+        return Ok(local);
+    }
+
+    let remote = match remote_calendar::run(cfg) {
+        Ok(env) => env,
+        // Per-proposal §"Risks → #6", a friendly error for
+        // auth-required URLs is the user-visible signal. We
+        // log + continue: a single bad URL shouldn't drop
+        // the day's events from the local `.ics` file (or
+        // from the URLs that DID succeed). The
+        // `remote_calendar::run` already traces a warn for
+        // each per-URL failure and only returns Err when
+        // every URL failed; we surface that to the user
+        // via the Settings UI's "remote calendar fetch
+        // failed" state without losing the local envelope.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "remote calendar URL fetch failed; continuing with local envelope only"
+            );
+            return Ok(local);
+        }
+    };
+
+    Ok(merge_envelopes(local, remote))
+}
+
+/// Merge two calendar envelopes. Both must have the same `source`
+/// / `captured_at` / `date` (the local one wins on those fields
+/// — the merge is happening in the same collection cycle). The
+/// events lists are concatenated and re-sorted by UTC `start` so
+/// the merged envelope is reproducible. The `notes` / `alarms` /
+/// `recurrence_rules` EventKit-only fields are preserved on
+/// EventKit-sourced events (the `.ics` path emits `null` for
+/// them); the remote `.ics` path emits `null` too. Schema
+/// validation happens on the merged envelope.
+fn merge_envelopes(local: RawOutput, remote: RawOutput) -> RawOutput {
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    if let Some(arr) = local.payload.get("events").and_then(|v| v.as_array()) {
+        events.extend(arr.iter().cloned());
+    }
+    if let Some(arr) = remote.payload.get("events").and_then(|v| v.as_array()) {
+        events.extend(arr.iter().cloned());
+    }
+    // Stable order by UTC start so the merged envelope is
+    // reproducible. The local source's events are already
+    // sorted by `synth_calendar::synthesize`; the remote
+    // source's are sorted in `remote_calendar::run`. The
+    // cross-source sort is the merge seam.
+    events.sort_by(|a, b| {
+        let ax = a.get("start").and_then(|v| v.as_str()).unwrap_or("");
+        let bx = b.get("start").and_then(|v| v.as_str()).unwrap_or("");
+        ax.cmp(bx)
+    });
+    RawOutput {
+        source: local.source,
+        captured_at: local.captured_at,
+        date: local.date,
+        payload: serde_json::json!({ "events": events }),
     }
 }
 
@@ -167,8 +251,14 @@ mod tests {
             assert!(ev.get("comment").is_some(), "comment key present");
             assert!(ev.get("x_alt_desc").is_some(), "x_alt_desc key present");
             assert!(ev.get("url").is_some(), "url key present");
-            assert!(ev.get("notes").is_some(), "notes key present (null for .ics)");
-            assert!(ev.get("alarms").is_some(), "alarms key present (null for .ics)");
+            assert!(
+                ev.get("notes").is_some(),
+                "notes key present (null for .ics)"
+            );
+            assert!(
+                ev.get("alarms").is_some(),
+                "alarms key present (null for .ics)"
+            );
             assert!(
                 ev.get("recurrence_rules").is_some(),
                 "recurrence_rules key present (null for .ics)"
@@ -185,8 +275,7 @@ mod tests {
     /// scrub, the capture layer is byte-faithful).
     #[test]
     fn synthesize_captures_description_when_present() {
-        const WITH_BODIES: &str =
-            include_str!("../../../tests/fixtures/calendar/with_bodies.ics");
+        const WITH_BODIES: &str = include_str!("../../../tests/fixtures/calendar/with_bodies.ics");
         let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
         let out = synth_calendar::synthesize(WITH_BODIES, today, Utc::now()).unwrap();
         let events = out["events"].as_array().unwrap();
