@@ -714,26 +714,26 @@ describe("StepAsk.svelte", () => {
       validate_remote_calendar_url("webcal://example.com/calendar.ics"),
     ).toBe(true);
     // Must reject:
-    expect(validate_remote_calendar_url("http://example.com/cal.ics")).toBe(
-      false,
+    expect(
+      validate_remote_calendar_url("http://example.com/cal.ics"),
       "cleartext http is rejected (privacy)",
-    );
-    expect(validate_remote_calendar_url("file:///etc/passwd")).toBe(
-      false,
+    ).toBe(false);
+    expect(
+      validate_remote_calendar_url("file:///etc/passwd"),
       "file:// is rejected (local fs read prevention)",
-    );
-    expect(validate_remote_calendar_url("mailto:foo@example.com")).toBe(
-      false,
+    ).toBe(false);
+    expect(
+      validate_remote_calendar_url("mailto:foo@example.com"),
       "mailto: is rejected (handler prevention)",
-    );
-    expect(validate_remote_calendar_url("not a url")).toBe(
-      false,
+    ).toBe(false);
+    expect(
+      validate_remote_calendar_url("not a url"),
       "garbage is rejected",
-    );
-    expect(validate_remote_calendar_url("")).toBe(
-      false,
+    ).toBe(false);
+    expect(
+      validate_remote_calendar_url(""),
       "empty string is rejected",
-    );
+    ).toBe(false);
   });
 
   it("(t) calendar URL row: Edit-mode textarea + valid URL round-trips through build_edited_answers", async () => {
