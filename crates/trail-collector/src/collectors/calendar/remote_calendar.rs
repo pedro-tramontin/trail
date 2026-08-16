@@ -43,7 +43,12 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Local, Utc};
-use reqwest::Client;
+// `reqwest::blocking::Client` (vs the async `reqwest::Client`) is
+// intentional — the collector binary is sync (no tokio runtime;
+// see `crates/trail-collector/src/main.rs::main`). The `blocking`
+// feature is enabled on the workspace `reqwest` pin in the root
+// `Cargo.toml`; the async API used by `src-tauri` is unaffected.
+use reqwest::blocking::Client;
 use serde_json::Value;
 
 use super::super::synth_calendar;
@@ -256,7 +261,7 @@ fn rewrite_webcal(raw_url: &str) -> String {
 mod tests {
     use super::*;
     use crate::collectors::browser_history::BrowserHistoryInput;
-    use crate::collectors::github::GithubLaptopConfig as GhCfg;
+    use crate::collectors::GithubLaptopConfig as GhCfg;
     use crate::collectors::{CalendarSourceChoice, Source};
     use chrono::NaiveDate;
     use std::path::PathBuf;

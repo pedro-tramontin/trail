@@ -174,6 +174,9 @@ mod tests {
             raw_root: tmp.join("raw"),
             schema_path: schema,
             browser_history: Default::default(),
+            // No remote `.ics` URLs in the unit-test laptop config;
+            // the calendar collector is not exercised here.
+            remote_calendar_urls: vec![],
         }
     }
 

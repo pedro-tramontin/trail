@@ -338,6 +338,9 @@ mod tests {
             raw_root: PathBuf::from("/tmp/raw"),
             schema_path: PathBuf::from("/tmp/schema.json"),
             browser_history: Default::default(),
+            // The claude-sessions collector doesn't read remote
+            // calendar URLs; the field is empty here.
+            remote_calendar_urls: vec![],
         };
         let raw = run(&cfg).expect("run with empty paths must succeed");
         assert_eq!(raw.source, "claude_sessions");
