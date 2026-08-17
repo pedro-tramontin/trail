@@ -21,6 +21,7 @@
 pub mod answers;
 pub mod baseline;
 pub mod config_writer;
+pub mod event_kit;
 pub mod llm;
 pub mod scan;
 

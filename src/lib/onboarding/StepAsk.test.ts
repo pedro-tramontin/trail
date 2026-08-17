@@ -614,12 +614,28 @@ describe("StepAsk.svelte", () => {
       "open-calendar-permission-settings",
     );
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toMatch(/Open Calendar Settings/);
+    // §X-4b — the EventKit row now has TWO buttons:
+    // the primary "Grant calendar permission" button
+    // (which triggers the TCC dialog) and the
+    // secondary "Open System Settings" button (the
+    // deep link, kept as a manual fallback). The
+    // original test only checked the deep-link
+    // button text, which was "Open Calendar Settings"
+    // — that wording is now "Open System Settings" to
+    // match the post-grant recovery copy.
+    expect(btn.textContent).toMatch(/Open System Settings/);
     // The UnknownDE labeled fallback must NOT be rendered
     // when the URL is known.
     expect(
       screen.queryByTestId("calendar-permission-unknown-de"),
     ).toBeNull();
+    // §X-4b — the primary Grant button must also render
+    // (the wizard surfaces it on the macOS + Windows arms
+    // in the pre-grant state). It calls
+    // `request_calendar_permission_cmd` on click.
+    const grant = await screen.findByTestId("grant-calendar-permission");
+    expect(grant).toBeTruthy();
+    expect(grant.textContent).toMatch(/Grant calendar permission/);
   });
 
   it("(q) calendar row event_kit + Windows: per-OS deep-link button renders with ms-settings URL", async () => {
@@ -642,13 +658,18 @@ describe("StepAsk.svelte", () => {
     // `open-calendar-permission-settings` testid is the
     // single source of truth. We do a lengthier text
     // assertion here so the message rendered to the user
-    // is the per-OS "Open Calendar Settings" wording, not
-    // any other "Open ... Settings" label.
-    expect(btn.textContent).toMatch(/Open Calendar Settings/);
+    // is the per-OS "Open System Settings" wording
+    // (post-§X-4b the wording is unified across macOS +
+    // Windows; the URL itself is the per-OS contract).
+    expect(btn.textContent).toMatch(/Open System Settings/);
     // The UnknownDE labeled fallback must NOT be rendered.
     expect(
       screen.queryByTestId("calendar-permission-unknown-de"),
     ).toBeNull();
+    // §X-4b — same as the macOS case: the primary Grant
+    // button must also render on Windows.
+    const grant = await screen.findByTestId("grant-calendar-permission");
+    expect(grant).toBeTruthy();
   });
 
   it("(r) calendar row event_kit + Linux/UnknownDE: labeled 'open manually' fallback renders, no button", async () => {
@@ -803,5 +824,136 @@ describe("StepAsk.svelte", () => {
       "https://calendar.google.com/calendar/ical/foo/public/basic.ics",
       "webcal://example.com/calendar.ics",
     ]);
+  });
+
+  // §X-4b — EventKit grant flow. The wizard's primary
+  // action is now the "Grant calendar permission" button
+  // (it actually triggers the TCC dialog via
+  // `request_calendar_permission_cmd`). The deep link
+  // is the secondary recovery path. Three cases:
+  //   1. Click Grant → command resolves "fullaccess" →
+  //      success message renders + Grant button hides.
+  //   2. Click Grant → command resolves "denied" →
+  //      denial copy renders + Grant button stays
+  //      visible for retry.
+  //   3. Click Grant → command rejects → pre-grant
+  //      state preserved + deep link button stays
+  //      visible as manual fallback.
+
+  it("(s) calendar row event_kit + macOS: Grant button click → fullaccess → success message + deep link as recovery", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.resolve(
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar",
+        );
+      if (cmd === "request_calendar_permission_cmd")
+        return Promise.resolve("fullaccess");
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    await new Promise((r) => setTimeout(r, 0));
+    // Pre-grant: the Grant button renders.
+    const grant = await screen.findByTestId("grant-calendar-permission");
+    expect(grant).toBeTruthy();
+    // Click it.
+    await fireEvent.click(grant);
+    // Post-grant: success message renders, Grant button
+    // hides, the deep link button stays visible as the
+    // post-grant recovery path (renamed to "Open System
+    // Settings").
+    const granted = await screen.findByTestId("calendar-permission-granted");
+    expect(granted).toBeTruthy();
+    expect(granted.textContent).toMatch(/Calendar access granted/);
+    // The Grant button must NOT render after success.
+    expect(screen.queryByTestId("grant-calendar-permission")).toBeNull();
+    // The deep link button stays — its label is now
+    // "Open System Settings" (the post-grant recovery
+    // wording, not the dead "Open Calendar Settings").
+    const deep = await screen.findByTestId(
+      "open-calendar-permission-settings",
+    );
+    expect(deep.textContent).toMatch(/Open System Settings/);
+  });
+
+  it("(t) calendar row event_kit + macOS: Grant button click → denied → denial copy + Grant stays", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.resolve(
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar",
+        );
+      if (cmd === "request_calendar_permission_cmd")
+        return Promise.resolve("denied");
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    await new Promise((r) => setTimeout(r, 0));
+    const grant = await screen.findByTestId("grant-calendar-permission");
+    await fireEvent.click(grant);
+    // Post-deny: the denial copy renders, the Grant
+    // button stays visible so the user can retry after
+    // flipping the OS-level toggle.
+    const denied = await screen.findByTestId("calendar-permission-denied");
+    expect(denied).toBeTruthy();
+    expect(denied.textContent).toMatch(/Permission was denied/);
+    // The Grant button stays (the user can retry after
+    // they re-enable Calendars in System Settings).
+    const grantAfter = screen.queryByTestId("grant-calendar-permission");
+    expect(grantAfter).toBeTruthy();
+    // The deep link button also stays (it's the
+    // recovery path: "open System Settings, fix the
+    // toggle, come back, click Grant again").
+    expect(
+      screen.queryByTestId("open-calendar-permission-settings"),
+    ).toBeTruthy();
+    // The success message must NOT render on deny.
+    expect(
+      screen.queryByTestId("calendar-permission-granted"),
+    ).toBeNull();
+  });
+
+  it("(u) calendar row event_kit + macOS: Grant button click → IPC rejects → pre-grant state preserved", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "ask_onboarding_cmd") return Promise.resolve(MOCK_ANSWERS);
+      if (cmd === "calendar_permission_deep_link_url")
+        return Promise.resolve(
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar",
+        );
+      if (cmd === "request_calendar_permission_cmd")
+        return Promise.reject(new Error("IPC bridge failed"));
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepAsk, {
+      props: { scan: MOCK_SCAN_REPORT, initial_answers: null, state: fresh_state(), on_next: () => {} },
+    });
+    const toggle = await screen.findByTestId("ask-toggle-edit");
+    await fireEvent.click(toggle);
+    await new Promise((r) => setTimeout(r, 0));
+    const grant = await screen.findByTestId("grant-calendar-permission");
+    await fireEvent.click(grant);
+    // After a rejection, the Grant button must stay
+    // visible (the user can retry), the success/denial
+    // messages must NOT render, and the deep link
+    // button must stay visible as a manual fallback.
+    const grantAfter = screen.queryByTestId("grant-calendar-permission");
+    expect(grantAfter).toBeTruthy();
+    expect(
+      screen.queryByTestId("calendar-permission-granted"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("calendar-permission-denied"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("open-calendar-permission-settings"),
+    ).toBeTruthy();
   });
 });
