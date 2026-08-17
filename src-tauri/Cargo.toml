@@ -159,7 +159,7 @@ whisper-rs = { workspace = true, features = ["metal"] }
 # we need for compositor-specific hotkey backends) covers the
 # surface the dispatcher will dispatch to.
 [target.'cfg(target_os = "linux")'.dependencies]
-wayland-client = "0.31"
+wayland-client = "0.31.15"
 wayland-protocols = { version = "0.31", features = ["client", "staging"] }
 zbus = { version = "4.4.0", default-features = false, features = ["tokio"] }
 # 2026-08-13 (D2) — whisper-rs on Linux enables no GPU features
