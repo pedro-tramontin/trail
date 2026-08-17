@@ -100,7 +100,7 @@ hound = "3.5.1"
 dirs = "6"
 # Phase 5 §5.2 — cpal microphone capture (macOS) + cross-platform rubato
 # resampler to 16 kHz mono for whisper.
-cpal = "0.18.1"
+cpal = "0.18.2"
 rubato = "0.16.2"
 # Phase 5 §5.3 — global-hotkey for the push-to-talk shortcut. Gated to
 # macOS in src-tauri/Cargo.toml (Linux builds don't need it; the parser
