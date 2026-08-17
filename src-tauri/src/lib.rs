@@ -768,6 +768,15 @@ pub fn run() {
             // `commands::calendar_permission_deep_link_url_for`
             // for the per-OS dispatch table.
             commands::calendar_permission_deep_link_url,
+            // Trigger the macOS EventKit TCC dialog so the
+            // Calendars entry appears in System Settings →
+            // Privacy & Security. On non-macOS this is a
+            // no-op returning "fullaccess" (the calendar
+            // collector uses .ics files / WinRT on those
+            // platforms). See
+            // `commands::request_calendar_permission_cmd` +
+            // `onboarding::event_kit::request_calendar_permission`.
+            commands::request_calendar_permission_cmd,
             list_collectors,
             run_collector_now,
             set_collector_enabled,

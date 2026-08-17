@@ -754,6 +754,45 @@ pub fn calendar_permission_deep_link_url(de: Option<String>) -> Result<String, S
     calendar_permission_deep_link_url_for(target, de.as_deref()).map_err(|e| e.to_string())
 }
 
+/// Tauri command: trigger the macOS EventKit TCC dialog so the
+/// Calendars entry appears in System Settings → Privacy & Security.
+///
+/// On a fresh install the TCC state is `.notDetermined` and the
+/// Calendars entry doesn't exist in the System Settings sidebar
+/// yet (Apple only shows an app in the Privacy list after the
+/// user has been prompted at least once). The `?Privacy_Calendar`
+/// deep link `calendar_permission_deep_link_url` returns therefore
+/// opens System Settings to a pane that has no Calendars row to
+/// click — making the deep link useless as a first-time fix.
+///
+/// The fix: actually call `EKEventStore.requestFullAccessToEvents`
+/// (or `.requestAccessToEvents` on pre-Sonoma) the first time the
+/// wizard surfaces the EventKit hint. The TCC dialog appears, the
+/// user accepts, the entry then exists in System Settings, and the
+/// deep link is useful as the *post-grant* path (re-visit Settings
+/// to revoke or check which calendars are exposed).
+///
+/// Returns the post-prompt state as a lowercase string:
+/// - `"fullaccess"` — Sonoma+ `EKAuthorizationStatusFullAccess` (and
+///   legacy `Authorized`)
+/// - `"undetermined"` — `EKAuthorizationStatusNotDetermined` (the
+///   dialog was dismissed without a choice; the wizard will keep
+///   showing the Grant button)
+/// - `"denied"` — `Denied` / `Restricted` / `WriteOnly` (the user
+///   refused, or the OS-level "Calendars" toggle is off; the wizard
+///   should render the deep link as the recovery path)
+///
+/// On non-macOS platforms the EventKit probe doesn't exist and
+/// there's no OS-level permission to gate. The Linux/Windows branch
+/// returns `"fullaccess"` so the wizard's "looks good" path is
+/// reachable — the calendar collector on those platforms uses the
+/// `.ics` file picker (or the Windows `WinRT` calendar API), not
+/// EventKit.
+#[tauri::command]
+pub fn request_calendar_permission_cmd() -> String {
+    crate::onboarding::event_kit::request_calendar_permission().as_str().to_string()
+}
+
 /// Resolve the `~/.trail/` root directory from the loaded config. The
 /// config itself doesn't store its own location (we only ever persist
 /// the raw/drafts subdirs), so we look next to the config file —

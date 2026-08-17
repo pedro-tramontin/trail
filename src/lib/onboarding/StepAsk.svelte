@@ -46,6 +46,40 @@
   let calendar_permission_url: string | "unknown_de" | undefined =
     $state(undefined);
 
+  /** §X-4b — EventKit post-grant state. Tracks the result of
+   *  the most recent `request_calendar_permission_cmd`
+   *  invocation. The deep link alone is useless on a fresh
+   *  install (Apple's
+   *  `x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar`
+   *  opens System Settings → Privacy & Security but the
+   *  Calendars entry only appears after the user has been
+   *  prompted at least once). The wizard's EventKit hint
+   *  therefore renders a primary "Grant permission" button
+   *  that triggers the TCC dialog, then demotes the deep
+   *  link to the post-grant recovery role.
+   *
+   *  The four states are:
+   *   - `undefined` — IPC hasn't run yet; render the Grant
+   *     button (primary) and the deep link (secondary).
+   *   - `"fullaccess"` — TCC grant succeeded; render the
+   *     success message + the deep link as the recovery
+   *     path (re-visit System Settings to revoke or check
+   *     which calendars are exposed).
+   *   - `"undetermined"` — TCC dialog was dismissed
+   *     without a choice; keep the Grant button visible
+   *     so the user can re-trigger.
+   *   - `"denied"` — user refused or OS-level "Calendars"
+   *     toggle is off; render the deep link as the
+   *     recovery path (the Grant button is a no-op now
+   *     but kept for retry).
+   */
+  let calendar_permission_state:
+    | "fullaccess"
+    | "undetermined"
+    | "denied"
+    | undefined = $state(undefined);
+  let calendar_permission_in_flight: boolean = $state(false);
+
   onMount(() => {
     invoke<string>("check_mic_permission_cmd")
       .then((s) => {
@@ -564,6 +598,60 @@
     document.body.removeChild(a);
   }
 
+  /**
+   * §X-4b — trigger the macOS EventKit TCC dialog via
+   * `request_calendar_permission_cmd`. The Rust side
+   * calls `EKEventStore.requestFullAccessToEventsWithCompletion:`
+   * on macOS, blocks the wizard IPC thread for up to 60s
+   * while the OS modal dialog is up, and returns the
+   * post-prompt state as a lowercase string. The IPC
+   * contract is:
+   *   - `"fullaccess"` — grant succeeded
+   *   - `"undetermined"` — dialog dismissed without a choice
+   *   - `"denied"` — user refused, or the OS-level
+   *     "Calendars" toggle is off
+   *
+   * On non-macOS the Rust stub returns `"fullaccess"`
+   * immediately (no OS-level EventKit TCC to gate on
+   * those platforms). The wizard therefore sees a
+   * successful grant on Linux/Windows and the
+   * "Calendar access granted ✓" copy renders — which is
+   * the right UX (the calendar collector uses the .ics
+   * file picker / WinRT on those platforms, and there's
+   * no OS dialog to surface).
+   *
+   * The button is disabled while the IPC is in flight
+   * (`calendar_permission_in_flight`) so a double-click
+   * doesn't spawn two parallel TCC dialogs (the OS only
+   * shows one at a time, but the second invocation
+   * returns the cached answer immediately, which would
+   * make the UI look confused).
+   */
+  async function grant_calendar_permission(): Promise<void> {
+    if (calendar_permission_in_flight) return;
+    calendar_permission_in_flight = true;
+    try {
+      const result = await invoke<string>("request_calendar_permission_cmd");
+      if (
+        result === "fullaccess" ||
+        result === "undetermined" ||
+        result === "denied"
+      ) {
+        calendar_permission_state = result;
+      }
+      // Unknown string from the Rust side — keep the
+      // previous state and let the next click retry.
+    } catch (err) {
+      // Tauri IPC failure (e.g. the command threw inside
+      // the Tauri runtime). Stay in the pre-grant state
+      // so the user can retry — the deep link button
+      // below stays visible as a manual fallback.
+      console.error("request_calendar_permission_cmd failed:", err);
+    } finally {
+      calendar_permission_in_flight = false;
+    }
+  }
+
   $effect(() => {
     void run_ask();
   });
@@ -713,27 +801,76 @@
                   Calendar manually.
                 {:else}
                   <!--
-                    The per-OS URL is known. The button opens
-                    it via a hidden anchor (same pattern as
-                    the mic permission denied callout).
-                    `tauri-plugin-opener` isn't wired in this
-                    build; the per-OS schemes
+                    The per-OS URL is known. Render the
+                    EventKit grant flow:
+                      - If `calendar_permission_state` is
+                        `"fullaccess"`, show the success
+                        message and the deep link as the
+                        post-grant recovery path.
+                      - Otherwise, show a primary "Grant
+                        permission" button that triggers
+                        the TCC dialog via
+                        `request_calendar_permission_cmd`.
+                        The deep link is rendered as a
+                        secondary control (the user can
+                        also open System Settings directly
+                        via `Open System Settings` if
+                        they want to re-trigger manually).
+
+                    `tauri-plugin-opener` isn't wired in
+                    this build; the per-OS schemes
                     (`x-apple.systempreferences:…`,
                     `gnome-control-center …`,
                     `ms-settings:…`) all work via a plain
                     anchor click in the system browser
                     handler.
                   -->
-                  EventKit needs your permission the first time
-                  you start a capture.
-                  <button
-                    type="button"
-                    class="open-permission-settings"
-                    data-testid="open-calendar-permission-settings"
-                    onclick={open_calendar_permission_settings}
-                  >
-                    Open Calendar Settings
-                  </button>
+                  {#if calendar_permission_state === "fullaccess"}
+                    <span
+                      class="permission-granted"
+                      data-testid="calendar-permission-granted"
+                    >
+                      Calendar access granted ✓
+                    </span>
+                    <button
+                      type="button"
+                      class="open-permission-settings secondary"
+                      data-testid="open-calendar-permission-settings"
+                      onclick={open_calendar_permission_settings}
+                    >
+                      Open System Settings
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      class="grant-permission primary"
+                      data-testid="grant-calendar-permission"
+                      disabled={calendar_permission_in_flight}
+                      onclick={grant_calendar_permission}
+                    >
+                      {calendar_permission_in_flight
+                        ? "Requesting…"
+                        : "Grant calendar permission"}
+                    </button>
+                    {#if calendar_permission_state === "denied"}
+                      <span
+                        class="permission-denied"
+                        data-testid="calendar-permission-denied"
+                      >
+                        Permission was denied. Open System
+                        Settings and re-enable Trail's
+                        Calendars access, then try again.
+                      </span>
+                    {/if}
+                    <button
+                      type="button"
+                      class="open-permission-settings secondary"
+                      data-testid="open-calendar-permission-settings"
+                      onclick={open_calendar_permission_settings}
+                    >
+                      Open System Settings
+                    </button>
+                  {/if}
                 {/if}
               {:else}
                 Provide an .ics export from Calendar.app: File → Export →
@@ -1281,6 +1418,57 @@
   .open-permission-settings:hover {
     background: #c62828;
     color: #fff;
+  }
+  .open-permission-settings.secondary {
+    margin-left: 0.5rem;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid #6c757d;
+    background: #fff;
+    color: #6c757d;
+  }
+  .open-permission-settings.secondary:hover {
+    background: #6c757d;
+    color: #fff;
+  }
+  /**
+   * §X-4b — primary "Grant permission" button. Green
+   * background makes it visually distinct from the
+   * red `.open-permission-settings` (which is a
+   * recovery action). The button is the primary
+   * action when the TCC state is `.notDetermined`
+   * (i.e. the wizard surfaces it on first run).
+   */
+  .grant-permission.primary {
+    margin-left: 0.5rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid #2e7d32;
+    background: #2e7d32;
+    color: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .grant-permission.primary:hover {
+    background: #1b5e20;
+    border-color: #1b5e20;
+  }
+  .grant-permission.primary:disabled {
+    background: #9e9e9e;
+    border-color: #9e9e9e;
+    cursor: not-allowed;
+  }
+  .permission-granted {
+    margin-left: 0.5rem;
+    color: #2e7d32;
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .permission-denied {
+    display: block;
+    margin-top: 0.4rem;
+    color: #c62828;
+    font-size: 0.85rem;
   }
   /**
    * Review-time row uses a flex layout in its value slot so

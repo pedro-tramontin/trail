@@ -1382,9 +1382,12 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 },
                                 Some(
                                     "EventKit permission not yet requested; \
-                                     run the wizard to enable Calendar \
-                                     capture (System Settings → Privacy \
-                                     → Calendars)"
+                                     click 'Grant permission' in the wizard \
+                                     to trigger the TCC dialog. After granting, \
+                                     the Calendars entry appears in System \
+                                     Settings → Privacy & Security, and the \
+                                     'Open System Settings' button becomes useful \
+                                     as the post-grant recovery path."
                                         .to_string(),
                                 ),
                             );
