@@ -123,7 +123,7 @@ uuid = { version = "1.24.1", features = ["v4"] }
 # changes around `params_from_iter` and the `Value` enum
 # separation; the workspace's other crates still target 0.32-era
 # APIs so we pin at the more conservative version.
-rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 # Phase 5 §5.7 — macOS mic permission detection via `objc2` (the modern
 # safe wrapper around Apple's Objective-C runtime). The trio of
 # `objc2` + `objc2-foundation` + `block2` is the standard macOS bindings
