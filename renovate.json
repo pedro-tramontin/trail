@@ -165,6 +165,18 @@
       "description": "windows-core is pinned to 0.61.2 in Cargo.lock. cpal 0.18.1's #[windows::core::implement] macros were generated against the 0.61.x Interface trait; cargo's resolver picks 0.62.x for unrelated deps, the cpal macros fail to satisfy the new trait, and the Windows build breaks. Do not propose any windows-core update (major, minor, or patch) — the precise-pin is maintained by a CI guard, not by the workspace Cargo.toml. To re-enable updates, see the comment block in workspace Cargo.toml and verify cpal's upstream release notes indicate the macros were regenerated against the new Interface trait.",
       "matchPackageNames": ["windows-core"],
       "enabled": false
+    },
+    {
+      "description": "jsonschema 0.x is a 0-major: every 0.x bump is a breaking change. Our validate.rs uses the 0.18 API (jsonschema::JSONSchema::compile, draft202012 feature). The 0.49 rewrite changed the init flow + ValidationError layout; draft-linux/macos/windows + rust-clippy all fail on the proposed bump (PR #248, 2026-08-17). Drive the major manually when the validate module is ready to migrate.",
+      "matchPackageNames": ["jsonschema"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "enabled": false
+    },
+    {
+      "description": "cpal patches are deferred until the draft-build.yml windows-core precise-pin step is hardened against multi-version transitive ambiguity. cpal 0.18.2 (PR #242, 2026-08-17) brought in a second windows-core transitive, breaking the bare 'cargo update -p windows-core --precise 0.61.2' invocation. The fix is to use the fully-qualified 'windows-core@0.61.2' (cargo's own suggested disambiguation) and/or to update the precise-pin to match the cpal release notes. Re-enable cpal patches once draft-build.yml ships the disambiguation fix.",
+      "matchPackageNames": ["cpal"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "enabled": false
     }
   ]
 }
