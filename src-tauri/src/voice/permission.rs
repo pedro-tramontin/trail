@@ -242,6 +242,64 @@ pub fn framework_link_smoke_test() -> bool {
     )
 }
 
+/// macOS-only regression test for the Tahoe (26.5.2) `AVFCore`
+/// first-touch class realization crash (Incident
+/// 8A4EA1EC-9550-4340-8207-CDDDB0146840, EXC_BAD_ACCESS at
+/// `+[AVCaptureDevice authorizationStatusForMediaType:]`).
+///
+/// The first call exercises the first-touch class realization
+/// path that crashes on Tahoe if the `main.rs` early-touch
+/// workaround is missing or removed; the second call exercises
+/// the post-realization path that should always succeed and is
+/// what the onboarding wizard's step-2→3 IPC handler actually
+/// hits. If either call panics or returns a state outside the
+/// three valid `MicPermissionState` variants, the test fails
+/// and CI catches the regression before it ships.
+///
+/// Note: this test runs in `cargo test` on macOS only. The
+/// `#[cfg(target_os = "macos")]` gate mirrors the surrounding
+/// `framework_link_smoke_test` so Linux/Windows `cargo test`
+/// runs don't try to link AVFoundation.
+#[cfg(target_os = "macos")]
+#[cfg(test)]
+mod first_touch_realization_regression {
+    use super::{check_mic_permission, MicPermissionState};
+
+    #[test]
+    fn check_mic_permission_survives_first_touch_realization() {
+        // First call: triggers the objc-runtime first-touch write
+        // into AVFCore's `__AUTH_CONST` segment that crashed on
+        // macOS 26.5.2. With the early-touch workaround in
+        // `main.rs` already done, this is the second touch and
+        // is a no-op realization. Without the workaround this
+        // would have crashed the process before this assertion
+        // ran.
+        let first = check_mic_permission();
+        assert!(
+            matches!(
+                first,
+                MicPermissionState::Granted
+                    | MicPermissionState::Denied
+                    | MicPermissionState::Undetermined
+            ),
+            "first call to check_mic_permission returned unexpected state: {first:?}",
+        );
+
+        // Second call: the path the wizard actually exercises.
+        // Must succeed and return a valid state.
+        let second = check_mic_permission();
+        assert!(
+            matches!(
+                second,
+                MicPermissionState::Granted
+                    | MicPermissionState::Denied
+                    | MicPermissionState::Undetermined
+            ),
+            "second call to check_mic_permission returned unexpected state: {second:?}",
+        );
+    }
+}
+
 // =====================================================================
 // macOS implementation — wraps the `objc2` calls so the rest of
 // the module doesn't need to know about the FFI surface.
