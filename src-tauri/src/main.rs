@@ -39,50 +39,5 @@ fn main() {
         // Stash the demo flag so `lib::run()` can pick it up.
         std::env::set_var("TRAIL_DEMO", "1");
     }
-
-    // Workaround for a Tahoe (macOS 26.5.2) `AVFCore` regression that
-    // crashed `trail` (process PID 13043, Incident
-    // 8A4EA1EC-9550-4340-8207-CDDDB0146840) with `EXC_BAD_ACCESS
-    // (SIGBUS)` at `+[AVCaptureDevice authorizationStatusForMediaType:]`
-    // when the Svelte onboarding wizard transitioned from step 2 to
-    // step 3 and invoked the `check_mic_permission` Tauri command.
-    //
-    // Root cause: on first touch, the ObjC runtime writes class
-    // metadata for `AVCaptureDevice_Tundra` into the AVFCore
-    // `__AUTH_CONST` segment; on Tahoe that page is mapped
-    // `r--/rw- SM=COW` but the kernel refuses the write with
-    // `KERN_PROTECTION_FAILURE`. Doing the first-touch here on the
-    // main thread, before the Tauri runtime / webview is up, lets
-    // the objc runtime pick a writable page for the metadata once at
-    // startup; subsequent calls from the `check_mic_permission` IPC
-    // command are no-op realizations and never touch the
-    // write-protected page again.
-    //
-    // Once Apple ships an `AVFCore` update that moves the affected
-    // metadata out of `__AUTH_CONST` (or Tahoe's COW handling is
-    // fixed), this block can be deleted — `check_mic_permission`'s
-    // first call from the IPC handler will succeed without it.
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::{class, msg_send};
-        extern "C" {
-            #[link_name = "AVMediaTypeAudio"]
-            static AVMediaTypeAudio: objc2::runtime::AnyObject;
-        }
-        // SAFETY: `class!(AVCaptureDevice)` returns the metaclass
-        // registered by AVFoundation, `AVMediaTypeAudio` is a
-        // read-only NSString constant exported by the framework, and
-        // `authorizationStatusForMediaType:` is a pure (no side
-        // effects beyond a TCC read) class method. The whole point
-        // of this call is to trigger the first-touch realization so
-        // any subsequent call from the IPC layer is a no-op.
-        let _: isize = unsafe {
-            msg_send![
-                class!(AVCaptureDevice),
-                authorizationStatusForMediaType: &AVMediaTypeAudio
-            ]
-        };
-    }
-
     trail_lib::run()
 }
