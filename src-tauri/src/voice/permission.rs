@@ -324,12 +324,153 @@ mod macos {
     //! (Apple's `AVAuthorizationStatus` enum uses these
     //! historically-fixed integer values; they aren't going to
     //! change without a major SDK rev.)
+    //!
+    //! ## Tahoe (macOS 26.5.x) workaround
+    //!
+    //! Trail v0.5.0 on macOS 26.5.2 (Tahoe) crashed twice with
+    //! `EXC_BAD_ACCESS (SIGBUS) / KERN_PROTECTION_FAILURE` at
+    //! `+[AVCaptureDevice_Tundra authorizationStatusForMediaType:]`
+    //! (Incidents 8A4EA1EC-... and 84F8876F-...). The faulting
+    //! register dump in both crashes identified the class being
+    //! realized as `OBJC_CLASS_$___NSCFString` (NSString metaclass)
+    //! and `__CFConstantStringClassReference`, not AVCaptureDevice;
+    //! the faulting store instruction just happened to land inside
+    //! AVFCore's `__AUTH_CONST` segment because of how the constant
+    //! string class metadata is relocated.
+    //!
+    //! Investigation ruled out the `objc2` binding code as the
+    //! cause: the same fault fires through
+    //! `_objc_msgSend_uncached` (libobjc fast path, used by
+    //! AVFCapture internally) and through `objc2`'s
+    //! `MessageReceiver::send_message` (the macro-generated
+    //! standard path). Both code paths trigger the same
+    //! first-touch `__NSCFString` class realization write that
+    //! Tahoe's hardened `__AUTH_CONST` mapping rejects.
+    //!
+    //! Routing around the bug is therefore not possible at the
+    //! Rust binding layer — any call into AVFoundation on the
+    //! main thread of a Tahoe 26.5.x process will eventually
+    //! touch the offending class metadata. The only safe
+    //! behaviour is to short-circuit the macOS permission call
+    //! entirely on affected OS versions and let the frontend
+    //! surface the existing "Undetermined — user may need to
+    //! grant permission manually" UX path that already handles
+    //! Linux/Windows daemons-not-running cases.
+    //!
+    //! TODO(raid-2026-XX): remove this short-circuit when Apple
+    //! ships an `AVFCore` / dyld update that fixes the
+    //! `__NSCFString` first-touch write on Tahoe 26.5.x. Until
+    //! then, users on Tahoe will see the wizard's mic-check
+    //! panel skip preflight and rely on the manual
+    //! System Settings → Privacy & Security → Microphone flow
+    //! that the existing `mic_permission_deep_link_url()`
+    //! already powers.
 
     use super::MicPermissionState;
     use block2::RcBlock;
     use objc2::{class, msg_send};
     use parking_lot::Mutex;
+    use std::ffi::{c_char, c_void};
+    use std::os::raw::c_int;
     use std::sync::Arc;
+
+    /// First Tahoe version affected by the
+    /// `__NSCFString`-realization `KERN_PROTECTION_FAILURE`
+    /// bug. The crash was first observed on 26.5.2 and may
+    /// also affect earlier 26.5.x point releases; the safe
+    /// play is to short-circuit the entire 26.5.x range.
+    ///
+    /// `MAJOR_MINOR_PATCH` parsed from `kern.osproductversion`
+    /// (the marketing version string `sw_vers -productVersion`
+    /// reports). Anything with major == 26 AND minor >= 5
+    /// triggers the short-circuit.
+    const TAHOE_AFFECTED_MAJOR: u32 = 26;
+    const TAHOE_AFFECTED_MINOR_MIN: u32 = 5;
+
+    // libsystem_c `sysctlbyname` — read a kernel/sysctl value
+    // by name without juggling `sysctl`'s MIB-array calling
+    // convention. `libsystem_c` is linked into every macOS
+    // process by default; we don't need to `dlopen` it.
+    // (Plain `//` because rustdoc does not emit docs for
+    // `extern "C"` blocks and `-D warnings` rejects the
+    // stray `///`.)
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *const c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+
+    /// Query the marketing macOS version (e.g. `"26.5.2"`)
+    /// via `sysctlbyname("kern.osproductversion")`. Returns
+    /// `None` if the sysctl call fails or the string isn't
+    /// NUL-terminated as expected.
+    fn macos_product_version() -> Option<String> {
+        let mut buf = [0u8; 32];
+        let mut len = buf.len();
+        let name = b"kern.osproductversion\0";
+        // SAFETY: `name` is a valid NUL-terminated C string,
+        // `buf` is a writable buffer of `buf.len()` bytes, and
+        // we pass `newp = NULL` because we only want to read.
+        let rc = unsafe {
+            sysctlbyname(
+                name.as_ptr() as *const c_char,
+                buf.as_mut_ptr() as *mut c_void,
+                &mut len,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if rc != 0 || len == 0 || len > buf.len() {
+            return None;
+        }
+        // `sysctlbyname` does not NUL-terminate the buffer;
+        // find the first NUL (it should be within `len`).
+        let slice = &buf[..len];
+        let nul = slice.iter().position(|&b| b == 0).unwrap_or(len);
+        let s = std::str::from_utf8(&slice[..nul]).ok()?.trim();
+        if s.is_empty() {
+            return None;
+        }
+        Some(s.to_string())
+    }
+
+    /// Parse the first two numeric components of a macOS
+    /// marketing version string (e.g. `"26.5.2"` →
+    /// `Some((26, 5))`). Returns `None` if either component
+    /// is missing or non-numeric.
+    fn parse_major_minor(s: &str) -> Option<(u32, u32)> {
+        let mut parts = s.split('.');
+        let major: u32 = parts.next()?.parse().ok()?;
+        let minor: u32 = parts.next()?.parse().ok()?;
+        Some((major, minor))
+    }
+
+    /// True if the host is running a Tahoe (macOS 26.x)
+    /// version at or after 26.5.0 — i.e. affected by the
+    /// `__NSCFString`-realization `KERN_PROTECTION_FAILURE`
+    /// bug. False on older macOS releases and on any non-Tahoe
+    /// version we don't recognise.
+    ///
+    /// Detection is best-effort: a `None` from either
+    /// `macos_product_version` or `parse_major_minor` returns
+    /// `false`, which means we fall through to the regular
+    /// AVFoundation call. If the version lookup itself
+    /// somehow crashes, we'd rather crash on the lookup than
+    /// silently skip a real permission check — but `sysctl`
+    /// doesn't touch the ObjC runtime, so the lookup is safe.
+    fn is_tahoe_affected() -> bool {
+        let Some(version) = macos_product_version() else {
+            return false;
+        };
+        let Some((major, minor)) = parse_major_minor(&version) else {
+            return false;
+        };
+        major == TAHOE_AFFECTED_MAJOR && minor >= TAHOE_AFFECTED_MINOR_MIN
+    }
 
     /// Map the raw integer status to our enum.
     fn status_from_raw(raw: isize) -> MicPermissionState {
@@ -363,6 +504,21 @@ mod macos {
     }
 
     pub fn authorization_status() -> MicPermissionState {
+        if is_tahoe_affected() {
+            // Tahoe 26.5.x: skip the AVFoundation call entirely
+            // (it would crash with `KERN_PROTECTION_FAILURE`
+            // during `__NSCFString` first-touch class
+            // realization). Frontend treats `Undetermined` as
+            // "ask on first capture, no deep-link button";
+            // the existing `mic_permission_deep_link_url()`
+            // still powers the manual-grant path if the user
+            // needs to open System Settings.
+            tracing::warn!(
+                "skipping AVCaptureDevice mic-permission check on Tahoe 26.5.x \
+                 (FB-to-be-filed: __NSCFString first-touch KERN_PROTECTION_FAILURE)"
+            );
+            return MicPermissionState::Undetermined;
+        }
         // SAFETY: `class!` returns a non-null
         // `&'static AnyClass` for any class registered with
         // the ObjC runtime. AVCaptureDevice is registered on
@@ -378,6 +534,13 @@ mod macos {
     }
 
     pub fn request_access() -> MicPermissionState {
+        if is_tahoe_affected() {
+            tracing::warn!(
+                "skipping AVCaptureDevice mic-permission request on Tahoe 26.5.x \
+                 (FB-to-be-filed: __NSCFString first-touch KERN_PROTECTION_FAILURE)"
+            );
+            return MicPermissionState::Undetermined;
+        }
         let granted_slot: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
         let granted_slot_clone = granted_slot.clone();
         let block = RcBlock::new(move |granted: i8| {
