@@ -156,17 +156,40 @@ pub fn request_calendar_permission() -> CalendarPermissionState {
     // SAFETY: `class!(EKEventStore)` returns a non-null
     // `&'static AnyClass` for the EventKit class registered at
     // process load (linked via build.rs's
-    // `cargo:rustc-link-lib=framework=EventKit`). The
-    // `requestFullAccessToEventsWithCompletion:` selector is a
-    // class method on EKEventStore. The block is a
-    // `RcBlock<Fn(i8, *mut AnyObject) -> ()>` matching
-    // Apple's `EKEventStoreRequestAccessCompletionHandler`
-    // signature.
+    // `cargo:rustc-link-lib=framework=EventKit`). We allocate a
+    // fresh `EKEventStore` instance and call the
+    // *instance* method `requestAccessToEntityType:completion:`
+    // on it, which has been stable on macOS since 10.10 and
+    // remains functional on macOS 26 (Apple deprecated the
+    // selector on macOS 14 in favour of the
+    // `requestFullAccessToEventsWithCompletion:` selector that
+    // *replaces* this code path, but the deprecated form is
+    // still dispatched by the runtime).
+    //
+    // Why not `+[EKEventStore requestFullAccessToEventsWithCompletion:]`?
+    // On macOS 26.5.x the runtime raises
+    // `unrecognized selector sent to class` when the binding
+    // calls the full-access class method on the metaclass
+    // (Incident 7933393C-EAD5-4AA3-A69C-874709BFE222 — the
+    // existing implementation crashed the wizard at the
+    // calendar-permission step with
+    // `EXC_CRASH (SIGABRT)`). The selector either doesn't exist
+    // on the macOS 26.5.x `EKEventStore` ObjC-visible class or
+    // has been moved to an instance-only surface. Falling back
+    // to the long-stable instance method sidesteps the bug.
+    //
+    // The block is a `RcBlock<Fn(i8, *mut AnyObject) -> ()>`
+    // matching Apple's `EKEventStoreRequestAccessCompletionHandler`
+    // signature. The argument is `EKEntityTypeEvent` (value 0).
     unsafe {
         let cls = class!(EKEventStore);
+        let store: *mut objc2::runtime::AnyObject = msg_send![cls, alloc];
+        let store: *mut objc2::runtime::AnyObject = msg_send![store, init];
+        let entity_type: isize = 0; // EKEntityTypeEvent
         let _: () = msg_send![
-            cls,
-            requestFullAccessToEventsWithCompletion: &*block,
+            store,
+            requestAccessToEntityType: entity_type,
+            completion: &*block,
         ];
     }
 
