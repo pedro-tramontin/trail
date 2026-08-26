@@ -144,7 +144,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Fetch PR labels
         env:
@@ -310,7 +310,7 @@ jobs:
       # Per-step fork guard: forks checking out untrusted SHA pulls
       # code into a context where secrets are not exposed — skip them
       # so a fork PR does not consume runner minutes.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tauri 2 Linux build prereqs. The collect crate is pure-Rust musl
       # with no system deps, but `pnpm tauri build` (the main app) pulls
@@ -439,7 +439,7 @@ jobs:
       # macOS-only or Windows-only warnings.
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -530,7 +530,7 @@ jobs:
       # warnings fail the build too.
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain (msvc)
         uses: dtolnay/rust-toolchain@stable
@@ -641,7 +641,7 @@ jobs:
       # step can't extract it via `git config --get`); we pass
       # GITHUB_TOKEN explicitly via env in each step that needs it.
       - name: Checkout (provides cwd + git context for `gh`)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -799,7 +799,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux system deps (Tauri 2 prereqs)
         run: |
@@ -896,7 +896,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -957,7 +957,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
