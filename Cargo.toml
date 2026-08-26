@@ -162,7 +162,7 @@ objc2-event-kit = { version = "0.3.2", default-features = false, features = [
 # the OS's per-app consent record. Pinned at the workspace
 # level so the `windows` + `windows-core` + `windows-targets`
 # trio resolves to one version across the lockfile.
-windows = { version = "0.61", default-features = false, features = [
+windows = { version = "0.62.2", default-features = false, features = [
     "Security_Authorization_AppCapabilityAccess",
     "Foundation",
 ] }
