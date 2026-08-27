@@ -46,7 +46,7 @@ notify-rust = "4.18.0"
 humantime = "2.4.0"
 # HTTP mock server for the ollama client unit tests (no live ollama needed).
 wiremock = "0.6.5"
-sha2 = "0.10"
+sha2 = "0.11.0"
 # Phase 5 §5.1 — whisper model download + audio capture.
 #
 # The default feature set (used by the collector crate, which
