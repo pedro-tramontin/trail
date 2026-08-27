@@ -369,7 +369,7 @@ jobs:
           version: 10.34.5
 
       - name: Setup Node (with pnpm cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # pnpm 11+ requires Node.js 22.13+ (calls node:sqlite builtin).
           # Pin to 22 LTS to match pnpm@10.18.0 (the project's lockfile
@@ -459,7 +459,7 @@ jobs:
           version: 10.34.5
 
       - name: Setup Node (with pnpm cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22.23.2"
           cache: pnpm
@@ -555,7 +555,7 @@ jobs:
           version: 10.34.5
 
       - name: Setup Node (with pnpm cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22.23.2"
           cache: pnpm
@@ -828,7 +828,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 10.34.5
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.2
           cache: pnpm
@@ -909,7 +909,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 10.34.5
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.2
           cache: pnpm
@@ -970,7 +970,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 10.34.5
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.2
           cache: pnpm
