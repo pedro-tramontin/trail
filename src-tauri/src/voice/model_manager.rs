@@ -123,7 +123,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), ModelError> {
     let bytes = std::fs::read(path)?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
     if actual != expected {
         return Err(ModelError::Sha256Mismatch {
             expected: expected.to_string(),
@@ -214,7 +214,7 @@ mod tests {
     fn sha256_of(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>()
     }
 
     #[tokio::test]
@@ -268,7 +268,7 @@ mod tests {
         let payload_sha = {
             let mut hasher = Sha256::new();
             hasher.update(&payload);
-            format!("{:x}", hasher.finalize())
+            hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>()
         };
         Mock::given(method("GET"))
             .and(path("/ggml-base.en.bin"))
