@@ -51,7 +51,7 @@ tokio-cron-scheduler = { workspace = true }
 # `rustls-tls` feature set that the workspace definition doesn't
 # carry. `notify-rust` / `humantime` are tiny, infrequently-updated
 # crates and are pinned locally for the same reason.
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 regex = { workspace = true }
 once_cell = { workspace = true }
 notify-rust = "4.18.0"
