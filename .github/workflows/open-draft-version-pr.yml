@@ -113,7 +113,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # persist-credentials: false keeps GITHUB_TOKEN out of
           # the git config so a malicious `gh api` from a sub-step
