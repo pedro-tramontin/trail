@@ -34,6 +34,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 ssh2 = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 ssh-key = { workspace = true }
 keyring = { workspace = true }
 zeroize = { workspace = true }

@@ -29,6 +29,13 @@ use sha2::{Digest, Sha256};
 use crate::config::{Config, SshAuth, SummarizerConfig, TransportConfig, VoiceConfig};
 use crate::onboarding::answers::OnboardingAnswers;
 
+/// Test-only sentinel for the `known_hosts` field in on-disk config
+/// fixtures. Points at a path that never exists so the transport's
+/// host-key check falls through to the expected `NotFound` arm rather
+/// than matching an attacker-pre-created `/tmp` entry.
+#[cfg(test)]
+pub(crate) const TEST_KNOWN_HOSTS: &str = "/tmp/nonexistent_known_hosts";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -291,6 +298,7 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
         user: "pedro".to_string(),
         auth,
         remote_path: PathBuf::from("~/.hermes/plans/career-coaching-pedro/daily"),
+        known_hosts: crate::config::default_known_hosts_path(),
     };
 
     let transport_method = match answers.transport.method.as_str() {
@@ -784,6 +792,7 @@ mod tests {
                     env_var: "X".to_string(),
                 },
                 remote_path: PathBuf::from("/tmp/x"),
+                known_hosts: PathBuf::from(TEST_KNOWN_HOSTS),
             },
             raw_retention_days: 7,
             pending_installs: vec!["claude_sessions".to_string()],
