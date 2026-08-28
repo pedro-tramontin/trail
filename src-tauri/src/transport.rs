@@ -8,7 +8,7 @@
 //! v1 callers.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 // `Zeroizing` is only referenced by `load_private_key_pem`, which is
 // gated `#[cfg(unix)]` (see its doc comment). On Windows the gate
@@ -34,6 +34,19 @@ pub enum TransportError {
     Config(String),
     #[error("I/O error: {0}")]
     Io(String),
+    /// The server's host key is not yet pinned in `known_hosts`. Expected
+    /// on first connect — the caller should surface the fingerprint and
+    /// offer a trust-on-first-use prompt rather than fail hard.
+    #[error("unknown host key for {host}:{port} (fingerprint {fingerprint}) — not yet pinned")]
+    HostKeyUnknown {
+        host: String,
+        port: u16,
+        fingerprint: String,
+    },
+    /// The server's host key changed since onboarding. Never expected —
+    /// must be a hard, non-dismissible stop (possible man-in-the-middle).
+    #[error("HOST KEY MISMATCH for {host}:{port} — refusing to connect")]
+    HostKeyMismatch { host: String, port: u16 },
 }
 
 /// The transport contract for pushing payloads to the VPS.
@@ -67,12 +80,14 @@ pub fn from_config(cfg: &TransportConfig) -> Result<Box<dyn Transport>, Transpor
             user,
             auth,
             remote_path,
+            known_hosts,
         } => Ok(Box::new(SshTransport::new(
             host.clone(),
             *port,
             user.clone(),
             auth.clone(),
             remote_path.clone(),
+            known_hosts.clone(),
         ))),
     }
 }
@@ -88,16 +103,25 @@ pub struct SshTransport {
     user: String,
     auth: SshAuth,
     remote_path: PathBuf,
+    known_hosts: PathBuf,
 }
 
 impl SshTransport {
-    pub fn new(host: String, port: u16, user: String, auth: SshAuth, remote_path: PathBuf) -> Self {
+    pub fn new(
+        host: String,
+        port: u16,
+        user: String,
+        auth: SshAuth,
+        remote_path: PathBuf,
+        known_hosts: PathBuf,
+    ) -> Self {
         Self {
             host,
             port,
             user,
             auth,
             remote_path,
+            known_hosts,
         }
     }
 
@@ -161,6 +185,7 @@ impl Transport for SshTransport {
         let pem = self.load_private_key_pem()?;
         let auth = self.auth.clone();
         let remote_path = self.remote_path.clone();
+        let known_hosts = self.known_hosts.clone();
         let remote_name = remote_name.to_string();
         let payload = payload.to_vec();
 
@@ -175,6 +200,10 @@ impl Transport for SshTransport {
             sess.set_tcp_stream(tcp);
             sess.handshake()
                 .map_err(|e| TransportError::Ssh(format!("handshake: {e}")))?;
+
+            // Verify the server's host key against the pinned known_hosts
+            // entry before we send any credentials.
+            check_host_key(&sess, &host, port, &known_hosts)?;
 
             // Auth.
             match &auth {
@@ -234,6 +263,7 @@ impl Transport for SshTransport {
         let user = self.user.clone();
         #[cfg(unix)]
         let pem = self.load_private_key_pem()?;
+        let known_hosts = self.known_hosts.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), TransportError> {
             use ssh2::Session;
@@ -245,6 +275,9 @@ impl Transport for SshTransport {
             sess.set_tcp_stream(tcp);
             sess.handshake()
                 .map_err(|e| TransportError::Ssh(format!("handshake: {e}")))?;
+            // Verify the server's host key against the pinned known_hosts
+            // entry before we send any credentials.
+            check_host_key(&sess, &host, port, &known_hosts)?;
             // `health_check` is public-key only by design; the password
             // auth path is exercised in `push` (it's the one with the
             // user-facing call site).
@@ -268,6 +301,88 @@ impl Transport for SshTransport {
     }
 }
 
+/// Check the server's host key against the configured known_hosts file.
+/// Returns `Ok(())` if the server's key matches the pinned entry, or one
+/// of:
+/// - `TransportError::HostKeyUnknown` — server's key is not in known_hosts
+///   (carries the SHA256 fingerprint so the caller can build a TOFU prompt)
+/// - `TransportError::HostKeyMismatch` — server's key disagrees with the
+///   pinned entry (hard failure; possible MITM)
+/// - `TransportError::Ssh(_)` — internal error (read failure, missing
+///   host key from server, etc.)
+fn check_host_key(
+    sess: &ssh2::Session,
+    host: &str,
+    port: u16,
+    known_hosts_path: &Path,
+) -> Result<(), TransportError> {
+    use ssh2::KnownHostFileKind;
+
+    let mut kh = sess
+        .known_hosts()
+        .map_err(|e| TransportError::Ssh(format!("known_hosts init: {e}")))?;
+
+    // read_file distinguishes:
+    //   Ok(_)              → file loaded (or was empty but exists)
+    //   Err + !exists()    → never pinned yet → fall through to NotFound (expected)
+    //   Err + exists()     → file IS there but unreadable → user-actionable error
+    match kh.read_file(known_hosts_path, KnownHostFileKind::OpenSSH) {
+        Ok(_) => {}
+        Err(_) if !known_hosts_path.exists() => {}
+        Err(e) => {
+            return Err(TransportError::Ssh(format!(
+                "known_hosts at {} exists but could not be read: {e}",
+                known_hosts_path.display()
+            )));
+        }
+    }
+
+    let (key, _key_type) = sess
+        .host_key()
+        .ok_or_else(|| TransportError::Ssh("server presented no host key".into()))?;
+
+    // Capture the SHA256 fingerprint in ssh-keygen -lf format:
+    // "SHA256:" + base64(no padding) of the SHA256 hash of the key bytes.
+    let fingerprint = match sess.host_key_hash(ssh2::HashType::Sha256) {
+        Some(hash_bytes) => {
+            use base64::Engine as _;
+            format!(
+                "SHA256:{}",
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(hash_bytes)
+            )
+        }
+        None => String::from("<fingerprint unavailable>"),
+    };
+
+    let result = kh.check_port(host, port, key);
+    map_check_result(result, host, port, &fingerprint)
+}
+
+/// Pure mapping from ssh2::CheckResult to TransportError. Extracted as a
+/// pure function so it can be table-tested without a real Session.
+fn map_check_result(
+    r: ssh2::CheckResult,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+) -> Result<(), TransportError> {
+    match r {
+        ssh2::CheckResult::Match => Ok(()),
+        ssh2::CheckResult::NotFound => Err(TransportError::HostKeyUnknown {
+            host: host.to_string(),
+            port,
+            fingerprint: fingerprint.to_string(),
+        }),
+        ssh2::CheckResult::Mismatch => Err(TransportError::HostKeyMismatch {
+            host: host.to_string(),
+            port,
+        }),
+        ssh2::CheckResult::Failure => Err(TransportError::Ssh(format!(
+            "host key check failed for {host}:{port}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +400,7 @@ mod tests {
                 path: PathBuf::from("/tmp/key"),
             },
             remote_path: PathBuf::from("/home/pedro/inbox/"),
+            known_hosts: PathBuf::from("/tmp/known_hosts"),
         };
         let t = from_config(&cfg).unwrap();
         assert_eq!(t.name(), "ssh");
@@ -302,6 +418,7 @@ mod tests {
                 path: PathBuf::from("/k"),
             },
             PathBuf::from("/r/"),
+            PathBuf::from("/tmp/known_hosts"),
         );
         assert_eq!(t.name(), "ssh");
     }
@@ -316,6 +433,7 @@ mod tests {
                 env_var: "SSH_PASSWORD".into(),
             },
             PathBuf::from("/home/pedro/inbox/"),
+            PathBuf::from("/tmp/known_hosts"),
         );
         assert_eq!(t.host, "vm.example.com");
         assert_eq!(t.port, 2222);
@@ -338,6 +456,7 @@ mod tests {
                 path: PathBuf::from("/k"),
             },
             PathBuf::from("/home/pedro/inbox/"),
+            PathBuf::from("/tmp/known_hosts"),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(t.health_check());
@@ -348,5 +467,63 @@ mod tests {
             ),
             "expected Ssh or Io error when keychain has no entry, got: {result:?}"
         );
+    }
+
+    /// Thread 5: pure mapping from ssh2::CheckResult to TransportError
+    /// must produce the right variant for each input. This is the
+    /// seam test for the whole host-key-verification flow.
+    #[test]
+    fn map_check_result_returns_expected_variant_per_arm() {
+        // Match → Ok
+        assert!(
+            map_check_result(ssh2::CheckResult::Match, "vm.example.com", 22, "SHA256:abc").is_ok()
+        );
+
+        // NotFound → HostKeyUnknown carrying host/port/fingerprint
+        match map_check_result(
+            ssh2::CheckResult::NotFound,
+            "vm.example.com",
+            22,
+            "SHA256:abc",
+        ) {
+            Err(TransportError::HostKeyUnknown {
+                host,
+                port,
+                fingerprint,
+            }) => {
+                assert_eq!(host, "vm.example.com");
+                assert_eq!(port, 22);
+                assert_eq!(fingerprint, "SHA256:abc");
+            }
+            other => panic!("expected HostKeyUnknown, got {other:?}"),
+        }
+
+        // Mismatch → HostKeyMismatch carrying host/port (no fingerprint;
+        // mismatch means we already HAVE a pinned key, no need to show one)
+        match map_check_result(
+            ssh2::CheckResult::Mismatch,
+            "vm.example.com",
+            22,
+            "SHA256:abc",
+        ) {
+            Err(TransportError::HostKeyMismatch { host, port }) => {
+                assert_eq!(host, "vm.example.com");
+                assert_eq!(port, 22);
+            }
+            other => panic!("expected HostKeyMismatch, got {other:?}"),
+        }
+
+        // Failure → TransportError::Ssh (generic; carries a message)
+        match map_check_result(
+            ssh2::CheckResult::Failure,
+            "vm.example.com",
+            22,
+            "SHA256:abc",
+        ) {
+            Err(TransportError::Ssh(msg)) => {
+                assert!(msg.contains("vm.example.com:22"));
+            }
+            other => panic!("expected TransportError::Ssh, got {other:?}"),
+        }
     }
 }
