@@ -8,7 +8,7 @@
 //! v1 callers.
 
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use thiserror::Error;
 // `Zeroizing` is only referenced by `load_private_key_pem`, which is
 // gated `#[cfg(unix)]` (see its doc comment). On Windows the gate
@@ -67,14 +67,12 @@ pub fn from_config(cfg: &TransportConfig) -> Result<Box<dyn Transport>, Transpor
             user,
             auth,
             remote_path,
-            known_hosts,
         } => Ok(Box::new(SshTransport::new(
             host.clone(),
             *port,
             user.clone(),
             auth.clone(),
             remote_path.clone(),
-            known_hosts.clone(),
         ))),
     }
 }
@@ -90,25 +88,16 @@ pub struct SshTransport {
     user: String,
     auth: SshAuth,
     remote_path: PathBuf,
-    known_hosts: PathBuf,
 }
 
 impl SshTransport {
-    pub fn new(
-        host: String,
-        port: u16,
-        user: String,
-        auth: SshAuth,
-        remote_path: PathBuf,
-        known_hosts: PathBuf,
-    ) -> Self {
+    pub fn new(host: String, port: u16, user: String, auth: SshAuth, remote_path: PathBuf) -> Self {
         Self {
             host,
             port,
             user,
             auth,
             remote_path,
-            known_hosts,
         }
     }
 
@@ -149,40 +138,6 @@ impl SshTransport {
     }
 }
 
-/// Verify the server's host key against the configured `known_hosts`
-/// file before any `userauth_*` call. This is the SSH equivalent of
-/// TLS certificate pinning: a `Mismatch` result means the server's key
-/// changed since onboarding (possible man-in-the-middle), and we refuse
-/// to push rather than silently accept the new key.
-fn check_host_key(
-    sess: &ssh2::Session,
-    host: &str,
-    port: u16,
-    known_hosts_path: &Path,
-) -> Result<(), TransportError> {
-    use ssh2::KnownHostFileKind;
-    let mut kh = sess
-        .known_hosts()
-        .map_err(|e| TransportError::Ssh(format!("known_hosts init: {e}")))?;
-    // read_file is best-effort: a missing file is fine, it just means
-    // the known_hosts is empty (every key check will return NotFound).
-    let _ = kh.read_file(known_hosts_path, KnownHostFileKind::OpenSSH);
-    let key = sess
-        .host_key()
-        .map(|(key, _key_type)| key)
-        .ok_or_else(|| TransportError::Ssh("server presented no host key".into()))?;
-    match kh.check_port(host, port, key) {
-        ssh2::CheckResult::Match => Ok(()),
-        ssh2::CheckResult::NotFound => Err(TransportError::Ssh(
-            "unknown host key — pin it during onboarding before pushing".into(),
-        )),
-        ssh2::CheckResult::Mismatch => Err(TransportError::Ssh(
-            "HOST KEY MISMATCH — possible man-in-the-middle; refusing to push".into(),
-        )),
-        ssh2::CheckResult::Failure => Err(TransportError::Ssh("host key check failed".into())),
-    }
-}
-
 #[async_trait]
 impl Transport for SshTransport {
     fn name(&self) -> &'static str {
@@ -206,7 +161,6 @@ impl Transport for SshTransport {
         let pem = self.load_private_key_pem()?;
         let auth = self.auth.clone();
         let remote_path = self.remote_path.clone();
-        let known_hosts = self.known_hosts.clone();
         let remote_name = remote_name.to_string();
         let payload = payload.to_vec();
 
@@ -221,10 +175,6 @@ impl Transport for SshTransport {
             sess.set_tcp_stream(tcp);
             sess.handshake()
                 .map_err(|e| TransportError::Ssh(format!("handshake: {e}")))?;
-
-            // Host-key verification: refuse to auth if the server's key
-            // isn't pinned in the configured known_hosts file.
-            check_host_key(&sess, &host, port, &known_hosts)?;
 
             // Auth.
             match &auth {
@@ -284,7 +234,6 @@ impl Transport for SshTransport {
         let user = self.user.clone();
         #[cfg(unix)]
         let pem = self.load_private_key_pem()?;
-        let known_hosts = self.known_hosts.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), TransportError> {
             use ssh2::Session;
@@ -296,10 +245,6 @@ impl Transport for SshTransport {
             sess.set_tcp_stream(tcp);
             sess.handshake()
                 .map_err(|e| TransportError::Ssh(format!("handshake: {e}")))?;
-
-            // Host-key verification before auth.
-            check_host_key(&sess, &host, port, &known_hosts)?;
-
             // `health_check` is public-key only by design; the password
             // auth path is exercised in `push` (it's the one with the
             // user-facing call site).
@@ -340,7 +285,6 @@ mod tests {
                 path: PathBuf::from("/tmp/key"),
             },
             remote_path: PathBuf::from("/home/pedro/inbox/"),
-            known_hosts: PathBuf::from("/tmp/nonexistent_known_hosts"),
         };
         let t = from_config(&cfg).unwrap();
         assert_eq!(t.name(), "ssh");
@@ -358,7 +302,6 @@ mod tests {
                 path: PathBuf::from("/k"),
             },
             PathBuf::from("/r/"),
-            PathBuf::from("/tmp/nonexistent_known_hosts"),
         );
         assert_eq!(t.name(), "ssh");
     }
@@ -373,14 +316,12 @@ mod tests {
                 env_var: "SSH_PASSWORD".into(),
             },
             PathBuf::from("/home/pedro/inbox/"),
-            PathBuf::from("/tmp/nonexistent_known_hosts"),
         );
         assert_eq!(t.host, "vm.example.com");
         assert_eq!(t.port, 2222);
         assert_eq!(t.user, "pedro");
         assert!(matches!(t.auth, SshAuth::Password { .. }));
         assert_eq!(t.remote_path, PathBuf::from("/home/pedro/inbox/"));
-        assert_eq!(t.known_hosts, PathBuf::from("/tmp/nonexistent_known_hosts"));
     }
 
     #[test]
@@ -397,7 +338,6 @@ mod tests {
                 path: PathBuf::from("/k"),
             },
             PathBuf::from("/home/pedro/inbox/"),
-            PathBuf::from("/tmp/nonexistent_known_hosts"),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(t.health_check());

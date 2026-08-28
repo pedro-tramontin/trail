@@ -273,7 +273,6 @@ pub fn render_install_plan(cfg: &Config, _ssh_user: &str) -> Result<InstallPlan,
             user,
             auth,
             remote_path,
-            ..
         } => (
             host.clone(),
             *port,
@@ -953,7 +952,6 @@ mod tests {
                     path: PathBuf::from("~/.ssh/id_trail"),
                 },
                 remote_path: PathBuf::from("/home/vps_user/.trail/inbox/"),
-                known_hosts: PathBuf::from("/tmp/nonexistent_known_hosts"),
             },
             raw_retention_days: 7,
             pending_installs: Vec::new(),

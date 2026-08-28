@@ -291,7 +291,6 @@ pub fn answers_to_config(answers: &OnboardingAnswers, ssh_key_generated: bool) -
         user: "pedro".to_string(),
         auth,
         remote_path: PathBuf::from("~/.hermes/plans/career-coaching-pedro/daily"),
-        known_hosts: PathBuf::from("/tmp/nonexistent_known_hosts"),
     };
 
     let transport_method = match answers.transport.method.as_str() {
@@ -785,7 +784,6 @@ mod tests {
                     env_var: "X".to_string(),
                 },
                 remote_path: PathBuf::from("/tmp/x"),
-                known_hosts: PathBuf::from("/tmp/nonexistent_known_hosts"),
             },
             raw_retention_days: 7,
             pending_installs: vec!["claude_sessions".to_string()],

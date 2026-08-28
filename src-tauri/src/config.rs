@@ -289,17 +289,6 @@ fn default_anonymization_strictness() -> String {
     "aggressive".to_string()
 }
 
-use std::env;
-
-fn default_known_hosts_path() -> PathBuf {
-    if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".trail/known_hosts")
-    } else {
-        // During tests HOME may be unset.
-        PathBuf::from("/tmp/nonexistent_known_hosts")
-    }
-}
-
 /// Transport is an open-ended enum: v1 ships only `Ssh`, but
 /// `#[serde(tag = "type", rename_all = "snake_case")]` means v2 can
 /// add `Https` / `S3` / `Database` variants without breaking the
@@ -313,8 +302,6 @@ pub enum TransportConfig {
         user: String,
         auth: SshAuth,
         remote_path: PathBuf,
-        #[serde(default = "default_known_hosts_path")]
-        known_hosts: PathBuf,
     },
 }
 
