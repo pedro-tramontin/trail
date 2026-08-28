@@ -155,6 +155,7 @@ pub async fn test_ssh_connection(host: String, port: u16, user: String) -> Resul
             path: PathBuf::from("~/.ssh/trail_ed25519"),
         },
         PathBuf::from("/tmp/"),
+        PathBuf::from("/tmp/nonexistent_known_hosts"),
     );
     t.health_check().await.map_err(|e| e.to_string())?;
     Ok(())
