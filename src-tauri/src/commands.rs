@@ -195,6 +195,7 @@ fn pin_ssh_host_key_at(
 ) -> Result<(), String> {
     use base64::Engine as _;
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
     // Validate the key bytes decode cleanly BEFORE we touch the file —
@@ -243,11 +244,13 @@ fn pin_ssh_host_key_at(
         }
     }
 
-    // Open (or create) the file with mode 0600.
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    // Open (or create) the file with mode 0600 on Unix (Windows uses
+    // ACLs — the default is fine, no .mode() call needed).
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts
         .open(path)
         .map_err(|e| format!("open({}): {e}", path.display()))?;
 
