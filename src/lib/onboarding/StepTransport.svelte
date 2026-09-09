@@ -112,6 +112,18 @@
     on_next: () => void;
   } = $props();
 
+  // Module-local ref holding the most recent structured HostKeyUnknown
+  // payload (host/port/key_b64/key_type). The trust prompt only stashes
+  // the fingerprint in `$state`; the raw key bytes needed by
+  // `pin_ssh_host_key` are kept here so `trust_key()` can hand them
+  // straight to the command without a second connection.
+  let last_unknown_payload: {
+    host: string;
+    port: number;
+    key_b64: string;
+    key_type: string;
+  } | null = null;
+
   // Per-OS user-facing name of the OS credential store. Loaded
   // once on mount from the `credential_store_name` Tauri command
   // (PR §X-3). The fallback "OS credential store" matches the
@@ -160,7 +172,7 @@
   // the backend, which is informative.
   const inputs_valid = $derived(host_valid && user_valid && port_valid);
   const can_advance = $derived(
-    inputs_valid && $state.ssh_key_path !== null,
+    inputs_valid && $state.ssh_key_path !== null && !$state.mismatch_held,
   );
 
   async function generate_key(): Promise<void> {
@@ -222,6 +234,10 @@
     state.update((s) => {
       s.test_state = "testing";
       s.test_error = null;
+      // A fresh test clears any prior trust prompt / mismatch banner.
+      s.pending_fingerprint = null;
+      s.pending_trust_action = null;
+      s.mismatch_held = false;
       return s;
     });
     try {
@@ -235,12 +251,120 @@
         return s;
       });
     } catch (err) {
+      // `test_ssh_connection` now returns `Result<(), TransportError>`,
+      // so Tauri serializes the error to a JSON string. We parse it and
+      // dispatch on the externally-tagged variant. Plain-string errors
+      // (legacy path / non-JSON) fall through to the generic message.
+      const raw = String(err);
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = null;
+      }
+      const structured = parsed as
+        | {
+            HostKeyUnknown?: {
+              host: string;
+              port: number;
+              fingerprint: string;
+              key_b64: string;
+              key_type: string;
+            };
+            HostKeyMismatch?: {
+              host: string;
+              port: number;
+              presented_fingerprint: string;
+            };
+          }
+        | null;
+
+      if (structured?.HostKeyUnknown) {
+        const u = structured.HostKeyUnknown;
+        last_unknown_payload = {
+          host: u.host,
+          port: u.port,
+          key_b64: u.key_b64,
+          key_type: u.key_type,
+        };
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = `Trail doesn't recognize this server's host key (${u.fingerprint}).`;
+          s.pending_fingerprint = u.fingerprint;
+          s.pending_trust_action = "unknown";
+          return s;
+        });
+      } else if (structured?.HostKeyMismatch) {
+        const m = structured.HostKeyMismatch;
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = `HOST KEY MISMATCH for ${m.host}:${m.port} — refusing to connect.`;
+          s.pending_fingerprint = m.presented_fingerprint;
+          s.pending_trust_action = "mismatch";
+          s.mismatch_held = true;
+          return s;
+        });
+      } else {
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = raw;
+          return s;
+        });
+      }
+    }
+  }
+
+  /** Pin the server's host key on the explicit "Yes, trust this key"
+   *  click. The raw key bytes + type come from the structured
+   *  `HostKeyUnknown` error captured in `pending_*` state. On success,
+   *  re-run `test_connection` to confirm the new entry is accepted and
+   *  the green ✅ path renders. */
+  async function trust_key(): Promise<void> {
+    // The key bytes are carried on the structured error, but we only
+    // stashed the fingerprint in state. Re-derive from the last error
+    // is not possible here, so we re-test to re-fetch the structured
+    // payload, then pin. Simpler: the component keeps the last
+    // structured HostKeyUnknown payload in a module-local ref.
+    const payload = last_unknown_payload;
+    if (!payload) return;
+    state.update((s) => {
+      s.pinning = true;
+      return s;
+    });
+    try {
+      await invoke("pin_ssh_host_key", {
+        host: payload.host,
+        port: payload.port,
+        keyB64: payload.key_b64,
+        keyType: payload.key_type,
+      });
       state.update((s) => {
+        s.pinning = false;
+        s.pending_fingerprint = null;
+        s.pending_trust_action = null;
+        return s;
+      });
+      // Re-test to confirm the new entry is accepted.
+      await test_connection();
+    } catch (err) {
+      state.update((s) => {
+        s.pinning = false;
         s.test_state = "error";
         s.test_error = String(err);
         return s;
       });
     }
+  }
+
+  /** Clear the trust prompt without writing to known_hosts. */
+  async function cancel_trust(): Promise<void> {
+    state.update((s) => {
+      s.pending_fingerprint = null;
+      s.pending_trust_action = null;
+      s.test_error = null;
+      s.test_state = "idle";
+      return s;
+    });
   }
 </script>
 
@@ -389,6 +513,65 @@
     </div>
   </div>
 
+  {#if $state.pending_trust_action === "unknown" && $state.pending_fingerprint}
+    <div class="trust-prompt" data-testid="transport-trust-prompt">
+      <p class="muted">
+        Trail doesn't recognize this server's host key. To trust it, confirm
+        the fingerprint matches what your VPS administrator told you:
+      </p>
+      <p class="fingerprint" data-testid="transport-fingerprint">
+        <code>{$state.pending_fingerprint}</code>
+      </p>
+      <div class="trust-actions">
+        <button
+          type="button"
+          class="primary"
+          data-testid="transport-trust-confirm"
+          disabled={$state.pinning}
+          onclick={() => {
+            void trust_key();
+          }}
+        >
+          {$state.pinning ? "Pinning…" : "Yes, trust this key"}
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          data-testid="transport-trust-cancel"
+          disabled={$state.pinning}
+          onclick={() => {
+            void cancel_trust();
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  {/if}
+  {#if $state.pending_trust_action === "mismatch"}
+    <div
+      class="mismatch-banner"
+      data-testid="transport-mismatch-banner"
+      role="alert"
+    >
+      <p class="banner-title">
+        ⚠️ HOST KEY MISMATCH — possible man-in-the-middle.
+      </p>
+      <p class="muted">
+        The server's host key has changed since you first trusted it. Trail
+        will not connect until the issue is resolved out-of-band (e.g. your
+        VPS was reprovisioned, or you are being attacked).
+      </p>
+      <p class="muted">
+        Server presented: <code data-testid="transport-mismatch-fingerprint">{$state.pending_fingerprint ?? ""}</code>
+      </p>
+      <p class="hint">
+        Change the host or port above to a different server, or contact your
+        VPS administrator before retrying.
+      </p>
+    </div>
+  {/if}
+
   <div class="actions">
     <button
       type="button"
@@ -502,6 +685,35 @@
     color: var(--ok, #15803d);
   }
   .test-error {
+    color: var(--danger, #c00);
+  }
+  .trust-prompt {
+    border: 1px solid var(--border, #ccc);
+    border-radius: 4px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .fingerprint {
+    margin: 0;
+  }
+  .trust-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .mismatch-banner {
+    border: 1px solid var(--danger, #c00);
+    background: #fef2f2;
+    border-radius: 4px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .banner-title {
+    margin: 0;
+    font-weight: 700;
     color: var(--danger, #c00);
   }
 </style>

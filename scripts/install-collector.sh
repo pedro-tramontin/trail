@@ -119,6 +119,22 @@ if [[ -z "$VPS_USER" || "$VPS_USER" == "$VPS_HOST" ]]; then
     exit 2
 fi
 
+# SSH host-key verification flags (B1.S1b-ui). Trail's Rust transport
+# pins each server's host key in ~/.trail/known_hosts on first connect
+# (after the user confirms the fingerprint via the wizard). This script
+# must use the SAME per-app known_hosts file with strict checking so
+# that `scp`/`ssh` invocations here refuse to talk to a server whose
+# key has changed since onboarding — matching the Rust-side behavior.
+#
+# StrictHostKeyChecking=yes → fail (not prompt) on unknown / changed key.
+# UserKnownHostsFile         → point at ~/.trail/known_hosts, NOT the
+#                              user's global ~/.ssh/known_hosts (which
+#                              Trail must never mutate per plan §S1.1).
+SSH_OPTS=(
+    -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="$HOME/.trail/known_hosts"
+)
+
 # ---- runner: dry-run aware exec --------------------------------------
 
 # Print + optionally run a command. The quoting on the captured command
@@ -141,11 +157,11 @@ ssh_cmd() {
     local display="$1"
     local remote_cmd="$2"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf '  [dry-run] ssh %s %s\n' "$VPS_HOST" "$display"
+        printf '  [dry-run] ssh %s %s %s\n' "${SSH_OPTS[*]}" "$VPS_HOST" "$display"
     else
-        printf '  >> ssh %s %s\n' "$VPS_HOST" "$display"
+        printf '  >> ssh %s %s %s\n' "${SSH_OPTS[*]}" "$VPS_HOST" "$display"
         # shellcheck disable=SC2029 # We intentionally expand client-side.
-        ssh "$VPS_HOST" "$remote_cmd"
+        ssh "${SSH_OPTS[@]}" "$VPS_HOST" "$remote_cmd"
     fi
 }
 
@@ -163,8 +179,8 @@ EOF
 # ---- step 1: scp the binary ------------------------------------------
 
 REMOTE_BIN="$REMOTE_DIR/trail-collector"
-run "scp $BINARY $VPS_HOST:$REMOTE_BIN" \
-    scp "$BINARY" "$VPS_HOST:$REMOTE_BIN"
+run "scp ${SSH_OPTS[*]} $BINARY $VPS_HOST:$REMOTE_BIN" \
+    scp "${SSH_OPTS[@]}" "$BINARY" "$VPS_HOST:$REMOTE_BIN"
 
 # ---- step 2: chmod +x + ensure remote dir ----------------------------
 
@@ -178,8 +194,8 @@ ssh_cmd "mkdir -p ~/.trail/schema && test -d ~/.trail/schema && echo ok" \
 
 # ---- step 4: scp the schema file -------------------------------------
 
-run "scp $SCHEMA_PATH $VPS_HOST:~/.trail/schema/day-summary.schema.json" \
-    scp "$SCHEMA_PATH" "$VPS_HOST:~/.trail/schema/day-summary.schema.json"
+run "scp ${SSH_OPTS[*]} $SCHEMA_PATH $VPS_HOST:~/.trail/schema/day-summary.schema.json" \
+    scp "${SSH_OPTS[@]}" "$SCHEMA_PATH" "$VPS_HOST:~/.trail/schema/day-summary.schema.json"
 
 # ---- step 5: write ~/.trail/collector.json ----------------------------
 # The 9 fields are the master's frozen schema (mirrors the
@@ -256,17 +272,17 @@ REMOTE_EOF
 # sanity-check the path-forwarding by eye. For a real run: hand the
 # body to `bash -s -- "$REMOTE_DIR"` over SSH.
 if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '  [dry-run] ssh %s bash -s -- %s\n' "$VPS_HOST" "$REMOTE_DIR"
+    printf '  [dry-run] ssh %s %s bash -s -- %s\n' "${SSH_OPTS[*]}" "$VPS_HOST" "$REMOTE_DIR"
     printf '%s\n' "$REMOTE_BODY" | sed 's/^/    /'
 else
-    printf '  >> ssh %s bash -s -- %s\n' "$VPS_HOST" "$REMOTE_DIR"
+    printf '  >> ssh %s %s bash -s -- %s\n' "${SSH_OPTS[*]}" "$VPS_HOST" "$REMOTE_DIR"
     # The body is passed to the remote shell via stdin (here-string);
     # $REMOTE_DIR is intentionally expanded client-side so it travels
     # as $1 to the remote bash (which then sets it as REMOTE_DIR=$1
     # at the top of the body). Inside the body, $HOME and all the
     # REMOTE_* locals resolve server-side via bash's normal rules.
     # shellcheck disable=SC2029
-    ssh "$VPS_HOST" "bash -s -- '$REMOTE_DIR'" <<<"$REMOTE_BODY"
+    ssh "${SSH_OPTS[@]}" "$VPS_HOST" "bash -s -- '$REMOTE_DIR'" <<<"$REMOTE_BODY"
 fi
 
 # ---- step 6: post-install health probe --------------------------------

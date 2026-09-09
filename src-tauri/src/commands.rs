@@ -124,20 +124,30 @@ pub async fn health_check_transport(config_path: String) -> Result<String, Strin
 /// and we surface that string to the UI so the error is
 /// actionable.
 #[tauri::command]
-pub async fn test_ssh_connection(host: String, port: u16, user: String) -> Result<(), String> {
+pub async fn test_ssh_connection(
+    host: String,
+    port: u16,
+    user: String,
+) -> Result<(), crate::transport::TransportError> {
     use crate::config::SshAuth;
     use crate::transport::SshTransport;
 
     let host = host.trim().to_string();
     let user = user.trim().to_string();
     if host.is_empty() {
-        return Err("host is required".into());
+        return Err(crate::transport::TransportError::Config(
+            "host is required".into(),
+        ));
     }
     if user.is_empty() {
-        return Err("user is required".into());
+        return Err(crate::transport::TransportError::Config(
+            "user is required".into(),
+        ));
     }
     if port == 0 {
-        return Err("port must be between 1 and 65535".into());
+        return Err(crate::transport::TransportError::Config(
+            "port must be between 1 and 65535".into(),
+        ));
     }
 
     // The on-disk `path` in `SshAuth::PublicKey` is required by
@@ -157,8 +167,121 @@ pub async fn test_ssh_connection(host: String, port: u16, user: String) -> Resul
         PathBuf::from("/tmp/"),
         crate::config::default_known_hosts_path(),
     );
-    t.health_check().await.map_err(|e| e.to_string())?;
+    t.health_check().await?;
     Ok(())
+}
+
+/// Append an OpenSSH-format entry to the known_hosts file at `path`.
+///
+/// The entry is `<key_type> <key_b64> <host_field>:<port>` where
+/// `<host_field>` is the bare host for port 22 and `[host]` for
+/// non-standard ports (OpenSSH convention). The parent directory is
+/// created with mode 0700 and the file with mode 0600.
+///
+/// Refuses (returns `Err`) if an entry for `(host, port)` already
+/// exists — no overwrite, no skip. The caller surfaces the error to
+/// the user as "this server is already trusted" (informational) or
+/// "key changed unexpectedly" (security alarm).
+///
+/// Extracted as a pure helper (path-injected) so the Tauri command is
+/// a thin wrapper and the unit tests can exercise the file logic
+/// against a tempdir without touching the real `~/.trail/known_hosts`.
+fn pin_ssh_host_key_at(
+    path: &std::path::Path,
+    host: &str,
+    port: u16,
+    key_b64: &str,
+    key_type: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Validate the key bytes decode cleanly BEFORE we touch the file —
+    // a malformed key must not leave a half-written entry behind.
+    base64::engine::general_purpose::STANDARD
+        .decode(key_b64.as_bytes())
+        .map_err(|e| format!("invalid key_b64: {e}"))?;
+
+    // Refuse if an entry for (host, port) already exists. We read the
+    // file as text and look for a line whose comment field ends with
+    // ":<port>" AND whose host field matches `host` or `[host]`. This
+    // is robust enough for v1 (the only writer is this command, so the
+    // format is under our control).
+    if path.exists() {
+        let existing =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let host_field = if port == 22 {
+            host.to_string()
+        } else {
+            format!("[{host}]")
+        };
+        let comment = format!("{host_field}:{port}");
+        for line in existing.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // OpenSSH line: <keytype> <b64> <comment...>
+            if let Some(rest) = trimmed.splitn(3, ' ').nth(2) {
+                if rest.trim() == comment {
+                    return Err(format!("entry for {host}:{port} already exists"));
+                }
+            }
+        }
+    }
+
+    // Ensure parent dir exists with mode 0700.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("chmod 0700 {}: {e}", parent.display()))?;
+        }
+    }
+
+    // Open (or create) the file with mode 0600.
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("open({}): {e}", path.display()))?;
+
+    let host_field = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]")
+    };
+    writeln!(file, "{key_type} {key_b64} {host_field}:{port}")
+        .map_err(|e| format!("write to {}: {e}", path.display()))?;
+
+    Ok(())
+}
+
+/// Tauri command: pin the server's host key to `~/.trail/known_hosts`
+/// on the user's explicit "Yes, trust this key" click. `key_b64` is the
+/// raw key bytes (base64) and `key_type` the OpenSSH key type, both
+/// carried by the structured `HostKeyUnknown` error from
+/// `test_ssh_connection`. This is the ONLY writer to known_hosts — there
+/// is no auto-pin path anywhere in the transport.
+#[tauri::command]
+pub fn pin_ssh_host_key(
+    host: String,
+    port: u16,
+    key_b64: String,
+    key_type: String,
+) -> Result<(), String> {
+    pin_ssh_host_key_at(
+        &crate::config::default_known_hosts_path(),
+        &host,
+        port,
+        &key_b64,
+        &key_type,
+    )
 }
 
 /// Tauri command: push a serialized day summary to the VPS via the
@@ -791,7 +914,9 @@ pub fn calendar_permission_deep_link_url(de: Option<String>) -> Result<String, S
 /// EventKit.
 #[tauri::command]
 pub fn request_calendar_permission_cmd() -> String {
-    crate::onboarding::event_kit::request_calendar_permission().as_str().to_string()
+    crate::onboarding::event_kit::request_calendar_permission()
+        .as_str()
+        .to_string()
 }
 
 /// Resolve the `~/.trail/` root directory from the loaded config. The
@@ -874,7 +999,12 @@ mod tests {
     async fn empty_host_returns_required_error() {
         let r = test_ssh_connection("".into(), 22, "pedro".into()).await;
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("host is required"));
+        match r.unwrap_err() {
+            crate::transport::TransportError::Config(msg) => {
+                assert!(msg.contains("host is required"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -883,14 +1013,24 @@ mod tests {
         // then fail the required check.
         let r = test_ssh_connection("   ".into(), 22, "pedro".into()).await;
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("host is required"));
+        match r.unwrap_err() {
+            crate::transport::TransportError::Config(msg) => {
+                assert!(msg.contains("host is required"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn empty_user_returns_required_error() {
         let r = test_ssh_connection("vps.example.com".into(), 22, "".into()).await;
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("user is required"));
+        match r.unwrap_err() {
+            crate::transport::TransportError::Config(msg) => {
+                assert!(msg.contains("user is required"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -899,7 +1039,74 @@ mod tests {
         // is 0; we explicitly reject that and require 1+.
         let r = test_ssh_connection("vps.example.com".into(), 0, "pedro".into()).await;
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("port"));
+        match r.unwrap_err() {
+            crate::transport::TransportError::Config(msg) => {
+                assert!(msg.contains("port"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    // === B1.S1b-ui — pin_ssh_host_key_at (TOFU wizard) ===
+    //
+    // The pure helper is path-injected so the tests exercise the file
+    // logic against a tempdir without touching the real
+    // `~/.trail/known_hosts`.
+
+    #[test]
+    fn pin_ssh_host_key_at_writes_new_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("known_hosts");
+        pin_ssh_host_key_at(&path, "vm.example.com", 22, "a2V5Ynl0ZXM=", "ssh-ed25519")
+            .expect("first pin should succeed");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents.trim(),
+            "ssh-ed25519 a2V5Ynl0ZXM= vm.example.com:22",
+            "entry should be OpenSSH-format with bare host for port 22"
+        );
+    }
+
+    #[test]
+    fn pin_ssh_host_key_at_refuses_existing_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("known_hosts");
+        pin_ssh_host_key_at(&path, "vm.example.com", 22, "a2V5Ynl0ZXM=", "ssh-ed25519")
+            .expect("first pin should succeed");
+        let before = std::fs::read_to_string(&path).unwrap();
+        // Second call with the SAME (host, port) but a DIFFERENT key must
+        // refuse and leave the file untouched.
+        let r = pin_ssh_host_key_at(&path, "vm.example.com", 22, "ZGlmZmVyZW50", "ssh-ed25519");
+        assert!(r.is_err(), "duplicate (host, port) must be refused");
+        assert!(
+            r.unwrap_err().contains("already exists"),
+            "error should say the entry already exists"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "file must not be modified on refusal");
+    }
+
+    #[test]
+    fn pin_ssh_host_key_at_creates_parent_dir_with_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Parent dir does not exist yet.
+        let path = tmp.path().join("nested").join(".trail").join("known_hosts");
+        pin_ssh_host_key_at(&path, "vm.example.com", 2222, "a2V5Ynl0ZXM=", "ssh-ed25519")
+            .expect("pin should create the parent dir");
+        assert!(path.exists(), "known_hosts file should be created");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents.trim(),
+            "ssh-ed25519 a2V5Ynl0ZXM= [vm.example.com]:2222",
+            "non-standard port should use the [host]:port form"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let parent = path.parent().unwrap();
+            let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "parent dir should be mode 0700");
+        }
     }
 
     // === §X-4 — per-OS calendar permission deep-link helper ===
