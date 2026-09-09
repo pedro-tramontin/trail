@@ -562,6 +562,7 @@ mod tests {
                     path: PathBuf::from("/k"),
                 },
                 remote_path: PathBuf::from("/r/"),
+                known_hosts: PathBuf::from("/tmp/nonexistent_known_hosts"),
             },
             raw_retention_days: 7,
             pending_installs: vec![],

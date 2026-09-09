@@ -289,6 +289,31 @@ fn default_anonymization_strictness() -> String {
     "aggressive".to_string()
 }
 
+/// Resolve the canonical `known_hosts` path for the SSH transport.
+///
+/// Uses `dirs::home_dir()` (Windows-correct, already a workspace dep and
+/// used for exactly this in `voice/model_manager.rs::trail_models_dir`)
+/// rather than `env::var("HOME")`, which is not `#[cfg(unix)]`-gated and
+/// does not resolve correctly on Windows.
+///
+/// The fallback must NOT point into a world-writable directory: `/tmp` is
+/// mode 1777, so any local process could pre-create the path with its own
+/// host key and `check_port` would return `Match`, authorising an
+/// attacker-chosen server. `/var/empty` is the canonical always-unwritable
+/// directory on Unix, so a missing `HOME` fails the existence check rather
+/// than matching an attacker value.
+pub fn default_known_hosts_path() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        home.join(".trail").join("known_hosts")
+    } else {
+        // HOME unset is a misconfiguration we can't safely recover from.
+        // Use a path inside an unwritable directory as a sentinel that
+        // will fail the existence check rather than match an attacker
+        // value.
+        PathBuf::from("/var/empty/.trail/known_hosts")
+    }
+}
+
 /// Transport is an open-ended enum: v1 ships only `Ssh`, but
 /// `#[serde(tag = "type", rename_all = "snake_case")]` means v2 can
 /// add `Https` / `S3` / `Database` variants without breaking the
@@ -302,6 +327,8 @@ pub enum TransportConfig {
         user: String,
         auth: SshAuth,
         remote_path: PathBuf,
+        #[serde(default = "default_known_hosts_path")]
+        known_hosts: PathBuf,
     },
 }
 
