@@ -391,7 +391,7 @@ jobs:
         run: pnpm tauri build --debug
 
       - name: Upload Linux draft artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trail-draft-linux-${{ github.event.pull_request.number || 'manual' }}-${{ github.event.pull_request.head.sha || github.sha }}
           # The trail Cargo workspace has its root at the repo
@@ -478,7 +478,7 @@ jobs:
         run: pnpm tauri build --debug --target aarch64-apple-darwin
 
       - name: Upload macOS draft artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # The .app bundle is the unit on macOS — Gatekeeper,
           # `open`, and the Finder all expect a directory named
@@ -593,7 +593,7 @@ jobs:
         run: pnpm tauri build --debug
 
       - name: Upload Windows draft artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Same fix as draft-linux / draft-macos: the trail
           # Cargo workspace has its root at the repo root, so
