@@ -136,6 +136,16 @@
       "enabled": false
     },
     {
+      "description": "@sveltejs/vite-plugin-svelte majors are driven manually. The plugin is bundled in the `vite-stack` group with `vite` itself, and every release ≥ 5.0.0 peer-requires `vite ^6.0.0` or newer; the project is currently on `vite ^5.4.0` + `@sveltejs/vite-plugin-svelte ^4.0.4`. There is no drop-in upgrade path — bumping the plugin requires bumping vite, which is a manual drive per the rule above. Minors within the 4.x line stay enabled (they're compatible with Vite 5). Verified 2026-09-09: PR #276 was closed because the bot's 4 → 7 major bump failed all 3 platform draft builds with `Cannot read properties of undefined (reading 'config')` in vite-plugin-svelte@7.3.0's load-custom.js, which calls into a Vite 6+ hook that does not exist on Vite 5.",
+      "matchPackageNames": [
+        "@sveltejs/vite-plugin-svelte"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
       "description": "vitest majors are driven manually (vitest 2 → 3 required API changes in the api-mocking layer under tests/).",
       "matchPackageNames": [
         "vitest"
