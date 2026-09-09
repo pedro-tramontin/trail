@@ -164,6 +164,12 @@
     key_error: null,
     test_state: "idle",
     test_error: null,
+    // B1.S1b-ui — TOFU + Mismatch fields. Defaults are the
+    // "nothing pending" / "no mismatch held" states.
+    pending_fingerprint: null,
+    pending_trust_action: null,
+    pinning: false,
+    mismatch_held: false,
   });
 
   /** Emitted when the wizard finishes writing the config. The
