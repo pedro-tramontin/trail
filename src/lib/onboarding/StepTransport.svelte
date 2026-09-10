@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
-  import { writable, type Writable } from "svelte/store";
+  import { writable, get, type Writable } from "svelte/store";
   import type { StepTransportState } from "./types";
 
   /**
@@ -171,6 +171,50 @@
   // test without a key surfaces that exact error from
   // the backend, which is informative.
   const inputs_valid = $derived(host_valid && user_valid && port_valid);
+  // 2026-09-09 (Copilot review on PR #281): the Mismatch hold should
+  // release when the user changes the (host, port) they're targeting,
+  // not only when they click "Test connection" again. The hold
+  // applies to the SPECIFIC server that just presented the unexpected
+  // key — editing host or port means the user has moved on to a
+  // different target, so the held state + the stale-key payload both
+  // must clear. Same applies to the trust prompt + the pinner's
+  // stashed HostKeyUnknown payload: pinning after a host/port change
+  // would otherwise pin the OLD server's key against the NEW
+  // host_field, which is a real security bug (stale-key pinning).
+  //
+  // Implementation note — Svelte 5 store auto-subscribe ($store.X)
+  // tracks the WHOLE store, not individual fields. We use the
+  // auto-subscribe to track host + port (so the effect re-fires when
+  // either changes), then compare against remembered previous values
+  // to decide whether the body should run. The body is a no-op when
+  // the trigger was NOT a host/port change (e.g. test_connection
+  // setting pending_trust_action).
+  let prev_host = $state.host;
+  let prev_port = $state.port;
+  $effect(() => {
+    // Read host + port via auto-subscribe (these reads track the store
+    // for THIS effect). The body only acts when one of them changed.
+    const cur_host = $state.host;
+    const cur_port = $state.port;
+    const host_changed = cur_host !== prev_host;
+    const port_changed = cur_port !== prev_port;
+    prev_host = cur_host;
+    prev_port = cur_port;
+    if (!(host_changed || port_changed)) return;
+    // Editing host or port clears the Mismatch hold + the trust prompt +
+    // the test_error + the stale-key payload. The hold is bound to the
+    // SPECIFIC server that just presented the unexpected key — a
+    // different host:port means the user has moved on.
+    state.update((s) => {
+      s.mismatch_held = false;
+      s.pending_fingerprint = null;
+      s.pending_trust_action = null;
+      s.test_error = null;
+      s.test_state = "idle";
+      return s;
+    });
+    last_unknown_payload = null;
+  });
   const can_advance = $derived(
     inputs_valid && $state.ssh_key_path !== null && !$state.mismatch_held,
   );

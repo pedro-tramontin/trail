@@ -533,4 +533,87 @@ describe("StepTransport.svelte", () => {
     expect(screen.queryByTestId("transport-trust-cancel")).toBeNull();
     expect(screen.queryByTestId("transport-trust-confirm")).toBeNull();
   });
+
+  // Copilot review on PR #281 caught that the Mismatch hold should
+  // release when the user changes host or port (the hold is bound to
+  // the SPECIFIC server that just presented the unexpected key).
+  // The same effect clears the trust prompt + the stale-key payload
+  // so the user can't pin a previous server's key for a new target.
+  it("(u) Mismatch hold + trust prompt release on host change", async () => {
+    let test_calls = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        test_calls += 1;
+        // First test: Mismatch. Second test (after host change):
+        // would be Match if reached, but the test asserts the FIRST
+        // mismatch banner is gone WITHOUT re-clicking Test.
+        if (test_calls === 1) {
+          return Promise.reject(HOST_KEY_MISMATCH);
+        }
+        return Promise.resolve(undefined);
+      }
+      if (cmd === "generate_ssh_key") return Promise.resolve(MOCK_KEY_PATH);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "vps.example.com" },
+    });
+    await fireEvent.input(screen.getByTestId("transport-user"), {
+      target: { value: "pedro" },
+    });
+    await fireEvent.click(screen.getByTestId("transport-generate-key"));
+    await screen.findByTestId("transport-key-path");
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    expect(await screen.findByTestId("transport-mismatch-banner")).toBeTruthy();
+    expect(
+      (screen.getByTestId("transport-next") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // Now edit the host. The effect fires and clears mismatch_held,
+    // pending_*, test_error, and the mismatch banner is gone.
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "other.example.com" },
+    });
+    // The mismatch banner is gone (without clicking Test again).
+    expect(screen.queryByTestId("transport-mismatch-banner")).toBeNull();
+    // Next is re-enabled (host + user + port valid + key attached +
+    // mismatch_held now false).
+    expect(
+      (screen.getByTestId("transport-next") as HTMLButtonElement).disabled,
+    ).toBe(false);
+    // test_ssh_connection was NOT re-called by the host-change effect.
+    expect(test_calls).toBe(1);
+  });
+
+  // Same effect: trust prompt + last_unknown_payload clear on host
+  // change so a subsequent "Yes, trust" click can't pin a stale key
+  // for the new host. (Copilot's flag-2.)
+  it("(v) Trust prompt releases on host change and stale-key pin is blocked", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(HOST_KEY_UNKNOWN);
+      }
+      if (cmd === "pin_ssh_host_key") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "first.example.com" },
+    });
+    await fireEvent.input(screen.getByTestId("transport-user"), {
+      target: { value: "pedro" },
+    });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    expect(await screen.findByTestId("transport-trust-prompt")).toBeTruthy();
+    // Edit the host. The trust prompt clears.
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "second.example.com" },
+    });
+    expect(screen.queryByTestId("transport-trust-prompt")).toBeNull();
+    // pin_ssh_host_key was NEVER called.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "pin_ssh_host_key",
+      expect.anything(),
+    );
+  });
 });

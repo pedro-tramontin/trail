@@ -173,9 +173,11 @@ pub async fn test_ssh_connection(
 
 /// Append an OpenSSH-format entry to the known_hosts file at `path`.
 ///
-/// The entry is `<key_type> <key_b64> <host_field>:<port>` where
+/// The entry is `<host_field>:<port> <key_type> <key_b64>` where
 /// `<host_field>` is the bare host for port 22 and `[host]` for
-/// non-standard ports (OpenSSH convention). The parent directory is
+/// non-standard ports (OpenSSH convention). The host:port is in the
+/// **first** field — this is the field `ssh2::KnownHosts::check_port()`
+/// matches against, so the order matters. The parent directory is
 /// created with mode 0700 and the file with mode 0600.
 ///
 /// Refuses (returns `Err`) if an entry for `(host, port)` already
@@ -205,10 +207,19 @@ fn pin_ssh_host_key_at(
         .map_err(|e| format!("invalid key_b64: {e}"))?;
 
     // Refuse if an entry for (host, port) already exists. We read the
-    // file as text and look for a line whose comment field ends with
-    // ":<port>" AND whose host field matches `host` or `[host]`. This
-    // is robust enough for v1 (the only writer is this command, so the
-    // format is under our control).
+    // file as text and look for a line whose first field equals
+    // `<host>:<port>` or `[<host>]:<port>`. This is robust enough for
+    // v1 (the only writer is this command, so the format is under
+    // our control).
+    //
+    // The line format is the standard OpenSSH known_hosts HashedHostNames
+    // form:
+    //   <host_field>:<port> <key_type> <key_b64> [<comment>]
+    // (the comment is optional and we omit it). ssh2's
+    // `KnownHostFileKind::OpenSSH` parser expects the hostname in the
+    // FIRST field — see transport::check_host_key's call to
+    // kh.check_port(host, port, key), which matches on the parsed
+    // host/port, not on the comment.
     if path.exists() {
         let existing =
             std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -217,15 +228,15 @@ fn pin_ssh_host_key_at(
         } else {
             format!("[{host}]")
         };
-        let comment = format!("{host_field}:{port}");
+        let host_port = format!("{host_field}:{port}");
         for line in existing.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            // OpenSSH line: <keytype> <b64> <comment...>
-            if let Some(rest) = trimmed.splitn(3, ' ').nth(2) {
-                if rest.trim() == comment {
+            // OpenSSH line: <host_port> <keytype> <b64> [comment...]
+            if let Some(first) = trimmed.split_whitespace().next() {
+                if first == host_port {
                     return Err(format!("entry for {host}:{port} already exists"));
                 }
             }
@@ -259,7 +270,13 @@ fn pin_ssh_host_key_at(
     } else {
         format!("[{host}]")
     };
-    writeln!(file, "{key_type} {key_b64} {host_field}:{port}")
+    // OpenSSH known_hosts format — host FIRST (this is what
+    // ssh2::KnownHosts::check_port() matches against):
+    //   <host_field>:<port> <key_type> <key_b64>
+    // The previous field order (<key_type> <key_b64> <host>:port) was
+    // caught by Copilot review on PR #281: ssh2's parser would never
+    // find the entry, so every connect would return HostKeyUnknown.
+    writeln!(file, "{host_field}:{port} {key_type} {key_b64}")
         .map_err(|e| format!("write to {}: {e}", path.display()))?;
 
     Ok(())
@@ -1063,10 +1080,14 @@ mod tests {
         pin_ssh_host_key_at(&path, "vm.example.com", 22, "a2V5Ynl0ZXM=", "ssh-ed25519")
             .expect("first pin should succeed");
         let contents = std::fs::read_to_string(&path).unwrap();
+        // OpenSSH known_hosts format: hostname FIRST, then keytype, then
+        // base64 key. ssh2's KnownHosts::check_port matches on the parsed
+        // hostname from the first field. (Copilot review on PR #281
+        // caught the previous order having keytype first.)
         assert_eq!(
             contents.trim(),
-            "ssh-ed25519 a2V5Ynl0ZXM= vm.example.com:22",
-            "entry should be OpenSSH-format with bare host for port 22"
+            "vm.example.com:22 ssh-ed25519 a2V5Ynl0ZXM=",
+            "entry should be OpenSSH-format with bare host for port 22 in field 1"
         );
     }
 
@@ -1100,8 +1121,8 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents.trim(),
-            "ssh-ed25519 a2V5Ynl0ZXM= [vm.example.com]:2222",
-            "non-standard port should use the [host]:port form"
+            "[vm.example.com]:2222 ssh-ed25519 a2V5Ynl0ZXM=",
+            "non-standard port should use [host]:port in field 1"
         );
         #[cfg(unix)]
         {
