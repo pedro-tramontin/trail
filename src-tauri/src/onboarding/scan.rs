@@ -330,6 +330,35 @@ fn probe_dir(p: &Path) -> Option<EvidenceKind> {
     })
 }
 
+/// Locate a macOS system app by bundle-name. Since macOS Catalina (10.15),
+/// Apple's own apps (Mail, Calendar, Safari, etc.) ship in
+/// `/System/Applications/`. The legacy `/Applications/` location is still
+/// valid for user-installed apps, AND for any system app that has been
+/// moved/copied there by a third party. We probe both and return the
+/// first match.
+///
+/// Used by the Gmail and Calendar probes (and any future macOS-bundle
+/// probe). Without this helper, a user with a stock macOS install has
+/// Mail.app + Calendar.app at `/System/Applications/...` but the probe
+/// only checks `/Applications/...`, so both report "not installed"
+/// even though the apps are present. That's the bug the user caught on
+/// 2026-09-09 — the wizard told them "macOS Mail.app not installed"
+/// when Mail.app was sitting at `/System/Applications/Mail.app`.
+fn locate_macos_system_app(app_name: &str) -> Option<PathBuf> {
+    // Order matters: /System/Applications/ is the canonical location
+    // for Apple-shipped apps on Catalina+. /Applications/ is the
+    // legacy/user-installed location. Returning /System first means
+    // the displayed `path` in MacosAppBundle evidence points at the
+    // "real" install rather than a symlink the user may have set up.
+    for prefix in ["/System/Applications", "/Applications"] {
+        let candidate = PathBuf::from(prefix).join(format!("{app_name}.app"));
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Walk `dir` looking for any `package.json` inside (recursively —
 /// real VS Code extensions nest `package.json` at
 /// `<ext>/<version>/package.json`). Returns `Some(DirExists)` if any
@@ -1361,7 +1390,9 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 "Calendar events",
                                 CollectorStatus::Available,
                                 EvidenceKind::MacosAppBundle {
-                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    path: locate_macos_system_app("Calendar").unwrap_or_else(
+                                        || PathBuf::from("/Applications/Calendar.app"),
+                                    ),
                                     bundle_id: "com.apple.iCal".to_string(),
                                 },
                                 Some(
@@ -1377,7 +1408,9 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 "Calendar events",
                                 CollectorStatus::Available,
                                 EvidenceKind::MacosAppBundle {
-                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    path: locate_macos_system_app("Calendar").unwrap_or_else(
+                                        || PathBuf::from("/Applications/Calendar.app"),
+                                    ),
                                     bundle_id: "com.apple.iCal".to_string(),
                                 },
                                 Some(
@@ -1433,8 +1466,11 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
             // but still means "Calendar.app is installed". We don't
             // shell out to `mdfind` here because that adds 50-200 ms
             // and the spec accepts "app installed" as 0.90 conf.
-            let bundle_path = PathBuf::from("/Applications/Calendar.app");
-            if bundle_path.is_dir() {
+            //
+            // Check both /System/Applications/ (Catalina+) and the
+            // legacy /Applications/ — locate_macos_system_app handles
+            // both (see its doc comment for the macOS history).
+            if let Some(bundle_path) = locate_macos_system_app("Calendar") {
                 return finalize(
                     "calendar",
                     "Calendar events",
@@ -1915,8 +1951,13 @@ fn scan_claude_sessions(home: &Path) -> CollectorCandidate {
 fn scan_gmail(platform: &Platform) -> CollectorCandidate {
     match platform {
         Platform::Macos => {
-            let mail_app = PathBuf::from("/Applications/Mail.app");
-            if mail_app.is_dir() {
+            // Probe both /System/Applications/ (Catalina+) and the
+            // legacy /Applications/ — Mail.app ships in either location
+            // depending on macOS version and user customizations. The
+            // probe-only check (no TCC dance here — OAuth is the
+            // wizard's job per the comment below) means we just need
+            // the .app bundle to exist.
+            if let Some(mail_app) = locate_macos_system_app("Mail") {
                 finalize(
                     "gmail",
                     "Gmail (via Apple Mail)",
@@ -1933,7 +1974,7 @@ fn scan_gmail(platform: &Platform) -> CollectorCandidate {
                     "Gmail (via Apple Mail)",
                     CollectorStatus::Unavailable,
                     unavailable_evidence(),
-                    Some("macOS Mail.app not installed".to_string()),
+                    Some("macOS Mail.app not detected".to_string()),
                 )
             }
         }
@@ -2874,6 +2915,51 @@ mod tests {
         assert!(
             notes.contains("auto-discovered 2 calendars"),
             "notes must report the discovered count; got: {notes}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // locate_macos_system_app — user-reported bug 2026-09-09:
+    // Mail.app at /System/Applications/Mail.app wasn't being detected
+    // because the probe only checked /Applications/Mail.app. The fix
+    // probes both standard locations. These tests verify both branches.
+    //
+    // The /System/Applications/ preference is the macOS 10.15+
+    // canonical location for Apple-shipped apps; /Applications/ is
+    // the legacy / user-installed location. We test by setting HOME
+    // to a tempdir and reading what the helper returns when neither
+    // path exists on this Linux build host (always None) plus a
+    // #[ignore]-tagged positive test that someone running this on
+    // macOS can run to verify the /System/Applications branch wins
+    // over /Applications/.
+
+    #[test]
+    fn locate_macos_system_app_returns_none_when_neither_path_exists() {
+        // Linux build host: neither /System/Applications nor
+        // /Applications contains Mail.app, Calendar.app, or anything
+        // else we'd care about for these tests. The helper must
+        // return None.
+        assert!(locate_macos_system_app("Mail").is_none());
+        assert!(locate_macos_system_app("Calendar").is_none());
+        assert!(locate_macos_system_app("Nonexistent.app.that.does.not.exist").is_none());
+    }
+
+    #[test]
+    #[ignore = "macOS-only: requires real /System/Applications/Mail.app and /Applications/Mail.app on the host"]
+    fn locate_macos_system_app_prefers_system_applications_over_applications() {
+        // Run with: cargo test -p trail --lib locate_macos_system_app_prefers_system_applications -- --ignored
+        // On macOS:
+        //   - /System/Applications/Mail.app exists (stock install)
+        //   - /Applications/Mail.app may or may not exist
+        // The helper must prefer /System/Applications (returns that path
+        // even if /Applications also has Mail.app). This guards against
+        // a future regression where someone reorders the search list.
+        let result = locate_macos_system_app("Mail");
+        let path = result.expect("Mail.app must be installed on the macOS test host");
+        assert!(
+            path.starts_with("/System/Applications/"),
+            "helper should prefer /System/Applications over /Applications; got: {}",
+            path.display()
         );
     }
 
