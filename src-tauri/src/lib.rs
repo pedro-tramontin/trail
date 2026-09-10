@@ -725,6 +725,7 @@ pub fn run() {
             // yet). Distinct from `health_check_transport` which
             // reads the on-disk config.
             commands::test_ssh_connection,
+            commands::pin_ssh_host_key,
             commands::validate_day_summary,
             commands::summarize_day,
             commands::record_review_diff,

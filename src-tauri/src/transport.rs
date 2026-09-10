@@ -25,7 +25,7 @@ use crate::config::{SshAuth, TransportConfig};
 /// v2 transports add their own variants (e.g. `S3(String)`, `Https(String)`)
 /// without breaking v1 callers that match on the v1 variants with a
 /// non-default arm.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize)]
 #[non_exhaustive]
 pub enum TransportError {
     #[error("ssh operation failed: {0}")]
@@ -37,16 +37,32 @@ pub enum TransportError {
     /// The server's host key is not yet pinned in `known_hosts`. Expected
     /// on first connect — the caller should surface the fingerprint and
     /// offer a trust-on-first-use prompt rather than fail hard.
+    ///
+    /// `key_b64` + `key_type` carry the raw key bytes (base64) + the
+    /// OpenSSH key type so the frontend can hand them straight to
+    /// `pin_ssh_host_key` on the explicit "Yes, trust" click — the
+    /// wizard never re-derives them from a second connection.
     #[error("unknown host key for {host}:{port} (fingerprint {fingerprint}) — not yet pinned")]
     HostKeyUnknown {
         host: String,
         port: u16,
         fingerprint: String,
+        key_b64: String,
+        key_type: String,
     },
     /// The server's host key changed since onboarding. Never expected —
     /// must be a hard, non-dismissible stop (possible man-in-the-middle).
+    ///
+    /// `presented_fingerprint` is the SHA256 fingerprint of the key the
+    /// unexpected server just presented, so a security-conscious user can
+    /// compare it against out-of-band knowledge (Claude's flag 2 on
+    /// PR #271).
     #[error("HOST KEY MISMATCH for {host}:{port} — refusing to connect")]
-    HostKeyMismatch { host: String, port: u16 },
+    HostKeyMismatch {
+        host: String,
+        port: u16,
+        presented_fingerprint: String,
+    },
 }
 
 /// The transport contract for pushing payloads to the VPS.
@@ -337,7 +353,7 @@ fn check_host_key(
         }
     }
 
-    let (key, _key_type) = sess
+    let (key, key_type) = sess
         .host_key()
         .ok_or_else(|| TransportError::Ssh("server presented no host key".into()))?;
 
@@ -354,8 +370,33 @@ fn check_host_key(
         None => String::from("<fingerprint unavailable>"),
     };
 
+    // The raw key bytes (base64, standard alphabet WITH padding) + the
+    // OpenSSH key type, so the frontend can hand them straight to
+    // `pin_ssh_host_key` on the explicit "Yes, trust" click.
+    let key_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(key)
+    };
+    let key_type = host_key_type_to_openssh(key_type).to_string();
+
     let result = kh.check_port(host, port, key);
-    map_check_result(result, host, port, &fingerprint)
+    map_check_result(result, host, port, &fingerprint, &key_b64, &key_type)
+}
+
+/// Map ssh2's `HostKeyType` enum to the OpenSSH key-type string used in
+/// known_hosts entries (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`,
+/// etc.). `Unknown` (and any future variant) falls back to `ssh-unknown`
+/// so the entry is still written rather than silently dropped.
+fn host_key_type_to_openssh(t: ssh2::HostKeyType) -> &'static str {
+    match t {
+        ssh2::HostKeyType::Rsa => "ssh-rsa",
+        ssh2::HostKeyType::Dss => "ssh-dss",
+        ssh2::HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
+        ssh2::HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
+        ssh2::HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
+        ssh2::HostKeyType::Ed25519 => "ssh-ed25519",
+        ssh2::HostKeyType::Unknown => "ssh-unknown",
+    }
 }
 
 /// Pure mapping from ssh2::CheckResult to TransportError. Extracted as a
@@ -365,6 +406,8 @@ fn map_check_result(
     host: &str,
     port: u16,
     fingerprint: &str,
+    key_b64: &str,
+    key_type: &str,
 ) -> Result<(), TransportError> {
     match r {
         ssh2::CheckResult::Match => Ok(()),
@@ -372,10 +415,13 @@ fn map_check_result(
             host: host.to_string(),
             port,
             fingerprint: fingerprint.to_string(),
+            key_b64: key_b64.to_string(),
+            key_type: key_type.to_string(),
         }),
         ssh2::CheckResult::Mismatch => Err(TransportError::HostKeyMismatch {
             host: host.to_string(),
             port,
+            presented_fingerprint: fingerprint.to_string(),
         }),
         ssh2::CheckResult::Failure => Err(TransportError::Ssh(format!(
             "host key check failed for {host}:{port}"
@@ -447,7 +493,11 @@ mod tests {
         // Agent's Linux host has no entry in the `com.pedrotramontin.trail`
         // macOS Keychain service. The test exercises the
         // `load_private_key_pem()` error-mapping path: the result must
-        // be `Err(...)` (any variant proving the mapping is wired up).
+        // be the specific `TransportError::Ssh` variant carrying the
+        // "SSH key not generated yet" message (not a generic Io error,
+        // and not a host-key variant — the keychain read fails BEFORE
+        // any TCP connection is opened, so `check_host_key` and
+        // `userauth_pubkey_memory` are never reached).
         let t = SshTransport::new(
             "vm.example.com".into(),
             22,
@@ -460,13 +510,20 @@ mod tests {
         );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(t.health_check());
-        assert!(
-            matches!(
-                result,
-                Err(TransportError::Ssh(_)) | Err(TransportError::Io(_))
-            ),
-            "expected Ssh or Io error when keychain has no entry, got: {result:?}"
-        );
+        match result {
+            Err(TransportError::Ssh(msg)) => {
+                assert!(
+                    msg.contains("SSH key not generated yet"),
+                    "expected the keychain-missing message, got: {msg:?}"
+                );
+            }
+            other => panic!("expected TransportError::Ssh (keychain missing), got: {other:?}"),
+        }
+        // NOTE: `userauth_pubkey_memory` is structurally guaranteed to be
+        // unreached here — `load_private_key_pem()` is called at the top of
+        // `health_check` (before `spawn_blocking`), so a missing keychain
+        // entry returns early and never opens a TCP connection, never runs
+        // `check_host_key`, and never attempts auth.
     }
 
     /// Thread 5: pure mapping from ssh2::CheckResult to TransportError
@@ -475,40 +532,59 @@ mod tests {
     #[test]
     fn map_check_result_returns_expected_variant_per_arm() {
         // Match → Ok
-        assert!(
-            map_check_result(ssh2::CheckResult::Match, "vm.example.com", 22, "SHA256:abc").is_ok()
-        );
+        assert!(map_check_result(
+            ssh2::CheckResult::Match,
+            "vm.example.com",
+            22,
+            "SHA256:abc",
+            "a2V5Ynl0ZXM=",
+            "ssh-ed25519",
+        )
+        .is_ok());
 
-        // NotFound → HostKeyUnknown carrying host/port/fingerprint
+        // NotFound → HostKeyUnknown carrying host/port/fingerprint/key bytes
         match map_check_result(
             ssh2::CheckResult::NotFound,
             "vm.example.com",
             22,
             "SHA256:abc",
+            "a2V5Ynl0ZXM=",
+            "ssh-ed25519",
         ) {
             Err(TransportError::HostKeyUnknown {
                 host,
                 port,
                 fingerprint,
+                key_b64,
+                key_type,
             }) => {
                 assert_eq!(host, "vm.example.com");
                 assert_eq!(port, 22);
                 assert_eq!(fingerprint, "SHA256:abc");
+                assert_eq!(key_b64, "a2V5Ynl0ZXM=");
+                assert_eq!(key_type, "ssh-ed25519");
             }
             other => panic!("expected HostKeyUnknown, got {other:?}"),
         }
 
-        // Mismatch → HostKeyMismatch carrying host/port (no fingerprint;
-        // mismatch means we already HAVE a pinned key, no need to show one)
+        // Mismatch → HostKeyMismatch carrying host/port + the fingerprint
+        // the unexpected server just presented (so the UI can show it).
         match map_check_result(
             ssh2::CheckResult::Mismatch,
             "vm.example.com",
             22,
             "SHA256:abc",
+            "a2V5Ynl0ZXM=",
+            "ssh-ed25519",
         ) {
-            Err(TransportError::HostKeyMismatch { host, port }) => {
+            Err(TransportError::HostKeyMismatch {
+                host,
+                port,
+                presented_fingerprint,
+            }) => {
                 assert_eq!(host, "vm.example.com");
                 assert_eq!(port, 22);
+                assert_eq!(presented_fingerprint, "SHA256:abc");
             }
             other => panic!("expected HostKeyMismatch, got {other:?}"),
         }
@@ -519,6 +595,8 @@ mod tests {
             "vm.example.com",
             22,
             "SHA256:abc",
+            "a2V5Ynl0ZXM=",
+            "ssh-ed25519",
         ) {
             Err(TransportError::Ssh(msg)) => {
                 assert!(msg.contains("vm.example.com:22"));

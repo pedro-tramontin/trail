@@ -353,6 +353,21 @@ export interface StepTransportState {
   /** "Test connection" button state. */
   test_state: "idle" | "testing" | "ok" | "error";
   test_error: string | null;
+  /** B1.S1b-ui — TOFU wizard state. */
+  /** SHA256 fingerprint of the server's host key, shown verbatim in
+   *  the "Trust this key?" prompt (HostKeyUnknown) or the Mismatch
+   *  banner (HostKeyMismatch). `null` until a structured host-key
+   *  error arrives from `test_ssh_connection`. */
+  pending_fingerprint: string | null;
+  /** Which trust action the UI is currently prompting for. `null`
+   *  when no host-key prompt is showing. */
+  pending_trust_action: "unknown" | "mismatch" | null;
+  /** True while `pin_ssh_host_key` is in flight (disables the
+   *  trust/cancel buttons). */
+  pinning: boolean;
+  /** True while the Mismatch banner is showing. Gates `can_advance`
+   *  so Next stays disabled until host or port changes. */
+  mismatch_held: boolean;
 }
 
 // ---------------------------------------------------------------------------
