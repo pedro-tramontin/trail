@@ -316,13 +316,42 @@
       // future TransportError variant), we still show SOMETHING
       // useful — JSON.stringify the whole payload so the user can
       // copy-paste it into a bug report.
+      //
+      // err-shape handling (the previous fix had a bug here):
+      // Tauri's invoke() can reject with any of:
+      //   - a string (the IPC-returned error serialized to a string)
+      //   - an Error object (if the JS side threw, e.g. permission
+      //     denied on the IPC channel)
+      //   - a plain object (if the JSON payload was misparsed by a
+      //     Tauri version mismatch — happened on the user's box
+      //     and surfaced as "Unexpected error: [object Object]")
+      // String() on the last two produces "[object Object]" or
+      // "Error: <msg>". The robust pattern: prefer err.message when
+      // it's an Error; otherwise try JSON.stringify directly on the
+      // object (which produces a real JSON string we can then parse
+      // + dispatch on). Only fall through to String(err) as a last
+      // resort, after we have something useful to display.
       let raw: string;
       let parsed: Record<string, unknown> | null = null;
+      if (err instanceof Error) {
+        // Tauri IPC-level error (permission denied, command not
+        // found, etc.). err.message is the useful part.
+        raw = err.message;
+      } else if (typeof err === "string") {
+        raw = err;
+      } else {
+        // Plain object (or anything else non-string). JSON.stringify
+        // it first so we can JSON.parse + dispatch on the result.
+        try {
+          raw = JSON.stringify(err);
+        } catch {
+          raw = String(err); // last-resort fallback; may be "[object Object]"
+        }
+      }
       try {
-        raw = String(err);
         parsed = JSON.parse(raw);
       } catch {
-        raw = String(err);
+        parsed = null;
       }
 
       const hku = parsed?.HostKeyUnknown as

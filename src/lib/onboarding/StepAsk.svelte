@@ -604,6 +604,33 @@
   }
 
   /**
+   * §X-4b-retry — used by the "Open System Settings" button when
+   * the calendar permission is in the `denied` state. macOS only
+   * lists an app in Privacy & Security → Calendars after the app
+   * has REQUESTED EventKit access at least once. If the user
+   * denied the very first TCC dialog, the app is not in the
+   * list and the deep-link alone is useless (user reported
+   * 2026-09-10: "I don't see the Trail app"). Calling
+   * `grant_calendar_permission` re-triggers the TCC dialog
+   * (the user can grant OR deny — either way macOS now lists
+   * Trail in System Settings). On a successful re-grant the
+   * wizard state moves out of `denied` automatically; on a
+   * re-deny we deep-link so the user can flip the toggle
+   * manually.
+   */
+  async function open_calendar_permission_settings_with_retry(): Promise<void> {
+    // Re-request first so macOS registers Trail. Await the
+    // grant_calendar_permission() promise so calendar_permission_state
+    // updates before the deep-link fires (avoids a race where the
+    // deep-link opens and the user sees a "Trail not listed" pane).
+    await grant_calendar_permission();
+    // Whether the user granted or re-denied, deep-link to
+    // System Settings → Calendars so they can verify / flip the
+    // toggle if they re-denied.
+    open_calendar_permission_settings();
+  }
+
+  /**
    * §X-4b — trigger the macOS EventKit TCC dialog via
    * `request_calendar_permission_cmd`. The Rust side
    * calls `EKEventStore.requestFullAccessToEventsWithCompletion:`
@@ -862,20 +889,27 @@
                         class="permission-denied"
                         data-testid="calendar-permission-denied"
                       >
-                        Permission was denied. In System Settings
-                        (Privacy &amp; Security → Calendars), find
-                        Trail in the app list and turn the toggle
-                        ON, then return here and click
-                        'Grant calendar permission' again.
+                        Permission was denied. Click
+                        <strong>Re-request permission</strong>
+                        below — macOS will show the Trail entry
+                        in Privacy &amp; Security → Calendars
+                        (so you can flip the toggle on), and
+                        the TCC prompt will reappear for one-click
+                        granting.
                       </span>
                     {/if}
                     <button
                       type="button"
                       class="open-permission-settings secondary"
                       data-testid="open-calendar-permission-settings"
-                      onclick={open_calendar_permission_settings}
+                      disabled={calendar_permission_in_flight}
+                      onclick={calendar_permission_state === "denied"
+                        ? open_calendar_permission_settings_with_retry
+                        : open_calendar_permission_settings}
                     >
-                      Open System Settings
+                      {calendar_permission_state === "denied"
+                        ? "Re-request permission"
+                        : "Open System Settings"}
                     </button>
                   {/if}
                 {/if}
