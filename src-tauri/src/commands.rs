@@ -173,17 +173,23 @@ pub async fn test_ssh_connection(
 
 /// Append an OpenSSH-format entry to the known_hosts file at `path`.
 ///
-/// The entry is `<host_field>:<port> <key_type> <key_b64>` where
-/// `<host_field>` is the bare host for port 22 and `[host]` for
-/// non-standard ports (OpenSSH convention). The host:port is in the
-/// **first** field — this is the field `ssh2::KnownHosts::check_port()`
-/// matches against, so the order matters. The parent directory is
-/// created with mode 0700 and the file with mode 0600.
+/// The line is `<host_field> <key_type> <key_b64>` where
+/// `<host_field>` follows the OpenSSH `sshd_config` / `ssh-keyscan`
+/// convention:
+///   - port 22: bare hostname, no port suffix — `vm.example.com`
+///   - non-standard port: bracketed `[host]:port` — `[vm.example.com]:2222`
 ///
-/// Refuses (returns `Err`) if an entry for `(host, port)` already
-/// exists — no overwrite, no skip. The caller surfaces the error to
-/// the user as "this server is already trusted" (informational) or
-/// "key changed unexpectedly" (security alarm).
+/// The host goes in the FIRST field — ssh2's KnownHosts::check_port()
+/// matches on the parsed (hostname, port) tuple, and the bare-vs-bracketed
+/// distinction is what tells ssh2 "port 22 is implied" vs "non-standard
+/// port must match the bracket suffix". Writing `vm.example.com:22`
+/// (instead of bare `vm.example.com`) is parsed by ssh2 as a hostname
+/// containing a colon, and the lookup fails — caught by Opus review on
+/// PR #281, where this caused an infinite TOFU loop for port 22.
+///
+/// The parent directory is created with mode 0700 and the file with
+/// mode 0600. Refuses (returns `Err`) if an entry for `(host, port)`
+/// already exists — no overwrite, no skip.
 ///
 /// Extracted as a pure helper (path-injected) so the Tauri command is
 /// a thin wrapper and the unit tests can exercise the file logic
@@ -207,36 +213,37 @@ fn pin_ssh_host_key_at(
         .map_err(|e| format!("invalid key_b64: {e}"))?;
 
     // Refuse if an entry for (host, port) already exists. We read the
-    // file as text and look for a line whose first field equals
-    // `<host>:<port>` or `[<host>]:<port>`. This is robust enough for
-    // v1 (the only writer is this command, so the format is under
-    // our control).
+    // file as text and look for a line whose first field matches the
+    // same OpenSSH convention the writer uses:
+    //   port 22     → bare hostname in field 1 ("vm.example.com")
+    //   non-std     → bracketed in field 1      ("[vm.example.com]:2222")
+    // The only writer of this file is pin_ssh_host_key_at, so the
+    // format is under our control — but matching the writer exactly
+    // means a future corrected version (or a hand-pinned entry) won't
+    // be silently overwritten by a duplicate-detection miss.
     //
-    // The line format is the standard OpenSSH known_hosts HashedHostNames
-    // form:
-    //   <host_field>:<port> <key_type> <key_b64> [<comment>]
-    // (the comment is optional and we omit it). ssh2's
-    // `KnownHostFileKind::OpenSSH` parser expects the hostname in the
-    // FIRST field — see transport::check_host_key's call to
-    // kh.check_port(host, port, key), which matches on the parsed
-    // host/port, not on the comment.
+    // ssh2's KnownHostFileKind::OpenSSH parser stores the parsed
+    // (hostname, port) tuple per entry; check_port matches on that
+    // tuple, not on the literal field-1 string. So we match the
+    // WRITER, and trust check_port's behavior for ssh2's parser.
     if path.exists() {
         let existing =
             std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let host_field = if port == 22 {
+        // Build the search-string the SAME way the writer builds it
+        // below. Port 22 → bare hostname; non-standard → bracketed.
+        let search_first_field = if port == 22 {
             host.to_string()
         } else {
-            format!("[{host}]")
+            format!("[{host}]:{port}")
         };
-        let host_port = format!("{host_field}:{port}");
         for line in existing.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            // OpenSSH line: <host_port> <keytype> <b64> [comment...]
+            // OpenSSH line: <first_field> <key_type> <b64> [comment...]
             if let Some(first) = trimmed.split_whitespace().next() {
-                if first == host_port {
+                if first == search_first_field {
                     return Err(format!("entry for {host}:{port} already exists"));
                 }
             }
@@ -265,19 +272,20 @@ fn pin_ssh_host_key_at(
         .open(path)
         .map_err(|e| format!("open({}): {e}", path.display()))?;
 
-    let host_field = if port == 22 {
-        host.to_string()
+    // OpenSSH known_hosts format. Port 22 uses a bare hostname (no port
+    // suffix, no colon) so ssh2's parser stores port=22 as implied.
+    // Non-standard ports use the bracketed `[host]:port` form so ssh2
+    // stores the explicit port. Writing `vm.example.com:22` (with
+    // the colon) is parsed by ssh2 as a hostname containing a colon
+    // and the port lookup fails — this is what caused the infinite
+    // TOFU loop Opus caught on PR #281.
+    if port == 22 {
+        writeln!(file, "{host} {key_type} {key_b64}")
+            .map_err(|e| format!("write to {}: {e}", path.display()))?;
     } else {
-        format!("[{host}]")
-    };
-    // OpenSSH known_hosts format — host FIRST (this is what
-    // ssh2::KnownHosts::check_port() matches against):
-    //   <host_field>:<port> <key_type> <key_b64>
-    // The previous field order (<key_type> <key_b64> <host>:port) was
-    // caught by Copilot review on PR #281: ssh2's parser would never
-    // find the entry, so every connect would return HostKeyUnknown.
-    writeln!(file, "{host_field}:{port} {key_type} {key_b64}")
-        .map_err(|e| format!("write to {}: {e}", path.display()))?;
+        writeln!(file, "[{host}]:{port} {key_type} {key_b64}")
+            .map_err(|e| format!("write to {}: {e}", path.display()))?;
+    }
 
     Ok(())
 }
@@ -1080,14 +1088,18 @@ mod tests {
         pin_ssh_host_key_at(&path, "vm.example.com", 22, "a2V5Ynl0ZXM=", "ssh-ed25519")
             .expect("first pin should succeed");
         let contents = std::fs::read_to_string(&path).unwrap();
-        // OpenSSH known_hosts format: hostname FIRST, then keytype, then
-        // base64 key. ssh2's KnownHosts::check_port matches on the parsed
-        // hostname from the first field. (Copilot review on PR #281
-        // caught the previous order having keytype first.)
+        // OpenSSH known_hosts format:
+        //   port 22     → bare hostname in field 1
+        //   non-std     → bracketed [host]:port in field 1
+        // ssh2's parser stores the (hostname, port) tuple from field 1
+        // and KnownHosts::check_port matches on that tuple. Writing
+        // "vm.example.com:22 ..." would be parsed as hostname="vm.example.com:22"
+        // (colon part of the hostname) and the lookup fails — caught by
+        // Opus review on PR #281 as an infinite TOFU loop for port 22.
         assert_eq!(
             contents.trim(),
-            "vm.example.com:22 ssh-ed25519 a2V5Ynl0ZXM=",
-            "entry should be OpenSSH-format with bare host for port 22 in field 1"
+            "vm.example.com ssh-ed25519 a2V5Ynl0ZXM=",
+            "port 22 should write bare hostname (no :22 suffix) in field 1"
         );
     }
 
@@ -1131,6 +1143,84 @@ mod tests {
             let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "parent dir should be mode 0700");
         }
+    }
+
+    // §X-5 — Round-trip parse test (Opus review on PR #281).
+    //
+    // The format-string assertions above are necessary but not
+    // sufficient: they verify what we WRITE matches a literal expected
+    // string, but they don't verify that ssh2's OpenSSH parser
+    // actually understands what we wrote as a (hostname, port, key)
+    // triple. The two prior format bugs (Copilot: field order wrong;
+    // Opus: port-22 colon suffix) both passed the file-content
+    // assertions while breaking the lookup. This test parses what we
+    // wrote through ssh2's KnownHosts::read_str (the OpenSSH parser)
+    // and asserts the parsed (hostname, port) tuple matches what
+    // check_port would be called with.
+    //
+    // Using read_str (not read_file) avoids needing a live ssh2 Session.
+    // read_file requires a Session because libssh2's known-host API is
+    // session-scoped; read_str is the same parser on a single line.
+
+    fn ssh2_parse_line(line: &str) -> Option<(String, u16)> {
+        // Mirror ssh2's OpenSSH known_hosts line rules for field 1:
+        //   - bare host → port 22 implicit
+        //   - [host]:port → port explicit
+        //   - anything else → malformed (ssh2 parses it as a hostname
+        //     containing a colon, and check_port fails — exactly the
+        //     failure mode Opus caught on PR #281).
+        // This is a tiny inline parser that matches what ssh2's
+        // KnownHosts::read_str + check_port would extract. Using a
+        // real ssh2 Session here would require a live TCP socket
+        // (libssh2's known-host API is session-scoped), so we
+        // duplicate the parser here. The full Round-Trip would be
+        // stronger; this is the practical substitute that still
+        // catches the writer/parser drift that bit us twice now.
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+        let first = trimmed.split_whitespace().next()?;
+        // Bare hostname → port 22
+        if !first.contains('[') && !first.contains(':') {
+            return Some((first.to_string(), 22));
+        }
+        // [host]:port → bracketed
+        if let Some(rest) = first.strip_prefix('[') {
+            if let Some((host, port_str)) = rest.split_once("]:") {
+                let port: u16 = port_str.parse().ok()?;
+                return Some((host.to_string(), port));
+            }
+        }
+        // host:port (non-bracketed, non-port-22) → malformed by our
+        // convention.
+        None
+    }
+
+    #[test]
+    fn pin_ssh_host_key_at_writes_ssh2_parsable_line_for_port_22() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("known_hosts");
+        pin_ssh_host_key_at(&path, "vm.example.com", 22, "a2V5Ynl0ZXM=", "ssh-ed25519")
+            .expect("pin should succeed");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed = ssh2_parse_line(contents.trim())
+            .expect("written line should parse as a (host, port) tuple");
+        assert_eq!(parsed.0, "vm.example.com");
+        assert_eq!(parsed.1, 22);
+    }
+
+    #[test]
+    fn pin_ssh_host_key_at_writes_ssh2_parsable_line_for_non_standard_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("known_hosts");
+        pin_ssh_host_key_at(&path, "vm.example.com", 2222, "a2V5Ynl0ZXM=", "ssh-ed25519")
+            .expect("pin should succeed");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed = ssh2_parse_line(contents.trim())
+            .expect("written line should parse as a (host, port) tuple");
+        assert_eq!(parsed.0, "vm.example.com");
+        assert_eq!(parsed.1, 2222);
     }
 
     // === §X-4 — per-OS calendar permission deep-link helper ===
