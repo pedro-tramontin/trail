@@ -1415,8 +1415,9 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 },
                                 Some(
                                     "EventKit permission not yet requested; \
-                                     click 'Grant permission' in the wizard \
-                                     to trigger the TCC dialog. After granting, \
+                                     on the next screen, click the \
+                                     'Grant calendar permission' button to \
+                                     trigger the TCC dialog. After granting, \
                                      the Calendars entry appears in System \
                                      Settings → Privacy & Security, and the \
                                      'Open System Settings' button becomes useful \
