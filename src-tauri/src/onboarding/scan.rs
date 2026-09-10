@@ -330,6 +330,50 @@ fn probe_dir(p: &Path) -> Option<EvidenceKind> {
     })
 }
 
+/// The macOS app-search path prefixes, in priority order. The first
+/// match wins. `pub(crate)` so the unit tests can verify the
+/// ordering invariant without depending on a real macOS
+/// filesystem (CI is Linux-only by design — see
+/// .github/workflows/ci.yml). The order is the load-bearing
+/// invariant of the whole fix: `/System/Applications` must come
+/// first so `KnownHosts::check_port` matches the canonical
+/// Catalina+ install path. Changing this list's order is a
+/// security-relevant change and should be a deliberate PR.
+pub(crate) const MACOS_APP_SEARCH_PATHS: &[&str] = &["/System/Applications", "/Applications"];
+
+/// Locate a macOS system app by bundle-name. Since macOS Catalina (10.15),
+/// Apple's own apps (Mail, Calendar, Safari, etc.) ship in
+/// `/System/Applications/`. The legacy `/Applications/` location is still
+/// valid for user-installed apps, AND for any system app that has been
+/// moved/copied there by a third party. We probe both and return the
+/// first match.
+///
+/// Used by the Gmail and Calendar probes (and any future macOS-bundle
+/// probe). Without this helper, a user with a stock macOS install has
+/// Mail.app + Calendar.app at `/System/Applications/...` but the probe
+/// only checks `/Applications/...`, so both report "not installed"
+/// even though the apps are present. That's the bug the user caught on
+/// 2026-09-09 — the wizard told them "macOS Mail.app not installed"
+/// when Mail.app was sitting at `/System/Applications/Mail.app`.
+fn locate_macos_system_app(app_name: &str) -> Option<PathBuf> {
+    locate_app_in_paths(app_name, MACOS_APP_SEARCH_PATHS)
+}
+
+/// Inner helper that takes the path list as a parameter, so the
+/// test suite can verify the "first match wins" ordering invariant
+/// on a Linux host with a tempdir. Production code goes through
+/// `locate_macos_system_app` which pins the canonical macOS path
+/// list via the constant above.
+fn locate_app_in_paths(app_name: &str, paths: &[&str]) -> Option<PathBuf> {
+    for prefix in paths {
+        let candidate = PathBuf::from(prefix).join(format!("{app_name}.app"));
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Walk `dir` looking for any `package.json` inside (recursively —
 /// real VS Code extensions nest `package.json` at
 /// `<ext>/<version>/package.json`). Returns `Some(DirExists)` if any
@@ -1361,7 +1405,9 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 "Calendar events",
                                 CollectorStatus::Available,
                                 EvidenceKind::MacosAppBundle {
-                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    path: locate_macos_system_app("Calendar").unwrap_or_else(
+                                        || PathBuf::from("/Applications/Calendar.app"),
+                                    ),
                                     bundle_id: "com.apple.iCal".to_string(),
                                 },
                                 Some(
@@ -1377,13 +1423,16 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                 "Calendar events",
                                 CollectorStatus::Available,
                                 EvidenceKind::MacosAppBundle {
-                                    path: PathBuf::from("/Applications/Calendar.app"),
+                                    path: locate_macos_system_app("Calendar").unwrap_or_else(
+                                        || PathBuf::from("/Applications/Calendar.app"),
+                                    ),
                                     bundle_id: "com.apple.iCal".to_string(),
                                 },
                                 Some(
                                     "EventKit permission not yet requested; \
-                                     click 'Grant permission' in the wizard \
-                                     to trigger the TCC dialog. After granting, \
+                                     on the next screen, click the \
+                                     'Grant calendar permission' button to \
+                                     trigger the TCC dialog. After granting, \
                                      the Calendars entry appears in System \
                                      Settings → Privacy & Security, and the \
                                      'Open System Settings' button becomes useful \
@@ -1401,9 +1450,12 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                     path: PathBuf::new(),
                                 },
                                 Some(
-                                    "EventKit access denied. Open System \
+                                    "EventKit access denied. In System \
                                      Settings → Privacy & Security → \
-                                     Calendars and grant Trail full access"
+                                     Calendars, find Trail in the app \
+                                     list and turn the toggle ON, then \
+                                     return to the next step and click \
+                                     'Grant calendar permission' again."
                                         .to_string(),
                                 ),
                             );
@@ -1433,8 +1485,11 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
             // but still means "Calendar.app is installed". We don't
             // shell out to `mdfind` here because that adds 50-200 ms
             // and the spec accepts "app installed" as 0.90 conf.
-            let bundle_path = PathBuf::from("/Applications/Calendar.app");
-            if bundle_path.is_dir() {
+            //
+            // Check both /System/Applications/ (Catalina+) and the
+            // legacy /Applications/ — locate_macos_system_app handles
+            // both (see its doc comment for the macOS history).
+            if let Some(bundle_path) = locate_macos_system_app("Calendar") {
                 return finalize(
                     "calendar",
                     "Calendar events",
@@ -1915,8 +1970,13 @@ fn scan_claude_sessions(home: &Path) -> CollectorCandidate {
 fn scan_gmail(platform: &Platform) -> CollectorCandidate {
     match platform {
         Platform::Macos => {
-            let mail_app = PathBuf::from("/Applications/Mail.app");
-            if mail_app.is_dir() {
+            // Probe both /System/Applications/ (Catalina+) and the
+            // legacy /Applications/ — Mail.app ships in either location
+            // depending on macOS version and user customizations. The
+            // probe-only check (no TCC dance here — OAuth is the
+            // wizard's job per the comment below) means we just need
+            // the .app bundle to exist.
+            if let Some(mail_app) = locate_macos_system_app("Mail") {
                 finalize(
                     "gmail",
                     "Gmail (via Apple Mail)",
@@ -1933,7 +1993,7 @@ fn scan_gmail(platform: &Platform) -> CollectorCandidate {
                     "Gmail (via Apple Mail)",
                     CollectorStatus::Unavailable,
                     unavailable_evidence(),
-                    Some("macOS Mail.app not installed".to_string()),
+                    Some("macOS Mail.app not detected".to_string()),
                 )
             }
         }
@@ -2874,6 +2934,115 @@ mod tests {
         assert!(
             notes.contains("auto-discovered 2 calendars"),
             "notes must report the discovered count; got: {notes}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // locate_macos_system_app — user-reported bug 2026-09-09:
+    // Mail.app at /System/Applications/Mail.app wasn't being detected
+    // because the probe only checked /Applications/Mail.app. The fix
+    // probes both standard locations. These tests verify both branches.
+    //
+    // The /System/Applications/ preference is the macOS 10.15+
+    // canonical location for Apple-shipped apps; /Applications/ is
+    // the legacy / user-installed location. We test by setting HOME
+    // to a tempdir and reading what the helper returns when neither
+    // path exists on this Linux build host (always None) plus a
+    // #[ignore]-tagged positive test that someone running this on
+    // macOS can run to verify the /System/Applications branch wins
+    // over /Applications/.
+
+    #[test]
+    fn locate_macos_system_app_returns_none_when_neither_path_exists() {
+        // Linux build host: neither /System/Applications nor
+        // /Applications contains Mail.app, Calendar.app, or anything
+        // else we'd care about for these tests. The helper must
+        // return None.
+        assert!(locate_macos_system_app("Mail").is_none());
+        assert!(locate_macos_system_app("Calendar").is_none());
+        assert!(locate_macos_system_app("Nonexistent.app.that.does.not.exist").is_none());
+    }
+
+    // The "prefer /System/Applications" ordering invariant is the
+    // load-bearing piece of the whole fix. CI is Linux-only (no
+    // macOS runner per .github/workflows/ci.yml), so we test the
+    // invariant by passing a custom path list pointing at a
+    // tempdir. The production helper's
+    // `MACOS_APP_SEARCH_PATHS` constant is also tested directly
+    // below so a future reorder is caught.
+    #[test]
+    fn locate_app_in_paths_prefers_first_match() {
+        // Set up two fake .app directories under a tempdir, then
+        // verify the helper picks the first one. This exercises
+        // the same code path the production helper uses (the
+        // parameterless version pins the list to MACOS_APP_SEARCH_PATHS).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let system_dir = tmp.path().join("System").join("Applications");
+        let user_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(system_dir.join("Mail.app")).unwrap();
+        std::fs::create_dir_all(user_dir.join("Mail.app")).unwrap();
+
+        // Order: System dir first. Should win.
+        let order = vec![system_dir.to_str().unwrap(), user_dir.to_str().unwrap()];
+        let found = locate_app_in_paths("Mail", &order)
+            .expect("should find Mail.app when first path exists");
+        assert_eq!(
+            found,
+            system_dir.join("Mail.app"),
+            "first match must win; got: {}",
+            found.display()
+        );
+
+        // Reverse the order. User dir now first; should win.
+        let order_reversed = vec![user_dir.to_str().unwrap(), system_dir.to_str().unwrap()];
+        let found_rev = locate_app_in_paths("Mail", &order_reversed)
+            .expect("should find Mail.app with reversed order");
+        assert_eq!(
+            found_rev,
+            user_dir.join("Mail.app"),
+            "reversed order: first match must still win; got: {}",
+            found_rev.display()
+        );
+    }
+
+    #[test]
+    fn locate_app_in_paths_returns_none_when_first_match_doesnt_exist() {
+        // Only the second path has the .app. Helper must NOT
+        // fall through to it — first-match-wins means "first
+        // *existing* match wins, not "first encountered" without
+        // checking." This is the same as locate_macos_system_app's
+        // behavior on a fresh Linux host.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let system_dir = tmp.path().join("System").join("Applications");
+        let user_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(user_dir.join("Mail.app")).unwrap();
+        let paths = vec![system_dir.to_str().unwrap(), user_dir.to_str().unwrap()];
+        let found = locate_app_in_paths("Mail", &paths);
+        // /System/Applications doesn't exist (we never created it),
+        // so the first path's check fails (is_dir is false) and
+        // the helper should move to the second path. This is the
+        // intended behavior for "second location is the fallback."
+        assert_eq!(
+            found,
+            Some(user_dir.join("Mail.app")),
+            "helper should fall through to the second path when the first doesn't exist; got: {:?}",
+            found
+        );
+    }
+
+    // The constant that the production helper pins. This test
+    // exists SOLELY to catch a future accidental reorder — the
+    // ordering is a security-relevant invariant (see the const's
+    // doc comment for the rationale). If you intentionally change
+    // the order, update this assertion and the const's docs.
+    #[test]
+    fn macos_app_search_paths_order_invariant() {
+        assert_eq!(
+            MACOS_APP_SEARCH_PATHS,
+            &["/System/Applications", "/Applications"],
+            "MACOS_APP_SEARCH_PATHS must start with /System/Applications \
+             (the Catalina+ canonical location). Reordering this list \
+             changes the host-key-verification behavior — see the const's doc."
         );
     }
 

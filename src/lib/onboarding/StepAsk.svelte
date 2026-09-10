@@ -857,9 +857,11 @@
                         class="permission-denied"
                         data-testid="calendar-permission-denied"
                       >
-                        Permission was denied. Open System
-                        Settings and re-enable Trail's
-                        Calendars access, then try again.
+                        Permission was denied. In System Settings
+                        (Privacy &amp; Security → Calendars), find
+                        Trail in the app list and turn the toggle
+                        ON, then return here and click
+                        'Grant calendar permission' again.
                       </span>
                     {/if}
                     <button
