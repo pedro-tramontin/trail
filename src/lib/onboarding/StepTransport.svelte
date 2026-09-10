@@ -295,63 +295,111 @@
         return s;
       });
     } catch (err) {
-      // `test_ssh_connection` now returns `Result<(), TransportError>`,
-      // so Tauri serializes the error to a JSON string. We parse it and
-      // dispatch on the externally-tagged variant. Plain-string errors
-      // (legacy path / non-JSON) fall through to the generic message.
-      const raw = String(err);
-      let parsed: unknown = null;
+      // `test_ssh_connection` returns `Result<(), TransportError>`
+      // and Tauri serializes the error via serde's externally-tagged
+      // form, so we see one of:
+      //   {"HostKeyUnknown":   { host, port, fingerprint, key_b64, key_type }}
+      //   {"HostKeyMismatch":  { host, port, presented_fingerprint }}
+      //   {"Ssh":              "<reason>"}
+      //   {"Config":           "<reason>"}
+      //   {"Io":               "<reason>"}
+      //
+      // We dispatch on every variant so the wizard can:
+      //   - show a TOFU prompt on HostKeyUnknown (raw key bytes are
+      //     in the payload so we can pin on "Yes, trust")
+      //   - show a hard red banner on HostKeyMismatch (no retry path)
+      //   - show a useful error message on Ssh/Config/Io (rather
+      //     than the previous behavior of rendering `[object Object]`
+      //     because String(err) on a plain object produced that).
+      //
+      // If Tauri ever returns a shape we don't recognize (e.g. a
+      // future TransportError variant), we still show SOMETHING
+      // useful — JSON.stringify the whole payload so the user can
+      // copy-paste it into a bug report.
+      let raw: string;
+      let parsed: Record<string, unknown> | null = null;
       try {
+        raw = String(err);
         parsed = JSON.parse(raw);
       } catch {
-        parsed = null;
+        raw = String(err);
       }
-      const structured = parsed as
-        | {
-            HostKeyUnknown?: {
-              host: string;
-              port: number;
-              fingerprint: string;
-              key_b64: string;
-              key_type: string;
-            };
-            HostKeyMismatch?: {
-              host: string;
-              port: number;
-              presented_fingerprint: string;
-            };
-          }
-        | null;
 
-      if (structured?.HostKeyUnknown) {
-        const u = structured.HostKeyUnknown;
+      const hku = parsed?.HostKeyUnknown as
+        | {
+            host: string;
+            port: number;
+            fingerprint: string;
+            key_b64: string;
+            key_type: string;
+          }
+        | undefined;
+      const hkm = parsed?.HostKeyMismatch as
+        | {
+            host: string;
+            port: number;
+            presented_fingerprint: string;
+          }
+        | undefined;
+      const sshMsg =
+        typeof parsed?.Ssh === "string" ? (parsed.Ssh as string) : null;
+      const configMsg =
+        typeof parsed?.Config === "string"
+          ? (parsed.Config as string)
+          : null;
+      const ioMsg =
+        typeof parsed?.Io === "string" ? (parsed.Io as string) : null;
+
+      if (hku) {
         last_unknown_payload = {
-          host: u.host,
-          port: u.port,
-          key_b64: u.key_b64,
-          key_type: u.key_type,
+          host: hku.host,
+          port: hku.port,
+          key_b64: hku.key_b64,
+          key_type: hku.key_type,
         };
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `Trail doesn't recognize this server's host key (${u.fingerprint}).`;
-          s.pending_fingerprint = u.fingerprint;
+          s.test_error = `Trail doesn't recognize this server's host key (${hku.fingerprint}).`;
+          s.pending_fingerprint = hku.fingerprint;
           s.pending_trust_action = "unknown";
           return s;
         });
-      } else if (structured?.HostKeyMismatch) {
-        const m = structured.HostKeyMismatch;
+      } else if (hkm) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `HOST KEY MISMATCH for ${m.host}:${m.port} — refusing to connect.`;
-          s.pending_fingerprint = m.presented_fingerprint;
+          s.test_error = `HOST KEY MISMATCH for ${hkm.host}:${hkm.port} — refusing to connect.`;
+          s.pending_fingerprint = hkm.presented_fingerprint;
           s.pending_trust_action = "mismatch";
           s.mismatch_held = true;
           return s;
         });
-      } else {
+      } else if (sshMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = raw;
+          s.test_error = `SSH error: ${ sshMsg }`;
+          return s;
+        });
+      } else if (configMsg) {
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = `Configuration error: ${ configMsg }`;
+          return s;
+        });
+      } else if (ioMsg) {
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = `Network/I-O error: ${ ioMsg }`;
+          return s;
+        });
+      } else {
+        // Unrecognized error shape — stringify the whole payload
+        // so the user can copy-paste it into a bug report rather
+        // than seeing the useless "[object Object]".
+        state.update((s) => {
+          s.test_state = "error";
+          s.test_error = parsed
+            ? `Unexpected error: ${ JSON.stringify(parsed) }`
+            : `Unexpected error: ${ raw }`;
           return s;
         });
       }
@@ -391,10 +439,16 @@
       // Re-test to confirm the new entry is accepted.
       await test_connection();
     } catch (err) {
+      // pin_ssh_host_key returns Result<(), String> — a free-form
+      // error message like "entry for vm:22 already exists" or
+      // "write to ~/.trail/known_hosts: failed". Tauri rejects with
+      // the string directly (no JSON envelope). Show it verbatim
+      // rather than the "Error: " prefix String(Error) would yield.
+      const message = err instanceof Error ? err.message : String(err);
       state.update((s) => {
         s.pinning = false;
         s.test_state = "error";
-        s.test_error = String(err);
+        s.test_error = `Couldn't pin host key: ${ message }`;
         return s;
       });
     }
