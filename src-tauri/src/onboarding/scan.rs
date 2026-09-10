@@ -1435,9 +1435,12 @@ fn scan_calendar(home: &Path, platform: &Platform) -> CollectorCandidate {
                                     path: PathBuf::new(),
                                 },
                                 Some(
-                                    "EventKit access denied. Open System \
+                                    "EventKit access denied. In System \
                                      Settings → Privacy & Security → \
-                                     Calendars and grant Trail full access"
+                                     Calendars, find Trail in the app \
+                                     list and turn the toggle ON, then \
+                                     return to the next step and click \
+                                     'Grant calendar permission' again."
                                         .to_string(),
                                 ),
                             );
