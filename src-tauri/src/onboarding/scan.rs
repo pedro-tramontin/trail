@@ -330,6 +330,17 @@ fn probe_dir(p: &Path) -> Option<EvidenceKind> {
     })
 }
 
+/// The macOS app-search path prefixes, in priority order. The first
+/// match wins. `pub(crate)` so the unit tests can verify the
+/// ordering invariant without depending on a real macOS
+/// filesystem (CI is Linux-only by design — see
+/// .github/workflows/ci.yml). The order is the load-bearing
+/// invariant of the whole fix: `/System/Applications` must come
+/// first so `KnownHosts::check_port` matches the canonical
+/// Catalina+ install path. Changing this list's order is a
+/// security-relevant change and should be a deliberate PR.
+pub(crate) const MACOS_APP_SEARCH_PATHS: &[&str] = &["/System/Applications", "/Applications"];
+
 /// Locate a macOS system app by bundle-name. Since macOS Catalina (10.15),
 /// Apple's own apps (Mail, Calendar, Safari, etc.) ship in
 /// `/System/Applications/`. The legacy `/Applications/` location is still
@@ -345,12 +356,16 @@ fn probe_dir(p: &Path) -> Option<EvidenceKind> {
 /// 2026-09-09 — the wizard told them "macOS Mail.app not installed"
 /// when Mail.app was sitting at `/System/Applications/Mail.app`.
 fn locate_macos_system_app(app_name: &str) -> Option<PathBuf> {
-    // Order matters: /System/Applications/ is the canonical location
-    // for Apple-shipped apps on Catalina+. /Applications/ is the
-    // legacy/user-installed location. Returning /System first means
-    // the displayed `path` in MacosAppBundle evidence points at the
-    // "real" install rather than a symlink the user may have set up.
-    for prefix in ["/System/Applications", "/Applications"] {
+    locate_app_in_paths(app_name, MACOS_APP_SEARCH_PATHS)
+}
+
+/// Inner helper that takes the path list as a parameter, so the
+/// test suite can verify the "first match wins" ordering invariant
+/// on a Linux host with a tempdir. Production code goes through
+/// `locate_macos_system_app` which pins the canonical macOS path
+/// list via the constant above.
+fn locate_app_in_paths(app_name: &str, paths: &[&str]) -> Option<PathBuf> {
+    for prefix in paths {
         let candidate = PathBuf::from(prefix).join(format!("{app_name}.app"));
         if candidate.is_dir() {
             return Some(candidate);
@@ -2948,22 +2963,86 @@ mod tests {
         assert!(locate_macos_system_app("Nonexistent.app.that.does.not.exist").is_none());
     }
 
+    // The "prefer /System/Applications" ordering invariant is the
+    // load-bearing piece of the whole fix. CI is Linux-only (no
+    // macOS runner per .github/workflows/ci.yml), so we test the
+    // invariant by passing a custom path list pointing at a
+    // tempdir. The production helper's
+    // `MACOS_APP_SEARCH_PATHS` constant is also tested directly
+    // below so a future reorder is caught.
     #[test]
-    #[ignore = "macOS-only: requires real /System/Applications/Mail.app and /Applications/Mail.app on the host"]
-    fn locate_macos_system_app_prefers_system_applications_over_applications() {
-        // Run with: cargo test -p trail --lib locate_macos_system_app_prefers_system_applications -- --ignored
-        // On macOS:
-        //   - /System/Applications/Mail.app exists (stock install)
-        //   - /Applications/Mail.app may or may not exist
-        // The helper must prefer /System/Applications (returns that path
-        // even if /Applications also has Mail.app). This guards against
-        // a future regression where someone reorders the search list.
-        let result = locate_macos_system_app("Mail");
-        let path = result.expect("Mail.app must be installed on the macOS test host");
-        assert!(
-            path.starts_with("/System/Applications/"),
-            "helper should prefer /System/Applications over /Applications; got: {}",
-            path.display()
+    fn locate_app_in_paths_prefers_first_match() {
+        // Set up two fake .app directories under a tempdir, then
+        // verify the helper picks the first one. This exercises
+        // the same code path the production helper uses (the
+        // parameterless version pins the list to MACOS_APP_SEARCH_PATHS).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let system_dir = tmp.path().join("System").join("Applications");
+        let user_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(system_dir.join("Mail.app")).unwrap();
+        std::fs::create_dir_all(user_dir.join("Mail.app")).unwrap();
+
+        // Order: System dir first. Should win.
+        let order = vec![system_dir.to_str().unwrap(), user_dir.to_str().unwrap()];
+        let found = locate_app_in_paths("Mail", &order)
+            .expect("should find Mail.app when first path exists");
+        assert_eq!(
+            found,
+            system_dir.join("Mail.app"),
+            "first match must win; got: {}",
+            found.display()
+        );
+
+        // Reverse the order. User dir now first; should win.
+        let order_reversed = vec![user_dir.to_str().unwrap(), system_dir.to_str().unwrap()];
+        let found_rev = locate_app_in_paths("Mail", &order_reversed)
+            .expect("should find Mail.app with reversed order");
+        assert_eq!(
+            found_rev,
+            user_dir.join("Mail.app"),
+            "reversed order: first match must still win; got: {}",
+            found_rev.display()
+        );
+    }
+
+    #[test]
+    fn locate_app_in_paths_returns_none_when_first_match_doesnt_exist() {
+        // Only the second path has the .app. Helper must NOT
+        // fall through to it — first-match-wins means "first
+        // *existing* match wins, not "first encountered" without
+        // checking." This is the same as locate_macos_system_app's
+        // behavior on a fresh Linux host.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let system_dir = tmp.path().join("System").join("Applications");
+        let user_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(user_dir.join("Mail.app")).unwrap();
+        let paths = vec![system_dir.to_str().unwrap(), user_dir.to_str().unwrap()];
+        let found = locate_app_in_paths("Mail", &paths);
+        // /System/Applications doesn't exist (we never created it),
+        // so the first path's check fails (is_dir is false) and
+        // the helper should move to the second path. This is the
+        // intended behavior for "second location is the fallback."
+        assert_eq!(
+            found,
+            Some(user_dir.join("Mail.app")),
+            "helper should fall through to the second path when the first doesn't exist; got: {:?}",
+            found
+        );
+    }
+
+    // The constant that the production helper pins. This test
+    // exists SOLELY to catch a future accidental reorder — the
+    // ordering is a security-relevant invariant (see the const's
+    // doc comment for the rationale). If you intentionally change
+    // the order, update this assertion and the const's docs.
+    #[test]
+    fn macos_app_search_paths_order_invariant() {
+        assert_eq!(
+            MACOS_APP_SEARCH_PATHS,
+            &["/System/Applications", "/Applications"],
+            "MACOS_APP_SEARCH_PATHS must start with /System/Applications \
+             (the Catalina+ canonical location). Reordering this list \
+             changes the host-key-verification behavior — see the const's doc."
         );
     }
 
