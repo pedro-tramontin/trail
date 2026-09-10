@@ -616,4 +616,91 @@ describe("StepTransport.svelte", () => {
       expect.anything(),
     );
   });
+
+  // === Variant dispatch tests (bug caught 2026-09-09) ===
+  //
+  // Before this PR, only HostKeyUnknown + HostKeyMismatch were handled
+  // by the Svelte parser. Any other TransportError variant (Ssh,
+  // Config, Io) fell through to `s.test_error = raw` where `raw`
+  // came from String(err) on a plain object — producing the
+  // useless "[object Object]" the user saw. These tests verify
+  // every variant now renders a useful message.
+  it("(w) TransportError::Ssh renders a useful SSH error message", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(
+          JSON.stringify({ Ssh: "failed to handshake: connection reset by peer" }),
+        );
+      }
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.input(screen.getByTestId("transport-host"), {
+      target: { value: "vps.example.com" },
+    });
+    await fireEvent.input(screen.getByTestId("transport-user"), {
+      target: { value: "pedro" },
+    });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    // NOT "[object Object]" — the bug we're fixing
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    // Useful message includes the inner reason
+    expect(errEl.textContent).toContain("SSH error:");
+    expect(errEl.textContent).toContain("connection reset by peer");
+  });
+
+  it("(x) TransportError::Config renders a useful config error message", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(JSON.stringify({ Config: "host is required" }));
+      }
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    expect(errEl.textContent).toContain("Configuration error:");
+    expect(errEl.textContent).toContain("host is required");
+  });
+
+  it("(y) TransportError::Io renders a useful network error message", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(
+          JSON.stringify({ Io: "dns failure: no such host" }),
+        );
+      }
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    expect(errEl.textContent).toContain("Network/I-O error:");
+    expect(errEl.textContent).toContain("no such host");
+  });
+
+  it("(z) Unrecognized error shape still shows SOMETHING useful", async () => {
+    // If Tauri ever returns a shape we don't recognize (e.g. a
+    // future TransportError variant), the user should still see
+    // SOMETHING — never "[object Object]". The fallback
+    // JSON.stringify-es the whole payload.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(
+          JSON.stringify({ FutureVariant: { code: 42, why: "no idea" } }),
+        );
+      }
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    // The whole payload is visible so the user can copy-paste it.
+    expect(errEl.textContent).toContain("FutureVariant");
+    expect(errEl.textContent).toContain('"code":42');
+  });
 });
