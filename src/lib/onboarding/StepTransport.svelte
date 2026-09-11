@@ -456,13 +456,18 @@
       } else if (sshMsg) {
         // Detect the libssh2 "Username/PublicKey combination invalid"
         // (Session(-18)) — a server-side rejection of our public-key
-        // offer. The fix is always out-of-band: the user has to add
+        // offer. The fix is usually out-of-band (the user has to add
         // the wizard's public key to the VPS's
-        // ~/.ssh/authorized_keys. Detect the substring rather than
-        // matching the exact `parsed.Ssh` shape so the rule survives
-        // libssh2 upstream wording changes (the user reported this
-        // on 2026-09-11 — the raw error was useless without a hint
-        // about what to do next).
+        // ~/.ssh/authorized_keys) but the same surface message can
+        // also come back when sshd rejects the username itself
+        // (`Invalid user <X> [preauth]` in auth.log — e.g. case
+        // mismatch: `Root` vs `root`). Distinguishing those two
+        // causes requires the server log, which we don't have
+        // client-side, so the remediation covers both: check
+        // the username AND the pubkey. The user reported the
+        // case-mismatch path on 2026-09-11 — the previous
+        // message pointed at a fix (re-add the pubkey) that
+        // didn't apply, so we list both possible causes now.
         const isAuthRejected =
           sshMsg.includes("Username/PublicKey combination invalid") ||
           sshMsg.includes("PublicKey combination invalid") ||
@@ -474,9 +479,11 @@
         state.update((s) => {
           s.test_state = "error";
           s.test_error = isAuthRejected
-            ? `Server rejected your SSH public key (${sshMsg}). ` +
-              `Copy the public key shown above and add it to your VPS's ` +
-              `~/.ssh/authorized_keys for user "${$state.user}", then re-test.`
+            ? `Server rejected the SSH auth attempt (${sshMsg}). ` +
+              `Two things to check: (1) the username "${$state.user}" ` +
+              `exists on the VPS — Linux usernames are case-sensitive, ` +
+              `so "root" and "Root" are different; (2) the public key ` +
+              `shown above is in ${$state.user}'s ~/.ssh/authorized_keys.`
             : `SSH error: ${sshMsg}`;
           return s;
         });
