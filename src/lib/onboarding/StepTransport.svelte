@@ -424,6 +424,40 @@
         // Unrecognized error shape — stringify the whole payload
         // so the user can copy-paste it into a bug report rather
         // than seeing the useless "[object Object]".
+        //
+        // DEBUG: also log the raw err to the webview console so a
+        // user with Web Inspector / Tauri devtools open can copy
+        // the actual structure. The previous round of fixes had
+        // no debug surface at all — the user reported they ran
+        // the app from the terminal and "don't see any logs to
+        // try to identify more details on the problem" (2026-09-10).
+        // The Tauri webview console IS reachable from the terminal
+        // via Tauri devtools when running an unsigned/draft build
+        // (right-click → Inspect), and this console.log lands
+        // there.
+        console.error(
+          "[StepTransport] test_ssh_connection: unrecognized err shape",
+          { err, raw, parsed, command: "test_ssh_connection" },
+        );
+        // Also surface the err to the terminal stderr (via the
+        // `frontend_log` Tauri command) so a user running the
+        // .app from the terminal can grep the actual structure
+        // without opening the webview devtools. The user reported
+        // (2026-09-10) "when running the app from the terminal,
+        // I don't see any logs to try to identify more details
+        // on the problem" — this is the fix.
+        try {
+          void invoke("frontend_log", {
+            category: "test_ssh_connection",
+            message: `unrecognized err shape: ${ JSON.stringify({
+              err,
+              raw,
+              parsed,
+            }) }`,
+          });
+        } catch {
+          // The log command itself is best-effort; don't double-fault.
+        }
         state.update((s) => {
           s.test_state = "error";
           s.test_error = parsed

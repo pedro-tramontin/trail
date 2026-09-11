@@ -693,6 +693,10 @@ describe("StepTransport.svelte", () => {
           JSON.stringify({ FutureVariant: { code: 42, why: "no idea" } }),
         );
       }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
       return Promise.reject(new Error(`Unknown command: ${cmd}`));
     });
     render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
@@ -719,6 +723,10 @@ describe("StepTransport.svelte", () => {
       if (cmd === "test_ssh_connection") {
         return Promise.reject({ kind: "weird", payload: "tcc dialog failed" });
       }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
       return Promise.reject(new Error(`Unknown command: ${cmd}`));
     });
     render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
@@ -739,6 +747,10 @@ describe("StepTransport.svelte", () => {
       if (cmd === "test_ssh_connection") {
         return Promise.reject(new Error("command not registered: test_ssh_connection"));
       }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
       return Promise.reject(new Error(`Unknown command: ${cmd}`));
     });
     render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });

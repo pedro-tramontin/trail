@@ -157,6 +157,10 @@ pub async fn test_ssh_connection(
     // by `health_check` (it only opens a TCP connection + does
     // pubkey auth). Both fields are populated with benign defaults
     // so the SshTransport constructor is satisfied.
+    // Clone user/host for the debug log below — they get moved
+    // into SshTransport::new on the next call.
+    let user_for_log = user.clone();
+    let host_for_log = host.clone();
     let t = SshTransport::new(
         host,
         port,
@@ -167,8 +171,30 @@ pub async fn test_ssh_connection(
         PathBuf::from("/tmp/"),
         crate::config::default_known_hosts_path(),
     );
-    t.health_check().await?;
-    Ok(())
+    match t.health_check().await {
+        Ok(()) => {
+            // DEBUG (2026-09-10): user reported they couldn't see any
+            // logs when running the .app from the terminal. eprintln!
+            // lands in the same terminal they launched from, so they
+            // can copy/paste this into a bug report. Wizard volume
+            // is low (one click per install attempt) so the noise
+            // cost is negligible.
+            eprintln!(
+                "[test_ssh_connection] health_check OK for {user_for_log}@{host_for_log}:{port}"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Same DEBUG rationale — surface the typed error to the
+            // terminal so the user can see what shape it actually
+            // is (the previous round of fixes had no Rust-side log
+            // and the user couldn't diagnose the [object Object] bug).
+            eprintln!(
+                "[test_ssh_connection] health_check ERR for {user_for_log}@{host_for_log}:{port}: {e:?}"
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Append an OpenSSH-format entry to the known_hosts file at `path`.
@@ -953,6 +979,24 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     cmd.spawn()
         .map(|_child| ())
         .map_err(|e| format!("open_external_url: spawn failed: {e}"))
+}
+
+/// Tauri command: log a frontend debug message to stderr.
+///
+/// Frontend `console.error` and `console.log` go to the webview
+/// devtools console (reachable via right-click → Inspect on a
+/// draft build) but NOT to the terminal where the user launched
+/// the .app from. To make the Svelte wizard's debug output visible
+/// in the same terminal stream as the Rust `eprintln!`s in
+/// `test_ssh_connection` etc., the frontend can call this command
+/// to forward a message to stderr.
+///
+/// Format: `[frontend] <category>: <message>` so the log lines
+/// are easy to grep and visually distinct from the Rust logs
+/// (which use `[command_name]`).
+#[tauri::command]
+pub fn frontend_log(category: String, message: String) {
+    eprintln!("[frontend] {category}: {message}");
 }
 
 /// Tauri command: trigger the macOS EventKit TCC dialog so the
