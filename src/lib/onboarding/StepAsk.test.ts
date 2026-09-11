@@ -878,6 +878,18 @@ describe("StepAsk.svelte", () => {
       "open-calendar-permission-settings",
     );
     expect(deep.textContent).toMatch(/Open System Settings/);
+    // Clicking the deep-link button now invokes a Rust command
+    // (`open_external_url`) instead of a `a.click()` trick that
+    // Tauri webviews don't follow for system schemes like
+    // `x-apple.systempreferences:...`. The user reported
+    // 2026-09-10 that the previous approach was a no-op.
+    await fireEvent.click(deep);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "open_external_url",
+      expect.objectContaining({
+        url: expect.stringMatching(/^x-apple\.systempreferences:/),
+      }),
+    );
   });
 
   it("(t) calendar row event_kit + macOS: Grant button click → denied → denial copy + Grant stays", async () => {

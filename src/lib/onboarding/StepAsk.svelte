@@ -589,13 +589,18 @@
    * survives the closure boundary.
    */
   function open_calendar_permission_settings(): void {
-    const url: string = String(calendar_permission_url);
-    const a = document.createElement("a");
-    a.href = url;
-    a.style.display = "none";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    // The deep-link URL is a system scheme (e.g.
+    // `x-apple.systempreferences:...`) that the Tauri webview
+    // does NOT follow from `a.click()` or `window.location.href`
+    // — only http/https work via the webview. Going through a
+    // Rust command (`open_external_url`) that shells out to
+    // `open` (macOS) / `xdg-open` (Linux) / `cmd /c start`
+    // (Windows) is the only way to launch the system Settings
+    // app from a Tauri 2 webview without depending on the
+    // `tauri-plugin-opener` JS plugin (which we don't ship).
+    // Fire-and-forget — the button stays visible so the user
+    // can retry if the OS fails to find a handler.
+    void invoke("open_external_url", { url: String(calendar_permission_url) });
   }
 
   /**

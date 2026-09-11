@@ -906,6 +906,55 @@ pub fn calendar_permission_deep_link_url(de: Option<String>) -> Result<String, S
     calendar_permission_deep_link_url_for(target, de.as_deref()).map_err(|e| e.to_string())
 }
 
+/// Tauri command: open an external URL in the system handler.
+///
+/// The wizard's "Open System Settings" button uses deep links
+/// like `x-apple.systempreferences:...` and `ms-settings:...` that
+/// Tauri webviews do NOT follow from `a.click()` or
+/// `window.location.href` — they're not http/https schemes, so
+/// the webview treats them as no-ops. Going through the OS
+/// handler (`open` on macOS, `xdg-open` on Linux,
+/// `cmd /c start ""` on Windows) is the only way to actually
+/// launch the Settings app from a Tauri 2 webview without
+/// pulling in the `tauri-plugin-opener` JS plugin (which we don't
+/// currently ship — see StepAsk.svelte §X-4b comment).
+///
+/// Returns `Ok(())` on a successful `Command::spawn` (note: spawn
+/// succeeds even if the OS fails to find a handler for the URL
+/// — the OS will typically show its own error dialog). Returns
+/// `Err` only if `Command::spawn` itself fails (e.g. the OS
+/// rejects the process creation).
+///
+/// The URL is passed through as-is. The wizard only sends URLs
+/// from `calendar_permission_deep_link_url()` which is a pure
+/// function over the per-OS scheme list, so no user-controlled
+/// string reaches this without going through the validator.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    use std::process::Command;
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(&url);
+        c
+    } else if cfg!(target_os = "linux") {
+        let mut c = Command::new("xdg-open");
+        c.arg(&url);
+        c
+    } else if cfg!(target_os = "windows") {
+        // `start ""` requires an empty window-title argument, then
+        // the URL. Without the empty title, start interprets the
+        // URL as the title and never opens it.
+        let mut c = Command::new("cmd");
+        c.args(["/c", "start", "", &url]);
+        c
+    } else {
+        return Err("open_external_url: unsupported OS".to_string());
+    };
+    cmd.spawn()
+        .map(|_child| ())
+        .map_err(|e| format!("open_external_url: spawn failed: {e}"))
+}
+
 /// Tauri command: trigger the macOS EventKit TCC dialog so the
 /// Calendars entry appears in System Settings → Privacy & Security.
 ///
