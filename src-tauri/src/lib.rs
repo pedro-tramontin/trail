@@ -212,8 +212,17 @@ pub fn start_collectors_inner(
 /// can list `start_collectors` at the lib.rs level and the IPC
 /// contract name stays a flat `start_collectors` (not
 /// `setup_bridge::start_collectors`).
-fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
-    setup_bridge::start_collectors(app)
+///
+/// **MUST be `async`** to match `setup_bridge::start_collectors`.
+/// `generate_handler!` dispatches via the function signature
+/// listed in the macro; if this proxy were sync while the
+/// upstream is async, the macro would emit a sync-dispatch
+/// trampoline and the `tokio::spawn` inside
+/// `start_collectors_inner` would panic with "there is no
+/// reactor running" — see `setup_bridge.rs` for the full
+/// explanation.
+async fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
+    setup_bridge::start_collectors(app).await
 }
 
 /// Phase 9 §9.2 — Tauri command proxy at the crate root.

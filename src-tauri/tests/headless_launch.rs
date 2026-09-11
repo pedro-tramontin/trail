@@ -36,6 +36,54 @@
 
 use std::time::Duration;
 
+/// Compile-time signature assertion for `start_collectors`.
+///
+/// Background: on 2026-09-11 the user hit
+///   `thread 'main' panicked at src-tauri/src/lib.rs:181:22:
+///    there is no reactor running, must be called from the context
+///    of a Tokio 1.x runtime`
+/// after the wizard's StepFinish 'Finish' button. Root cause:
+/// `start_collectors` (the IPC command) was declared `pub fn`
+/// (sync), so Tauri 2 dispatched it on its worker-thread pool —
+/// which has NO tokio runtime in scope. The function calls
+/// `tokio::spawn` (via `start_collectors_inner`) which requires
+/// a reactor and panicked.
+///
+/// Fix: mark `start_collectors` `async`. Tauri 2 dispatches
+/// `async` commands on the tokio runtime instead. This test
+/// pins that signature by binding a function reference to
+/// the expected `async` shape — a future revert to `pub fn`
+/// would fail this test at compile time, with a clear error
+/// pointing at this assertion.
+///
+/// (We can't easily test the actual IPC dispatch — Tauri's
+/// `mock_builder` doesn't run the setup closure synchronously,
+/// and a full Tauri runtime would drag in `keyring` + `cpal` +
+/// macOS-only `objc2` deps the Linux CI can't link. The
+/// compile-time signature check is the next best thing.)
+#[test]
+fn start_collectors_must_be_async() {
+    // Compile-time signature check. The helper below is generic
+    // over a `F: Fn(AppHandle) -> Fut` where `Fut: Future<Output
+    // = Result<(), String>>`. We pass `start_collectors` directly
+    // to it — if `start_collectors` were sync (`pub fn` returning
+    // `Result<(), String>`), the bound `Fut: Future<Output = ...>`
+    // wouldn't match (Result is not a Future), and this test
+    // would fail to compile.
+    //
+    // We never actually CALL `start_collectors` here because
+    // constructing a real `AppHandle` requires a running Tauri
+    // runtime. The bound check is purely at compile time.
+    fn assert_returns_future<F, Fut>(_f: F) -> bool
+    where
+        F: Fn(tauri::AppHandle) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        true
+    }
+    assert_returns_future(trail_lib::setup_bridge::start_collectors);
+}
+
 /// `app.manage(...)` shim for the no-runtime test path. The
 /// real setup closure's `app.manage(...)` call requires an
 /// `AppHandle`; in the test we use a plain `Mutex<Option<State>>`

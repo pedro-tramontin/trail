@@ -34,8 +34,21 @@ use tauri::Manager;
 /// to bring up the orchestrator + scheduler, then flips the
 /// `ConfigState` to `Ready(cfg)` so subsequent IPC commands see a
 /// live orchestrator.
+///
+/// **MUST be `async`** (not sync). Tauri 2 invokes sync
+/// `#[tauri::command]` functions on its worker-thread pool,
+/// which is OUTSIDE any tokio runtime context. `start_collectors_inner`
+/// calls `tokio::spawn(...)` to launch the collector scheduler,
+/// which requires a reactor — running it from a sync command
+/// panics with `there is no reactor running, must be called from
+/// the context of a Tokio 1.x runtime` (the panic the user hit
+/// on 2026-09-11 after the wizard's StepFinish). Marking the
+/// command `async` makes Tauri dispatch it on the tokio runtime
+/// instead. The lib.rs setup closure (`lib.rs:542`) does NOT
+/// need this fix because `tauri::Builder::setup` itself runs
+/// inside the tokio runtime.
 #[tauri::command]
-pub fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn start_collectors(app: tauri::AppHandle) -> Result<(), String> {
     let dir = app
         .path()
         .app_config_dir()
