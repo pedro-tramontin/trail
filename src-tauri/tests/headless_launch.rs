@@ -84,6 +84,53 @@ fn start_collectors_must_be_async() {
     assert_returns_future(trail_lib::setup_bridge::start_collectors);
 }
 
+#[test]
+fn start_collectors_inner_uses_tauri_async_runtime() {
+    // Compile-time check: the function's second return-tuple
+    // element must be `tauri::async_runtime::JoinHandle<()>`
+    // (returned by `tauri::async_runtime::spawn`), not
+    // `tokio::task::JoinHandle<()>` (returned by `tokio::spawn`).
+    // A future revert to `tokio::spawn` would fail this test
+    // at compile time with E0308 (verified). See the
+    // `start_collectors_must_be_async` doc comment above for the
+    // full failure history.
+    //
+    // We exercise the type check by actually calling
+    // `start_collectors_inner` (with a minimal valid config) and
+    // passing the returned handle through a typed helper. This
+    // leaves the spawned scheduler task parked for the rest of
+    // the test binary's lifetime — Tauri's async runtime is
+    // process-scoped (OnceLock-initialized) so this is the
+    // same behavior as production. The task itself is parked in
+    // `pending::<()>().await` (a few hundred bytes of stack);
+    // it doesn't accumulate unboundedly across tests.
+    fn assert_uses_tauri_runtime(
+        h: tauri::async_runtime::JoinHandle<()>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        h
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join(".trail");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
+    let config_path = config_dir.join("config.json");
+    let minimal_config = r#"{
+        "claude_sessions_paths": [],
+        "github": {"mode": "gh_cli", "host": "github.com"},
+        "calendar_ics": "/nonexistent.ics",
+        "calendar": {"kind": "ics", "path": "/nonexistent.ics"},
+        "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
+        "review_time": "18:00",
+        "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},
+        "transport": {"type": "ssh", "host": "vm.example.com", "port": 22, "user": "trail", "auth": {"auth": "public_key", "path": "/tmp/trail-test-key"}, "remote_path": "/tmp/trail-remote"},
+        "raw_retention_days": 7,
+        "pending_installs": []
+    }"#;
+    std::fs::write(&config_path, minimal_config).expect("write minimal config");
+    let (_orch, sched_task) =
+        trail_lib::start_collectors_inner(&config_path).expect("start_collectors_inner ok");
+    let _typed = assert_uses_tauri_runtime(sched_task);
+}
+
 /// `app.manage(...)` shim for the no-runtime test path. The
 /// real setup closure's `app.manage(...)` call requires an
 /// `AppHandle`; in the test we use a plain `Mutex<Option<State>>`
@@ -228,8 +275,12 @@ fn headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write()
     // `std::future::pending::<()>().await` so it stays alive
     // until runtime teardown).
     std::thread::sleep(Duration::from_millis(500));
+    // `sched_task` is now `tauri::async_runtime::JoinHandle<()>`
+    // (post-fix — see lib.rs's `start_collectors_inner`); the
+    // `is_finished` method lives on the inner tokio handle,
+    // accessed via `.inner()`.
     assert!(
-        !sched_task.is_finished(),
+        !sched_task.inner().is_finished(),
         "scheduler task should still be alive 500ms after start_collectors"
     );
 }

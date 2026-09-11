@@ -161,7 +161,7 @@ pub fn start_collectors_inner(
 ) -> Result<
     (
         Arc<collectors::CollectorOrchestrator>,
-        tokio::task::JoinHandle<()>,
+        tauri::async_runtime::JoinHandle<()>,
     ),
     String,
 > {
@@ -178,7 +178,12 @@ pub fn start_collectors_inner(
         &cfg,
     ));
     let orch_for_sched = orch.clone();
-    let sched_task = tokio::spawn(async move {
+    // Use Tauri's async runtime rather than `tokio::spawn` —
+    // Tauri's runtime is lazily initialized, so this works
+    // from any call site (including `did_finish_launching` on
+    // macOS where no tokio runtime is in scope yet). See
+    // PR #291 for the full history.
+    let sched_task = tauri::async_runtime::spawn(async move {
         match orch_for_sched.start_scheduler().await {
             Ok(mut sched) => {
                 if let Err(e) = sched.start().await {
@@ -1056,11 +1061,18 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .try_init();
 
-        // The inner fn spawns a scheduler task via `tokio::spawn`;
-        // that requires a tokio runtime. Build a multi-threaded
-        // runtime and KEEP IT ALIVE in scope until we've drained the
-        // tracing channel — dropping the runtime aborts the
-        // parking task inside the spawned scheduler.
+        // The inner fn spawns a scheduler task via
+        // `tauri::async_runtime::spawn` (post-fix — used to be
+        // `tokio::spawn`, but Tauri's setup closure on macOS
+        // fires before any tokio runtime is in scope, which
+        // panicked with "there is no reactor running"). The
+        // test doesn't need to install a tokio runtime anymore
+        // because `tauri::async_runtime::spawn` lazily creates
+        // its own. We keep the `runtime` variable around to
+        // give the spawned task a chance to log its
+        // "collector scheduler started" line before the test
+        // exits (the runtime workers drain the channel even
+        // though Tauri's runtime is the one running the task).
         let runtime = std::mem::ManuallyDrop::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -1107,8 +1119,11 @@ mod tests {
 
         // The scheduler task should still be alive (it's parked in
         // `pending::<()>().await` until Tauri drops the runtime).
+        // `sched_task` is a `tauri::async_runtime::JoinHandle<()>` —
+        // the `is_finished` method is on the inner tokio handle,
+        // accessed via `.inner()`.
         assert!(
-            !sched_task.is_finished(),
+            !sched_task.inner().is_finished(),
             "scheduler task should still be parked, not finished"
         );
         // Drop the JoinHandle first so the runtime can drain it
