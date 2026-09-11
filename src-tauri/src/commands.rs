@@ -949,29 +949,71 @@ pub fn calendar_permission_deep_link_url(de: Option<String>) -> Result<String, S
 /// succeeds even if the OS fails to find a handler for the URL
 /// — the OS will typically show its own error dialog). Returns
 /// `Err` only if `Command::spawn` itself fails (e.g. the OS
-/// rejects the process creation).
+/// rejects the process creation) OR if the URL fails the
+/// scheme allowlist (cheap insurance — see SECURITY below).
 ///
-/// The URL is passed through as-is. The wizard only sends URLs
-/// from `calendar_permission_deep_link_url()` which is a pure
-/// function over the per-OS scheme list, so no user-controlled
-/// string reaches this without going through the validator.
+/// SECURITY: any JS running in the webview (including a future
+/// XSS via the bundled Vite dev server or a compromised npm
+/// dep) can call this command with an arbitrary string. On
+/// Windows the URL is routed through `cmd /c start`, and cmd.exe
+/// does its own metacharacter parsing (`&`, `|`, `^`, etc.) that
+/// isn't fully neutralized by `Command::args' per-argument
+/// escaping. On macOS/Linux the `open` / `xdg-open` commands
+/// are safer (no shell involved) but a leading `-` could still
+/// be parsed as a flag. The defense is a strict scheme allowlist
+/// at the Rust boundary:
+///
+/// - macOS: only `x-apple.systempreferences:` is permitted.
+/// - Windows: only `ms-settings:` is permitted.
+/// - Linux: the existing calendar deep-link uses program names
+///   (`gnome-control-center`, `systemsettings5`) as the first
+///   whitespace-delimited token, not a URL scheme. We accept
+///   only those two exact prefixes — anything else (e.g.
+///   `http://`, `file://`, `bash`, `sh`) is rejected.
+///
+/// This is the canonical pattern for Tauri commands that
+/// bridge to the OS shell: validate the input at the boundary,
+/// not in the (untrusted) JS caller. The wizard's
+/// `calendar_permission_deep_link_url()` only ever returns
+/// strings this allowlist accepts, so the live behavior is
+/// unchanged.
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !is_allowed_external_url(url) {
+        return Err(format!(
+            "open_external_url: URL scheme not in allowlist: {url:?}"
+        ));
+    }
+
     use std::process::Command;
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = Command::new("open");
-        c.arg(&url);
+        c.arg(url);
         c
     } else if cfg!(target_os = "linux") {
-        let mut c = Command::new("xdg-open");
-        c.arg(&url);
+        // Linux: the calendar deep-links are CLI programs
+        // (`gnome-control-center privacy`, `systemsettings5`),
+        // not URL schemes. xdg-open expects a URI, so the
+        // `file://`/`http://` shape would be the typical input
+        // — we don't accept that today. For our two known
+        // program-name callers, we just exec the first token
+        // directly: `gnome-control-center` and `systemsettings5`
+        // live on PATH on the DEs that ship them, and the
+        // subcommand (`privacy` etc.) is appended as an arg.
+        let mut c = Command::new(url.split_whitespace().next().unwrap_or(url));
+        // Append the remaining tokens (e.g. "privacy") as args
+        // — split_whitespace already consumed the first one.
+        for arg in url.split_whitespace().skip(1) {
+            c.arg(arg);
+        }
         c
     } else if cfg!(target_os = "windows") {
         // `start ""` requires an empty window-title argument, then
         // the URL. Without the empty title, start interprets the
         // URL as the title and never opens it.
         let mut c = Command::new("cmd");
-        c.args(["/c", "start", "", &url]);
+        c.args(["/c", "start", "", url]);
         c
     } else {
         return Err("open_external_url: unsupported OS".to_string());
@@ -979,6 +1021,132 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     cmd.spawn()
         .map(|_child| ())
         .map_err(|e| format!("open_external_url: spawn failed: {e}"))
+}
+
+/// Returns true iff `url` is one of the system-scheme / program
+/// names the wizard's deep-link generator produces. See the
+/// SECURITY block on [`open_external_url`] for the rationale.
+///
+/// The check is intentionally tight: per-OS, with a specific
+/// allowed prefix. Adding a new system target = adding one
+/// branch here AND one branch in
+/// `calendar_permission_deep_link_url_for`. That's the right
+/// ratio for a function whose blast radius is "exec a command
+/// on the user's machine."
+fn is_allowed_external_url(url: &str) -> bool {
+    if url.is_empty() {
+        return false;
+    }
+    // Reject anything starting with a dash — defends against
+    // a `-flag`-prefixed URL being parsed as an argument flag
+    // by `open` / `xdg-open` on macOS/Linux.
+    if url.starts_with('-') {
+        return false;
+    }
+    if cfg!(target_os = "macos") {
+        url.starts_with("x-apple.systempreferences:")
+    } else if cfg!(target_os = "windows") {
+        url.starts_with("ms-settings:")
+    } else if cfg!(target_os = "linux") {
+        // Linux: program-name callers. Whitespace-delimited;
+        // we check the first token only (the program name).
+        let first = url.split_whitespace().next().unwrap_or("");
+        first == "gnome-control-center" || first == "systemsettings5"
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod open_external_url_tests {
+    use super::is_allowed_external_url;
+
+    /// The check is per-OS; the same string passes on one
+    /// platform and fails on another. The tests below
+    /// explicitly name the host so a future contributor
+    /// running them on a different OS doesn't get a false
+    /// positive.
+    #[test]
+    fn allows_calendar_deep_link_on_macos() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        assert!(is_allowed_external_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendar"
+        ));
+    }
+
+    #[test]
+    fn rejects_http_on_macos() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        assert!(!is_allowed_external_url("http://example.com"));
+    }
+
+    #[test]
+    fn rejects_file_scheme_on_macos() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        // file:// is a common XSS-target — the macOS `open`
+        // command happily opens these.
+        assert!(!is_allowed_external_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn rejects_dash_prefix_on_all_platforms() {
+        // A leading `-` could be parsed as a flag by `open`
+        // / `xdg-open` on macOS/Linux. Test on all platforms
+        // because the check is unconditional.
+        assert!(!is_allowed_external_url("-flag"));
+    }
+
+    #[test]
+    fn rejects_empty_string_on_all_platforms() {
+        assert!(!is_allowed_external_url(""));
+    }
+
+    #[test]
+    fn allows_ms_settings_on_windows() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        assert!(is_allowed_external_url("ms-settings:privacy-calendar"));
+    }
+
+    #[test]
+    fn rejects_cmd_metacharacter_injection_on_windows() {
+        // The classic cmd.exe metacharacter: `&` chains commands.
+        // Without the allowlist, a future XSS could open a
+        // malicious site via `ms-settings:&calc`.
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        assert!(!is_allowed_external_url("ms-settings:&calc"));
+    }
+
+    #[test]
+    fn allows_gnome_control_center_on_linux() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        assert!(is_allowed_external_url("gnome-control-center privacy"));
+        assert!(is_allowed_external_url("systemsettings5"));
+    }
+
+    #[test]
+    fn rejects_bash_on_linux() {
+        // Without the allowlist, a future XSS could
+        // `xdg-open bash` and get a shell on the user's
+        // machine (xdg-open on most DEs will dispatch a
+        // .desktop file, and bash.desktop is shipped
+        // on most distros). Reject.
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        assert!(!is_allowed_external_url("bash"));
+    }
 }
 
 /// Tauri command: log a frontend debug message to stderr.

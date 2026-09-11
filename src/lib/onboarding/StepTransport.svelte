@@ -405,19 +405,19 @@
       } else if (sshMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `SSH error: ${ sshMsg }`;
+          s.test_error = `SSH error: ${sshMsg}`;
           return s;
         });
       } else if (configMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `Configuration error: ${ configMsg }`;
+          s.test_error = `Configuration error: ${configMsg}`;
           return s;
         });
       } else if (ioMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `Network/I-O error: ${ ioMsg }`;
+          s.test_error = `Network/I-O error: ${ioMsg}`;
           return s;
         });
       } else {
