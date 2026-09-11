@@ -316,13 +316,42 @@
       // future TransportError variant), we still show SOMETHING
       // useful — JSON.stringify the whole payload so the user can
       // copy-paste it into a bug report.
+      //
+      // err-shape handling (the previous fix had a bug here):
+      // Tauri's invoke() can reject with any of:
+      //   - a string (the IPC-returned error serialized to a string)
+      //   - an Error object (if the JS side threw, e.g. permission
+      //     denied on the IPC channel)
+      //   - a plain object (if the JSON payload was misparsed by a
+      //     Tauri version mismatch — happened on the user's box
+      //     and surfaced as "Unexpected error: [object Object]")
+      // String() on the last two produces "[object Object]" or
+      // "Error: <msg>". The robust pattern: prefer err.message when
+      // it's an Error; otherwise try JSON.stringify directly on the
+      // object (which produces a real JSON string we can then parse
+      // + dispatch on). Only fall through to String(err) as a last
+      // resort, after we have something useful to display.
       let raw: string;
       let parsed: Record<string, unknown> | null = null;
+      if (err instanceof Error) {
+        // Tauri IPC-level error (permission denied, command not
+        // found, etc.). err.message is the useful part.
+        raw = err.message;
+      } else if (typeof err === "string") {
+        raw = err;
+      } else {
+        // Plain object (or anything else non-string). JSON.stringify
+        // it first so we can JSON.parse + dispatch on the result.
+        try {
+          raw = JSON.stringify(err);
+        } catch {
+          raw = String(err); // last-resort fallback; may be "[object Object]"
+        }
+      }
       try {
-        raw = String(err);
         parsed = JSON.parse(raw);
       } catch {
-        raw = String(err);
+        parsed = null;
       }
 
       const hku = parsed?.HostKeyUnknown as
@@ -376,25 +405,59 @@
       } else if (sshMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `SSH error: ${ sshMsg }`;
+          s.test_error = `SSH error: ${sshMsg}`;
           return s;
         });
       } else if (configMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `Configuration error: ${ configMsg }`;
+          s.test_error = `Configuration error: ${configMsg}`;
           return s;
         });
       } else if (ioMsg) {
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `Network/I-O error: ${ ioMsg }`;
+          s.test_error = `Network/I-O error: ${ioMsg}`;
           return s;
         });
       } else {
         // Unrecognized error shape — stringify the whole payload
         // so the user can copy-paste it into a bug report rather
         // than seeing the useless "[object Object]".
+        //
+        // DEBUG: also log the raw err to the webview console so a
+        // user with Web Inspector / Tauri devtools open can copy
+        // the actual structure. The previous round of fixes had
+        // no debug surface at all — the user reported they ran
+        // the app from the terminal and "don't see any logs to
+        // try to identify more details on the problem" (2026-09-10).
+        // The Tauri webview console IS reachable from the terminal
+        // via Tauri devtools when running an unsigned/draft build
+        // (right-click → Inspect), and this console.log lands
+        // there.
+        console.error(
+          "[StepTransport] test_ssh_connection: unrecognized err shape",
+          { err, raw, parsed, command: "test_ssh_connection" },
+        );
+        // Also surface the err to the terminal stderr (via the
+        // `frontend_log` Tauri command) so a user running the
+        // .app from the terminal can grep the actual structure
+        // without opening the webview devtools. The user reported
+        // (2026-09-10) "when running the app from the terminal,
+        // I don't see any logs to try to identify more details
+        // on the problem" — this is the fix.
+        try {
+          void invoke("frontend_log", {
+            category: "test_ssh_connection",
+            message: `unrecognized err shape: ${ JSON.stringify({
+              err,
+              raw,
+              parsed,
+            }) }`,
+          });
+        } catch {
+          // The log command itself is best-effort; don't double-fault.
+        }
         state.update((s) => {
           s.test_state = "error";
           s.test_error = parsed

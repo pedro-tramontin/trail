@@ -693,6 +693,10 @@ describe("StepTransport.svelte", () => {
           JSON.stringify({ FutureVariant: { code: 42, why: "no idea" } }),
         );
       }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
       return Promise.reject(new Error(`Unknown command: ${cmd}`));
     });
     render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
@@ -702,5 +706,59 @@ describe("StepTransport.svelte", () => {
     // The whole payload is visible so the user can copy-paste it.
     expect(errEl.textContent).toContain("FutureVariant");
     expect(errEl.textContent).toContain('"code":42');
+  });
+
+  // The previous fix (PR #281 / #282) used String(err) as the
+  // first step. That works for the string case but produces
+  // "[object Object]" for plain-object errors. The current fix
+  // special-cases Error objects and JSON.stringifies plain objects
+  // before parsing. These tests guard against the bug the user
+  // reported on 2026-09-10.
+  it("(aa) Plain-object error doesn't render as [object Object]", async () => {
+    // Tauri's invoke() can reject with a plain object if the IPC
+    // payload is mis-parsed (Tauri version mismatch, malformed
+    // response, etc.). String(plainObject) === "[object Object]"
+    // was the bug; we now JSON.stringify it first.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject({ kind: "weird", payload: "tcc dialog failed" });
+      }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    // The inner payload string is visible because the plain
+    // object was JSON.stringify-ed first.
+    expect(errEl.textContent).toContain("tcc dialog failed");
+  });
+
+  it("(ab) Error object renders its .message, not 'Error: <msg>'", async () => {
+    // Tauri IPC-level errors (permission denied, command not
+    // registered, etc.) reject with a real Error. The previous
+    // code did String(err) which gives "Error: <msg>". The
+    // current code prefers err.message directly.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "test_ssh_connection") {
+        return Promise.reject(new Error("command not registered: test_ssh_connection"));
+      }
+      // The fallback path also calls `frontend_log` to surface
+      // the err to the terminal stderr (B1.S2-debug, 2026-09-10).
+      // Accept it silently.
+      if (cmd === "frontend_log") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`Unknown command: ${cmd}`));
+    });
+    render(StepTransport, { props: { state: fresh_state(), on_next: () => {} } });
+    await fireEvent.click(screen.getByTestId("transport-test-connection"));
+    const errEl = await screen.findByTestId("transport-test-error");
+    expect(errEl.textContent).not.toMatch(/\[object Object\]/);
+    // The "Error: " prefix is dropped — only the message body.
+    expect(errEl.textContent).toContain("command not registered: test_ssh_connection");
+    expect(errEl.textContent).not.toMatch(/^Error: /);
   });
 });

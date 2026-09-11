@@ -778,6 +778,20 @@ pub fn run() {
             // `commands::request_calendar_permission_cmd` +
             // `onboarding::event_kit::request_calendar_permission`.
             commands::request_calendar_permission_cmd,
+            // B1.S1b-ui — open an external URL in the system
+            // handler. Required for deep links (e.g.
+            // `x-apple.systempreferences:...`) that the Tauri
+            // webview doesn't follow on its own. See
+            // commands::open_external_url.
+            commands::open_external_url,
+            // B1.S2-debug — frontend log → stderr. The user
+            // reported (2026-09-10) that they couldn't see any
+            // logs when running the .app from the terminal.
+            // Frontend console.log goes to the webview devtools
+            // (right-click → Inspect on a draft build) but not
+            // to the terminal. This command bridges the two so
+            // the user can grep one stream.
+            commands::frontend_log,
             list_collectors,
             run_collector_now,
             set_collector_enabled,
