@@ -32,6 +32,23 @@ chrono = { version = "0.4.45", features = ["serde"] }
 ssh2 = "0.9.6"
 async-trait = "0.1.92"
 base64 = "0.22"
+# §X-7 — `ed25519-dalek` is pulled in transitively by `ssh-key` for key
+# generation, but we need it as a direct dep with the `pkcs8` feature
+# enabled to re-serialize the stored keypair from OpenSSH PEM (the
+# `ssh-key` crate's native format) to PKCS#8 PEM (the format libssh2's
+# `userauth_pubkey_memory` actually parses). Without this, the wizard's
+# generated keypair is stored in OpenSSH format and the libssh2 auth
+# call returns `Session(-18) = LIBSSH2_ERROR_PUBLICKEY_UNRECOGNIZED`
+# — the symptom the user saw on the wizard's "Test connection" button.
+# See the doc on `keyring_pem::openssh_to_pkcs8_pem` for the full rationale.
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem", "alloc"] }
+# §X-7 — `pkcs8` is pulled in transitively by `ed25519-dalek` (with
+# the `pem` feature enabled), but we need it as a direct dep to
+# import the `LineEnding` enum (used by
+# `ed25519_dalek::SigningKey::to_pkcs8_pem` — the encoder's
+# PEM-line-ending selector). The `pem` feature re-exports
+# `LineEnding` from `pkcs8::der::pem`.
+pkcs8 = { version = "0.10.2", features = ["pem", "alloc"] }
 ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core", "getrandom"] }
 keyring = { version = "3.6.3", features = ["apple-native", "linux-native", "windows-native"] }
 zeroize = { version = "1.9.0", features = ["derive"] }

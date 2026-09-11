@@ -169,7 +169,38 @@ impl SshTransport {
         )
         .map_err(|e| TransportError::Ssh(format!("keychain open: {e}")))?;
         match entry.get_password() {
-            Ok(pem) => Ok(Zeroizing::new(pem)),
+            Ok(pem) => {
+                // §X-7 — one-shot migration of legacy OpenSSH-format
+                // keychains (stored by the v1 broken generator) to
+                // PKCS#8 format (the format libssh2's
+                // `userauth_pubkey_memory` actually parses). The
+                // migration is idempotent: re-reading a
+                // freshly-migrated keychain takes the else branch
+                // and short-circuits. We swallow re-store failures
+                // (e.g. on a read-only keychain) and return the
+                // in-memory converted PEM anyway — auth still
+                // works this session, the migration just retries
+                // on the next read.
+                if pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
+                    let pkcs8_pem =
+                        crate::keyring_pem::openssh_to_pkcs8_pem(&pem).map_err(|e| {
+                            TransportError::Ssh(format!("openssh→pkcs8 migration: {e}"))
+                        })?;
+                    if let Err(e) = entry.set_password(&pkcs8_pem) {
+                        eprintln!(
+                            "[trail] WARN: keychain re-store after OpenSSH→PKCS#8 migration \
+                             failed: {e}; auth will still work this session, but the next \
+                             read will re-attempt the migration"
+                        );
+                    }
+                    Ok(pkcs8_pem)
+                } else {
+                    // Already in PKCS#8 format (v2 generator) — pass
+                    // through. The Zeroizing<String> wrapper ensures
+                    // the bytes are wiped on drop.
+                    Ok(Zeroizing::new(pem))
+                }
+            }
             Err(keyring::Error::NoEntry) => Err(TransportError::Ssh(
                 "SSH key not generated yet — run onboarding first".into(),
             )),
