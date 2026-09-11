@@ -36,6 +36,13 @@ ssh2 = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 ssh-key = { workspace = true }
+# §X-7 — see the workspace Cargo.toml entry for the rationale. We need
+# the `pkcs8` feature here to re-serialize the wizard's generated
+# keypair into the format libssh2 actually parses. Transitively
+# pulled via `ssh-key` already, but the feature set is workspace-pinned
+# so we declare it explicitly on the direct dep.
+ed25519-dalek = { workspace = true }
+pkcs8 = { workspace = true }
 keyring = { workspace = true }
 zeroize = { workspace = true }
 anyhow = { workspace = true }

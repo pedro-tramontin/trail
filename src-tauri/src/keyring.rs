@@ -92,9 +92,28 @@ pub fn credential_store_name_for(target_os: &str) -> &'static str {
 }
 
 /// Generate a fresh ed25519 SSH keypair (pure — does not touch the
-/// keychain). Returns the private key in OpenSSH PEM form + the
+/// keychain). Returns the private key in **PKCS#8** PEM form + the
 /// public key in OpenSSH single-line form (ready for
 /// `~/.ssh/authorized_keys`).
+///
+/// §X-7 — the v1 generator returned OpenSSH PEM (the `ssh-key`
+/// crate's native format), which the wizard stored in the OS
+/// credential store as-is. But libssh2's
+/// `userauth_pubkey_memory` only parses PKCS#8 / OpenSSL-style
+/// PEM, so the auth call returned `Session(-18) =
+/// LIBSSH2_ERROR_PUBLICKEY_UNRECOGNIZED` and the user saw
+/// "Username/PublicKey combination invalid" even with the correct
+/// public key in `authorized_keys`. The v2 generator returns
+/// PKCS#8 PEM directly so freshly-generated keychains are
+/// immediately usable. Existing OpenSSH-format keychains are
+/// migrated one-shot on first read by
+/// [`crate::keyring_pem::openssh_to_pkcs8_pem`] (called from
+/// [`crate::transport::SshTransport::load_private_key_pem`]).
+///
+/// The conversion is a pure re-wrapping of the same 32-byte
+/// ed25519 seed, so the public key is byte-identical to what
+/// the v1 generator produced — existing `authorized_keys`
+/// entries continue to match without re-pasting.
 ///
 /// This is the underlying generator that `generate_and_store()`
 /// delegates to. It's `pub(crate)` so tests can call it without
@@ -107,17 +126,23 @@ pub(crate) fn generate_keypair() -> Result<(String, String), KeyringError> {
         .to_openssh()
         .map_err(KeyringError::Keygen)?;
 
-    // Serialize private key (OpenSSH PEM, no passphrase — see master's
-    // "Tradeoffs" block for the security trade-off rationale).
-    // `to_openssh` returns a Zeroizing<String>; we hand that
-    // Zeroizing wrapper to the caller so the bytes are wiped on drop.
-    let pem_zerobox = private
+    // Re-serialize as PKCS#8 PEM (the format libssh2 actually
+    // parses — see the §X-7 module doc on `keyring_pem` for the
+    // full rationale). The two-step path (ssh-key for the key
+    // bytes + ed25519-dalek for the re-encode) is preferred
+    // over a hand-rolled DER encoder because (a) ssh-key's RNG
+    // is the one we already audit elsewhere, and (b)
+    // ed25519-dalek's `EncodePrivateKey` is a RustCrypto
+    // reference implementation, well-tested against the RFC
+    // 8410 test vectors.
+    let openssh_pem = private
         .to_openssh(ssh_key::LineEnding::LF)
         .map_err(KeyringError::Keygen)?;
+    let pkcs8_pem = crate::keyring_pem::openssh_to_pkcs8_pem(&openssh_pem)?;
     // The underlying ed25519 key material in `private` is wiped by
     // ssh-key's Drop impl when this function returns.
 
-    Ok((pem_zerobox.to_string(), public_openssh))
+    Ok((pkcs8_pem.to_string(), public_openssh))
 }
 
 /// Generate a new ed25519 keypair on first run, store the private key
@@ -157,6 +182,16 @@ pub fn generate_and_store() -> Result<String, KeyringError> {
 /// — it wraps this function internally and lifts the result
 /// into the discrete [`KeyringHint`] variant the Svelte panel
 /// branches on.
+///
+/// §X-7 — accepts BOTH the legacy OpenSSH-format PEM (stored by
+/// the v1 broken generator) AND the new PKCS#8-format PEM
+/// (stored by the v2 generator). Format detection is a
+/// header-prefix probe (`-----BEGIN OPENSSH PRIVATE KEY-----` vs
+/// `-----BEGIN PRIVATE KEY-----`) — both are stable text headers
+/// defined by the respective specs (PROTOCOL.key for OpenSSH,
+/// RFC 7468 §7 for PKCS#8). If neither header is recognised we
+/// surface the parse error to the caller so a corrupt keychain
+/// gets a meaningful message instead of a silent `None`.
 pub fn read_public_from_keychain() -> Result<Option<String>, KeyringError> {
     let entry =
         keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(KeyringError::Keyring)?;
@@ -167,15 +202,57 @@ pub fn read_public_from_keychain() -> Result<Option<String>, KeyringError> {
             // `keyring 3.x` upstream returns a plain `String`
             // (not `Zeroizing<String>`), so we wrap inline.
             let pem: Zeroizing<String> = Zeroizing::new(pem);
-            let private = PrivateKey::from_openssh(&pem).map_err(KeyringError::Keygen)?;
-            let public_openssh = private
-                .public_key()
-                .to_openssh()
-                .map_err(KeyringError::Keygen)?;
+            let public_openssh = parse_pem_to_public_openssh(&pem)?;
             Ok(Some(public_openssh))
         }
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(KeyringError::Keyring(e)),
+    }
+}
+
+/// Parse a keychain-stored private-key PEM (either OpenSSH or
+/// PKCS#8 — see §X-7) and return the matching public key in
+/// OpenSSH single-line form (`ssh-ed25519 AAAA...`).
+///
+/// This is the dual-format companion to
+/// [`crate::keyring_pem::openssh_to_pkcs8_pem`]: that function
+/// converts *to* PKCS#8 (for libssh2's `userauth_pubkey_memory`
+/// to parse); this one parses *from* either format (to surface
+/// the public key in the wizard's UI regardless of which
+/// generator produced the stored PEM). Both paths live in
+/// pure-function form so the unit tests can exercise the
+/// migration end-to-end without an OS keychain.
+pub(crate) fn parse_pem_to_public_openssh(pem: &str) -> Result<String, KeyringError> {
+    if pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
+        // Legacy v1 format. `ssh_key::PrivateKey::from_openssh`
+        // handles it directly.
+        let private = PrivateKey::from_openssh(pem).map_err(KeyringError::Keygen)?;
+        private
+            .public_key()
+            .to_openssh()
+            .map_err(KeyringError::Keygen)
+    } else if pem.starts_with("-----BEGIN PRIVATE KEY-----") {
+        // v2 PKCS#8 format. Parse via `ed25519-dalek`, then
+        // re-wrap the verifying key into the OpenSSH
+        // single-line form the wizard displays. The
+        // OpenSSH-blob construction lives in `keyring_pem`
+        // so the test there can reuse the same helper (and
+        // so a future change to the wire format doesn't
+        // drift between the two call sites).
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_pem(pem)
+            .map_err(|_e| KeyringError::Keygen(ssh_key::Error::Crypto))?;
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        Ok(crate::keyring_pem::ed25519_pubkey_to_openssh(&public_bytes))
+    } else {
+        // Unrecognised PEM header. This shouldn't happen for
+        // PEMs the wizard itself produced, but a future
+        // hand-imported key (e.g. a user pastes their own
+        // private key) could land here. Surface a clear
+        // error so the wizard's "Test connection" path
+        // shows a meaningful message instead of silently
+        // returning None.
+        Err(KeyringError::Keygen(ssh_key::Error::Crypto))
     }
 }
 
@@ -318,18 +395,26 @@ mod tests {
     }
 
     #[test]
-    fn generate_keypair_private_pem_is_open_ssh_text() {
+    fn generate_keypair_private_pem_is_pkcs8_text() {
         let (pem, _public) = generate_keypair().expect("generate succeeds");
-        // OpenSSH private key header (the `to_openssh` LineEnding::LF form
-        // starts with "-----BEGIN OPENSSH PRIVATE KEY-----").
+        // §X-7 — the v2 generator emits PKCS#8 PEM (the format
+        // libssh2's `userauth_pubkey_memory` parses), not
+        // OpenSSH PEM (the format the v1 generator emitted).
+        // The header `-----BEGIN PRIVATE KEY-----` is defined
+        // by RFC 7468 §7 and is what ed25519-dalek's
+        // `EncodePrivateKey` produces.
         let head_len = pem.len().min(60);
         assert!(
-            pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
-            "expected OpenSSH PEM header, got head: {:?}",
+            pem.starts_with("-----BEGIN PRIVATE KEY-----"),
+            "expected PKCS#8 PEM header, got head: {:?}",
             &pem[..head_len]
         );
-        // The PEM is the base64-armoured body, so it's at least 200 chars.
-        assert!(pem.len() > 200);
+        // PKCS#8 PEM for an ed25519 key is ~300 chars (header
+        // + 32-byte seed wrapped in ASN.1 OCTET STRING
+        // + base64 + footer). Assert a reasonable lower bound;
+        // an exact length assertion would over-specify
+        // ed25519-dalek's encoder.
+        assert!(pem.len() > 100, "PKCS#8 PEM too short: {} chars", pem.len());
     }
 
     #[test]
@@ -616,6 +701,96 @@ mod tests {
             keyring_hint_for(false, true),
             KeyringHint::KeyPair,
             "(false, true) should collapse to KeyPair (documented unreachability — the v1 generator always writes both halves; see the doc comment)"
+        );
+    }
+
+    // === §X-7 — dual-format `parse_pem_to_public_openssh` ===
+    //
+    // The wizard's keychain can contain either an OpenSSH-format
+    // PEM (legacy v1 generator) or a PKCS#8-format PEM (current
+    // v2 generator). `parse_pem_to_public_openssh` handles both,
+    // and the public-key string it returns is byte-identical
+    // between the two paths — critical for the migration: the
+    // user's existing `authorized_keys` entry must continue to
+    // match the public key derived from the (now PKCS#8)
+    // keychain-stored private key.
+    //
+    // These tests are pure functions on string input — no
+    // keychain I/O — so they run on every host and gate the
+    // migration on the cheap path.
+
+    /// OpenSSH-format input (v1 generator) round-trips to the
+    /// same OpenSSH public-key string the wizard surfaces to
+    /// the user. If the format-detection branch silently took
+    /// the wrong path, the public key would change and auth
+    /// would break post-migration.
+    #[test]
+    fn parse_pem_to_public_openssh_handles_openssh_format() {
+        // Build an OpenSSH-format PEM by hand (the v2
+        // generator emits PKCS#8 so we can't use it as a
+        // fixture for the OpenSSH-input branch).
+        let openssh_pem = ssh_key::PrivateKey::random(
+            &mut ssh_key::rand_core::OsRng,
+            ssh_key::Algorithm::Ed25519,
+        )
+        .expect("generate")
+        .to_openssh(ssh_key::LineEnding::LF)
+        .expect("to_openssh");
+        let expected_public = PrivateKey::from_openssh(&openssh_pem)
+            .expect("parse openssh")
+            .public_key()
+            .to_openssh()
+            .expect("public to_openssh");
+
+        let derived = parse_pem_to_public_openssh(&openssh_pem).expect("parse");
+        assert_eq!(
+            derived, expected_public,
+            "OpenSSH-format PEM must produce the same public key as the v1 path"
+        );
+    }
+
+    /// PKCS#8-format input (v2 generator) round-trips to the
+    /// same OpenSSH public-key string. The v2 generator uses
+    /// this path, so this is the hot path post-migration.
+    #[test]
+    fn parse_pem_to_public_openssh_handles_pkcs8_format() {
+        // Build a v2-style PKCS#8 PEM via the generator.
+        let (pkcs8_pem, expected_public) = generate_keypair().expect("generate");
+
+        let derived = parse_pem_to_public_openssh(&pkcs8_pem).expect("parse");
+        assert_eq!(
+            derived, expected_public,
+            "PKCS#8-format PEM must produce the same public key the wizard surfaces"
+        );
+    }
+
+    /// End-to-end migration: an OpenSSH-format keypair (v1
+    /// generator output) re-serialized as PKCS#8 produces the
+    /// SAME public key as the OpenSSH original. This is the
+    /// single most important property of the §X-7 migration —
+    /// without it, every existing user would have to re-paste
+    /// their public key into the VPS's `authorized_keys` after
+    /// upgrading.
+    #[test]
+    fn openssh_to_pkcs8_migration_preserves_public_key() {
+        // Build a v1 OpenSSH-format PEM.
+        let openssh_pem = ssh_key::PrivateKey::random(
+            &mut ssh_key::rand_core::OsRng,
+            ssh_key::Algorithm::Ed25519,
+        )
+        .expect("generate")
+        .to_openssh(ssh_key::LineEnding::LF)
+        .expect("to_openssh");
+
+        // Convert to PKCS#8.
+        let pkcs8_pem = crate::keyring_pem::openssh_to_pkcs8_pem(&openssh_pem).expect("convert");
+
+        // Both formats must yield the same public key.
+        let public_from_openssh = parse_pem_to_public_openssh(&openssh_pem).expect("openssh");
+        let public_from_pkcs8 = parse_pem_to_public_openssh(&pkcs8_pem).expect("pkcs8");
+        assert_eq!(
+            public_from_openssh, public_from_pkcs8,
+            "OpenSSH→PKCS#8 migration must preserve the public key (existing authorized_keys entries must continue to match)"
         );
     }
 }

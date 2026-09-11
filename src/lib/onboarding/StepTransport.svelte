@@ -150,6 +150,57 @@
     }
   });
 
+  // Copy-to-clipboard state for the public-key display block.
+  // Uses a `writable` store, not a `$state` rune, because
+  // the parent wizard's `state` prop is named `state` —
+  // and the Svelte 5 parser refuses to compile `$state(...)`
+  // when a local binding called `state` is in scope. (See
+  // the comment on the `state: Writable<StepTransportState>`
+  // prop above — that's the source of the name collision.)
+  // `writable<...>(...)` is the same pattern other
+  // presentational state in this component uses, and it
+  // sidesteps the rune-vs-prop name clash entirely.
+  const copy_state_store = writable<"idle" | "copied" | "failed">("idle");
+
+  /** Copy the wizard's public key to the system clipboard. The
+   *  Tauri webview's Clipboard API can fail in three ways:
+   *    1. The webview blocks it (draft / unsigned build with
+   *       restrictive CSP).
+   *    2. The user denies a permission prompt on macOS Safari /
+   *       WebKit-derived webviews.
+   *    3. The browser context is sandboxed (Linux WebKitGTK in
+   *       some distros).
+   *  All three collapse to the "Copy failed" path with a fallback
+   *  hint to select the key manually. We do NOT use the Tauri
+   *  `clipboard` plugin here because (a) we'd have to add it
+   *  to the dependency tree just for this one button, and (b)
+   *  the webview API is enough when it works — the fallback
+   *  path is a graceful degradation. */
+  async function copy_public_key_to_clipboard(): Promise<void> {
+    let key_snapshot = "";
+    const unsub = state.subscribe((s) => {
+      key_snapshot = s.ssh_key_path ?? "";
+    });
+    unsub();
+    if (!key_snapshot) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(key_snapshot);
+        copy_state_store.set("copied");
+      } else {
+        copy_state_store.set("failed");
+      }
+    } catch {
+      copy_state_store.set("failed");
+    }
+    // Auto-clear the confirmation after 2.5s so the button
+    // doesn't get stuck on "Copied" forever. Match the timing
+    // of the wizard's other ephemeral confirmations.
+    setTimeout(() => {
+      copy_state_store.set("idle");
+    }, 2500);
+  }
+
   // The form fields bind to `$state.X` (Svelte's auto-store
   // subscription). The $store-name prefix auto-subscribes to
   // the writable store and re-renders the consumer when
@@ -403,9 +454,30 @@
           return s;
         });
       } else if (sshMsg) {
+        // Detect the libssh2 "Username/PublicKey combination invalid"
+        // (Session(-18)) — a server-side rejection of our public-key
+        // offer. The fix is always out-of-band: the user has to add
+        // the wizard's public key to the VPS's
+        // ~/.ssh/authorized_keys. Detect the substring rather than
+        // matching the exact `parsed.Ssh` shape so the rule survives
+        // libssh2 upstream wording changes (the user reported this
+        // on 2026-09-11 — the raw error was useless without a hint
+        // about what to do next).
+        const isAuthRejected =
+          sshMsg.includes("Username/PublicKey combination invalid") ||
+          sshMsg.includes("PublicKey combination invalid") ||
+          // Some libssh2 versions say "Authentication failed"
+          // for the same root cause when the server gives up
+          // after one pubkey offer. Same fix.
+          (sshMsg.includes("Authentication failed") &&
+            sshMsg.toLowerCase().includes("pubkey"));
         state.update((s) => {
           s.test_state = "error";
-          s.test_error = `SSH error: ${sshMsg}`;
+          s.test_error = isAuthRejected
+            ? `Server rejected your SSH public key (${sshMsg}). ` +
+              `Copy the public key shown above and add it to your VPS's ` +
+              `~/.ssh/authorized_keys for user "${$state.user}", then re-test.`
+            : `SSH error: ${sshMsg}`;
           return s;
         });
       } else if (configMsg) {
@@ -629,8 +701,67 @@
         >
           ✅ Currently attached: {$state.ssh_key_source === "existing"
             ? "existing key from"
-            : "generated key in"} OS credential store — <code>{$state.ssh_key_path}</code>
+            : "generated key in"} OS credential store — <code class="public-key-inline">{$state.ssh_key_path}</code>
         </p>
+        <!--
+          Public key + copy-to-clipboard block.
+
+          Why this exists: libssh2's "Username/PublicKey combination
+          invalid" error is a server-side rejection — the server saw
+          our key offer but had no matching entry in the user's
+          authorized_keys. The fix is always out-of-band (paste the
+          pubkey on the VPS), so the wizard's job is to make the
+          pubkey one-click copyable and the remediation obvious.
+
+          Without this block the user has to triple-click into an
+          inline <code> tag, hope the webview didn't truncate the
+          line, and SSH into the VPS by hand. The 2026-09-11 user
+          report ("SSH error: pubkey auth: ... Username/PublicKey
+          combination invalid") was 100% this gap.
+        -->
+        <div
+          class="public-key-block"
+          data-testid="transport-public-key"
+        >
+          <p class="hint">
+            Add this public key to your VPS for user
+            <code>{$state.user || "<user>"}</code>:<br />
+            <code class="command-example"
+              >echo '{$state.ssh_key_path}' >> ~/.ssh/authorized_keys</code
+            >
+          </p>
+          <div class="public-key-row">
+            <code class="public-key" data-testid="transport-public-key-value"
+              >{$state.ssh_key_path}</code
+            >
+            <button
+              type="button"
+              class="secondary copy-btn"
+              data-testid="transport-copy-public-key"
+              disabled={$copy_state_store !== "idle"}
+              onclick={() => {
+                void copy_public_key_to_clipboard();
+              }}
+            >
+              {#if $copy_state_store === "copied"}
+                ✅ Copied
+              {:else if $copy_state_store === "failed"}
+                ❌ Copy failed
+              {:else}
+                📋 Copy
+              {/if}
+              </button>
+              </div>
+              {#if $copy_state_store === "failed"}
+            <p
+              class="hint hint-error"
+              data-testid="transport-copy-error"
+            >
+              Clipboard API blocked by the webview. Triple-click the
+              key above to select it, then ⌘C / Ctrl+C.
+            </p>
+          {/if}
+        </div>
       {:else}
         <p class="hint" data-testid="transport-key-hint">
           No key attached yet. Pick one above — Next stays disabled until a
@@ -876,5 +1007,52 @@
     margin: 0;
     font-weight: 700;
     color: var(--danger, #c00);
+  }
+  /* Public-key + copy block. The key itself is ~100 chars
+     (ssh-ed25519 + base68 32 bytes + comment), so it MUST
+     wrap inside a scrollable block instead of expanding the
+     wizard column — that's why this is a flex column with
+     a wide horizontal scroll on the .public-key <code>. */
+  .public-key-block {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    border: 1px solid var(--border, #e5e7eb);
+    border-radius: 4px;
+    background: #f9fafb;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .public-key-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .public-key {
+    flex: 1 1 auto;
+    min-width: 0; /* allow flex item to shrink + scroll */
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8em;
+    padding: 0.25rem 0.5rem;
+    background: #fff;
+    border: 1px solid var(--border, #d1d5db);
+    border-radius: 3px;
+    overflow-x: auto;
+    white-space: nowrap;
+    user-select: all; /* triple-click selects the whole key */
+  }
+  .copy-btn {
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    padding: 0.25rem 0.5rem;
+  }
+  .command-example {
+    display: inline-block;
+    margin-top: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    background: #f3f4f6;
+    border-radius: 3px;
+    font-size: 0.85em;
+    word-break: break-all;
   }
 </style>

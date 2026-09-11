@@ -51,6 +51,12 @@ mod notarize;
 pub mod config;
 pub mod install;
 mod keyring;
+// §X-7 — re-serialize the wizard's generated keypair into the PKCS#8
+// PEM format libssh2 actually parses. See the module's top-level
+// doc comment for the full rationale. The module is `pub(crate)` so
+// the unit tests in `transport.rs` can exercise the migration path
+// without going through the OS keychain.
+mod keyring_pem;
 pub mod onboarding;
 mod transport;
 mod validate;
