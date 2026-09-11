@@ -86,14 +86,17 @@ use crate::keyring::KeyringError;
 ///   `ed25519_dalek::SigningKey::to_pkcs8_pem` fails (extremely
 ///   unlikely — would only happen if ed25519-dalek's own
 ///   allocator is exhausted mid-encode)
+///
 /// Build the OpenSSH single-line form of an ed25519 public key
 /// from the 32 raw public-key bytes.
 ///
 /// OpenSSH wire format for the public-key body (RFC 4253 §6.6)
 /// is:
 ///
+/// ```text
 ///   string  "ssh-ed25519"   (4-byte length + 11 ASCII bytes)
 ///   string  <32 raw bytes>  (the ed25519 public point)
+/// ```
 ///
 /// …then base64-encoded into a single blob. The output is
 /// the full `ssh-ed25519 <base64>` string the wizard displays
