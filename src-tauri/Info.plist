@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tauri 2 Info.plist overlay (merged with the auto-generated one
+  by the tauri-build script). Only keys not already set by Tauri
+  defaults go here.
+
+  See:
+    https://v2.tauri.app/reference/config/#bundle.macos.infoPlist
+    https://developer.apple.com/documentation/bundleresources/information_property_list
+
+  Why these keys exist (B1.S1b-ui, 2026-09-10):
+
+  • NSCalendarsFullAccessUsageDescription / NSCalendarsUsageDescription:
+    REQUIRED for macOS to even SHOW the EventKit TCC dialog. Without
+    them, EKEventStore.requestFullAccessToEventsWithCompletion:
+    silently fails — no dialog, no entry in Privacy & Security →
+    Calendars. The user reported "macOS pops up a dialog asking to
+    give permission to the app and after that the grant permission
+    worked" only when they ran the binary directly; running the
+    .app bundle from Finder failed silently. Adding the description
+    makes the dialog appear via the normal Tauri 2 webview path
+    (no need to invoke the binary directly).
+
+    We declare BOTH NSCalendarsFullAccessUsageDescription (macOS
+    14+ / Sonoma+, full-access mode) and NSCalendarsUsageDescription
+    (pre-Sonoma + write-only fallback) so the wizard works on every
+    macOS version we support per `minimumSystemVersion: 11.0`.
+
+  • NSMicrophoneUsageDescription: required by macOS before any
+    microphone access. Trail only uses the mic for explicit voice
+    notes (never background), but the key MUST be declared before
+    the first mic access or macOS silently denies it.
+
+  • LSApplicationCategoryType: cosmetic — sets the Launchpad
+    category. Without it, Launchpad shows Trail under "Other".
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Trail reads your calendar to surface meetings, prep notes, and follow-ups in the daily summary it pushes to your VPS.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Trail reads your calendar to surface meetings, prep notes, and follow-ups in the daily summary it pushes to your VPS.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Trail uses the microphone only when you explicitly start a voice note from the wizard. Audio is processed locally; nothing is recorded in the background.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+</dict>
+</plist>

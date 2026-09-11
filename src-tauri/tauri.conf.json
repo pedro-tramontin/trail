@@ -55,7 +55,8 @@
     "macOS": {
       "signingIdentity": "-",
       "hardenedRuntime": false,
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "../src-tauri/Info.plist"
     }
   }
 }
