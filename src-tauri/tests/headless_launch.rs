@@ -36,6 +36,101 @@
 
 use std::time::Duration;
 
+/// Compile-time signature assertion for `start_collectors`.
+///
+/// Background: on 2026-09-11 the user hit
+///   `thread 'main' panicked at src-tauri/src/lib.rs:181:22:
+///    there is no reactor running, must be called from the context
+///    of a Tokio 1.x runtime`
+/// after the wizard's StepFinish 'Finish' button. Root cause:
+/// `start_collectors` (the IPC command) was declared `pub fn`
+/// (sync), so Tauri 2 dispatched it on its worker-thread pool —
+/// which has NO tokio runtime in scope. The function calls
+/// `tokio::spawn` (via `start_collectors_inner`) which requires
+/// a reactor and panicked.
+///
+/// Fix: mark `start_collectors` `async`. Tauri 2 dispatches
+/// `async` commands on the tokio runtime instead. This test
+/// pins that signature by binding a function reference to
+/// the expected `async` shape — a future revert to `pub fn`
+/// would fail this test at compile time, with a clear error
+/// pointing at this assertion.
+///
+/// (We can't easily test the actual IPC dispatch — Tauri's
+/// `mock_builder` doesn't run the setup closure synchronously,
+/// and a full Tauri runtime would drag in `keyring` + `cpal` +
+/// macOS-only `objc2` deps the Linux CI can't link. The
+/// compile-time signature check is the next best thing.)
+#[test]
+fn start_collectors_must_be_async() {
+    // Compile-time signature check. The helper below is generic
+    // over a `F: Fn(AppHandle) -> Fut` where `Fut: Future<Output
+    // = Result<(), String>>`. We pass `start_collectors` directly
+    // to it — if `start_collectors` were sync (`pub fn` returning
+    // `Result<(), String>`), the bound `Fut: Future<Output = ...>`
+    // wouldn't match (Result is not a Future), and this test
+    // would fail to compile.
+    //
+    // We never actually CALL `start_collectors` here because
+    // constructing a real `AppHandle` requires a running Tauri
+    // runtime. The bound check is purely at compile time.
+    fn assert_returns_future<F, Fut>(_f: F) -> bool
+    where
+        F: Fn(tauri::AppHandle) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        true
+    }
+    assert_returns_future(trail_lib::setup_bridge::start_collectors);
+}
+
+#[test]
+fn start_collectors_inner_uses_tauri_async_runtime() {
+    // Compile-time check: the function's second return-tuple
+    // element must be `tauri::async_runtime::JoinHandle<()>`
+    // (returned by `tauri::async_runtime::spawn`), not
+    // `tokio::task::JoinHandle<()>` (returned by `tokio::spawn`).
+    // A future revert to `tokio::spawn` would fail this test
+    // at compile time with E0308 (verified). See the
+    // `start_collectors_must_be_async` doc comment above for the
+    // full failure history.
+    //
+    // We exercise the type check by actually calling
+    // `start_collectors_inner` (with a minimal valid config) and
+    // passing the returned handle through a typed helper. This
+    // leaves the spawned scheduler task parked for the rest of
+    // the test binary's lifetime — Tauri's async runtime is
+    // process-scoped (OnceLock-initialized) so this is the
+    // same behavior as production. The task itself is parked in
+    // `pending::<()>().await` (a few hundred bytes of stack);
+    // it doesn't accumulate unboundedly across tests.
+    fn assert_uses_tauri_runtime(
+        h: tauri::async_runtime::JoinHandle<()>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        h
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join(".trail");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
+    let config_path = config_dir.join("config.json");
+    let minimal_config = r#"{
+        "claude_sessions_paths": [],
+        "github": {"mode": "gh_cli", "host": "github.com"},
+        "calendar_ics": "/nonexistent.ics",
+        "calendar": {"kind": "ics", "path": "/nonexistent.ics"},
+        "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
+        "review_time": "18:00",
+        "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},
+        "transport": {"type": "ssh", "host": "vm.example.com", "port": 22, "user": "trail", "auth": {"auth": "public_key", "path": "/tmp/trail-test-key"}, "remote_path": "/tmp/trail-remote"},
+        "raw_retention_days": 7,
+        "pending_installs": []
+    }"#;
+    std::fs::write(&config_path, minimal_config).expect("write minimal config");
+    let (_orch, sched_task) =
+        trail_lib::start_collectors_inner(&config_path).expect("start_collectors_inner ok");
+    let _typed = assert_uses_tauri_runtime(sched_task);
+}
+
 /// `app.manage(...)` shim for the no-runtime test path. The
 /// real setup closure's `app.manage(...)` call requires an
 /// `AppHandle`; in the test we use a plain `Mutex<Option<State>>`
@@ -180,8 +275,12 @@ fn headless_launch_no_config_boot_succeeds_then_collectors_come_up_after_write()
     // `std::future::pending::<()>().await` so it stays alive
     // until runtime teardown).
     std::thread::sleep(Duration::from_millis(500));
+    // `sched_task` is now `tauri::async_runtime::JoinHandle<()>`
+    // (post-fix — see lib.rs's `start_collectors_inner`); the
+    // `is_finished` method lives on the inner tokio handle,
+    // accessed via `.inner()`.
     assert!(
-        !sched_task.is_finished(),
+        !sched_task.inner().is_finished(),
         "scheduler task should still be alive 500ms after start_collectors"
     );
 }
