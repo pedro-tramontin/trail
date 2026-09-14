@@ -591,15 +591,25 @@ pub fn run() {
             // imperatively. When a config already exists on disk
             // (the `Ready` arm ran), open the `main` shell; when
             // there's no config yet (the `AwaitingOnboarding` arm
-            // ran), open the `onboarding` wizard. This is the
-            // counterpart to the `tauri.conf.json` `"windows":
-            // [{ "label": "main", "visible": false }]` fallback —
-            // the fallback registers the window with the Tauri
-            // runtime so `WebviewWindowBuilder::new` doesn't
-            // panic on a duplicate label, and `visible: false`
-            // keeps the empty default window from flashing before
-            // the setup closure runs. The setup closure then
-            // shows the appropriate window per the `ConfigState`.
+            // ran), open the `onboarding` wizard.
+            //
+            // Coordinate with the `tauri.conf.json` `"windows":
+            // [{ "label": "main", "visible": false }]` fallback:
+            // the runtime auto-creates that stub BEFORE this
+            // setup closure runs, so on the `Ready` boot path
+            // the `"main"` webview is already registered. The
+            // builder call inside `build_initial_window` would
+            // collide on the duplicate label and panic
+            // (`a webview with label 'main' already exists`,
+            // which across the `extern "C"` setup-hook boundary
+            // aborts the process via `panic_cannot_unwind` — the
+            // macOS crash reported 2026-09-14). `build_initial_window`
+            // handles this idempotently: when a webview with the
+            // requested label is already present it reuses it
+            // (`.show()` + `.unminimize()` as needed) instead of
+            // re-building. `visible: false` in the fallback keeps
+            // the empty default window from flashing before this
+            // closure decides whether to show it.
             //
             // Placed BEFORE the §9.2 tray-icon build so the main
             // window exists when the tray-icon left-click handler
