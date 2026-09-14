@@ -341,10 +341,11 @@ mod tests {
     /// `panic_cannot_unwind`. After the fix, `build_initial_window`
     /// detects the pre-existing window and reuses it (calling
     /// `.show()` + `.unminimize()` + `.set_title()` + `.set_size()`
-    /// + `.set_focus()` on the live handle) instead of building
-    /// a duplicate. This test guards both halves of the contract:
-    /// "returns Ok even when the label is taken" and
-    /// "returns the existing handle, not a freshly built one".
+    /// + `.set_focus()` on the live handle) instead of building a
+    /// duplicate. This test guards both halves of the contract:
+    /// `build_initial_window` must return `Ok` even when the label is
+    /// taken, and the returned handle must be the existing one rather
+    /// than a freshly built duplicate.
     ///
     /// Uses `tauri::test::mock_builder` (same as the §9.1
     /// integration test) — the §9.1 file-level doc notes that
@@ -355,6 +356,7 @@ mod tests {
     /// ourselves to pre-register the label, then call
     /// `build_initial_window` and assert it doesn't panic.
     #[test]
+    #[allow(clippy::doc_lazy_continuation)]
     fn build_initial_window_reuses_existing_main_webview() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -398,7 +400,7 @@ mod tests {
         // inside `WebviewWindowBuilder::build` and abort the
         // process. Post-fix, it returns the pre-existing handle
         // intact.
-        let result = build_initial_window(&app.handle(), &ConfigState::Ready(Box::new(cfg)));
+        let result = build_initial_window(app.handle(), &ConfigState::Ready(Box::new(cfg)));
         let reused = result.expect(
             "build_initial_window must return Ok(existing handle) when a webview with the \
              requested label already exists — this is the regression PR #301 fixed",
@@ -447,7 +449,7 @@ mod tests {
         .expect("pre-register onboarding webview window");
         // No config on disk in this test — the production path is
         // `ConfigState::AwaitingOnboarding`.
-        let result = build_initial_window(&app.handle(), &ConfigState::AwaitingOnboarding);
+        let result = build_initial_window(app.handle(), &ConfigState::AwaitingOnboarding);
         assert!(
             result.is_ok(),
             "build_initial_window must return Ok when the wizard label is taken; \
