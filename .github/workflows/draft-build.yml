@@ -366,7 +366,7 @@ jobs:
         # the same order (pnpm/action-setup first, then setup-node).
         uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
 
       - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v7
@@ -456,7 +456,7 @@ jobs:
         # pnpm/action-setup comment for the full explanation.
         uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
 
       - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v7
@@ -552,7 +552,7 @@ jobs:
         # pnpm/action-setup comment for the full explanation.
         uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
 
       - name: Setup Node (with pnpm cache)
         uses: actions/setup-node@v7
@@ -827,7 +827,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0
@@ -908,7 +908,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0
@@ -969,7 +969,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.34.5
+          version: 12.4.1
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0

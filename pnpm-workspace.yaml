@@ -1,2 +1,25 @@
+# `pnpm.allowBuilds` whitelist for pnpm 11+ post-install scripts.
+#
+# pnpm 11 tightened the post-install script allowlist and pnpm 12
+# makes the policy fail-loud (`ERR_PNPM_IGNORED_BUILDS`). esbuild's
+# post-install downloads + chmods the platform-specific esbuild
+# binary — without it, `vite dev` / `vite build` fail with
+# `spawn esbuild ENOENT` at first run.
+#
+# Only esbuild needs this — verified by grep on pnpm-lock.yaml
+# (only esbuild@0.21.5 has `hasBin: true` + a postinstall hook;
+# the rest of the lockfile is runtime/deps).
+#
+# Note: pnpm 11/12 reads `allowBuilds` from `pnpm-workspace.yaml`
+# (NOT `package.json#pnpm.allowBuilds` as I first tried — the
+# Rust type is `pub allow_builds: HashMap<String, bool>` and the
+# doc comment in pnpm 12's source explicitly says
+# "`pnpm.allowBuilds` from `pnpm-workspace.yaml`"). Putting it in
+# package.json's `pnpm` section is silently ignored.
+#
+# When adding new deps with postinstall hooks in the future: add the
+# package name here. Anything not in the whitelist fails the build
+# with `ERR_PNPM_IGNORED_BUILDS` pointing at this file.
+
 allowBuilds:
-  esbuild: set this to true or false
+  esbuild: true
