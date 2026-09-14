@@ -140,7 +140,10 @@ pub fn build_initial_window<R: tauri::Runtime>(
     if let Some(existing) = app.get_webview_window(descriptor.label) {
         // Real boot path on macOS — `tauri.conf.json` registers a
         // `"main"` stub that Tauri auto-creates before the setup
-        // closure runs. Bring it forward to the requested visibility
+        // closure runs. Bring it forward to the requested visibility,
+        // apply the builder-side props (title + inner_size, which the
+        // `tauri.conf.json` stub may have set differently — e.g. a
+        // future config could set a wider main window), focus it,
         // and reuse the same handle. Don't re-navigate: the
         // `tauri.conf.json` entry's `frontendDist` already points at
         // the same `index.html` we'd `.build()` against, and re-loading
@@ -150,6 +153,47 @@ pub fn build_initial_window<R: tauri::Runtime>(
             descriptor.label,
             descriptor.visible
         );
+        // Re-apply the same title the fresh-build branch would,
+        // matching the builder-configured chrome rather than
+        // whatever the `tauri.conf.json` stub happened to declare.
+        // `WebviewWindowBuilder::new(...).title(...)` doesn't call
+        // `window.set_title()` itself — it sets the title on the
+        // builder, which is plumbed into the wry `WindowMessage`
+        // pipeline at `build()` time. The pre-registered stub
+        // already had its title set when it was first created, so
+        // calling `set_title` here overwrites whatever the stub
+        // config left in place. Without this call, a non-default
+        // `tauri.conf.json` would silently leak into the
+        // imperative builder's intended title — divergence the
+        // user wouldn't notice until they shipped a build with a
+        // different conf and the chrome drifted.
+        let title = if descriptor.label == "main" {
+            "Trail"
+        } else {
+            "Trail — Onboarding"
+        };
+        if let Err(e) = existing.set_title(title) {
+            tracing::warn!(
+                "failed to set_title on reused initial window label={}: {e}; continuing",
+                descriptor.label
+            );
+        }
+        // Same rationale for inner_size. The `tauri.conf.json`
+        // stub may have set `width` / `height` independently of
+        // what `build_initial_window` would have requested on a
+        // fresh build; we want the imperative builder to be the
+        // one source of truth for the live window's geometry.
+        let (width, height) = if descriptor.label == "main" {
+            (900.0, 700.0)
+        } else {
+            (720.0, 560.0)
+        };
+        if let Err(e) = existing.set_size(tauri::PhysicalSize::new(width, height)) {
+            tracing::warn!(
+                "failed to set_size on reused initial window label={}: {e}; continuing",
+                descriptor.label
+            );
+        }
         if descriptor.visible {
             if let Err(e) = existing.show() {
                 tracing::warn!(
@@ -160,6 +204,21 @@ pub fn build_initial_window<R: tauri::Runtime>(
             if let Err(e) = existing.unminimize() {
                 tracing::warn!(
                     "failed to unminimize reused initial window label={}: {e}; continuing",
+                    descriptor.label
+                );
+            }
+            // `.show()` alone brings the window forward but does
+            // NOT focus it on macOS — see `tao-0.35.3`
+            // `WindowExtMacOS::show()` (which only calls
+            // `makeKeyAndOrderFront:` when `.is_visible()` is
+            // false). Cold-booting into the main shell behind a
+            // previous Tray-icon menu is the bug surface this
+            // closes: the user would have to click the tray to
+            // bring Trail forward even though the window was
+            // technically visible.
+            if let Err(e) = existing.set_focus() {
+                tracing::warn!(
+                    "failed to set_focus on reused initial window label={}: {e}; continuing",
                     descriptor.label
                 );
             }
