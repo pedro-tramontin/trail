@@ -330,4 +330,128 @@ mod tests {
             "wizard window must start visible after the setup closure decides to show it"
         );
     }
+
+    /// PR #301 (2026-09-14) — regression test for the macOS
+    /// duplicate-webview abort. Before the fix, calling
+    /// `build_initial_window` after the `tauri.conf.json` runtime
+    /// had already auto-registered a `"main"` webview window
+    /// would `WebviewWindowBuilder::new(app, "main", ...).build()`
+    /// against the same label, panicking with `a webview with
+    /// label 'main' already exists` and aborting via
+    /// `panic_cannot_unwind`. After the fix, `build_initial_window`
+    /// detects the pre-existing window and reuses it (calling
+    /// `.show()` + `.unminimize()` + `.set_title()` + `.set_size()`
+    /// + `.set_focus()` on the live handle) instead of building
+    /// a duplicate. This test guards both halves of the contract:
+    /// "returns Ok even when the label is taken" and
+    /// "returns the existing handle, not a freshly built one".
+    ///
+    /// Uses `tauri::test::mock_builder` (same as the §9.1
+    /// integration test) — the §9.1 file-level doc notes that
+    /// `mock_builder().build()` does NOT run the user setup
+    /// closure synchronously, which is exactly what we want here:
+    /// we don't want the production setup closure's `build_initial_window`
+    /// call to interfere. We invoke `WebviewWindowBuilder::build()`
+    /// ourselves to pre-register the label, then call
+    /// `build_initial_window` and assert it doesn't panic.
+    #[test]
+    fn build_initial_window_reuses_existing_main_webview() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app for PR #301 regression test");
+        // Pre-register a "main" webview window the way
+        // `tauri.conf.json` does in production. After this call,
+        // `app.get_webview_window("main")` returns Some(...).
+        let preexisting = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .expect("pre-register main webview window");
+        // Construct a minimal `ConfigState::Ready(_)` for the
+        // post-onboarding boot path this fix covers. The real
+        // `Config` parser is a heavyweight dependency, so use the
+        // same tempdir+minimal-JSON pattern as
+        // `window_descriptor_for_ready_opens_main_shell`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = tmp.path().join("config.json");
+        std::fs::write(
+            &cfg_path,
+            r#"{
+                "claude_sessions_paths": [],
+                "github": {"mode": "gh_cli", "host": "github.com"},
+                "calendar_ics": "/nonexistent.ics",
+                "calendar": {"kind": "ics", "path": "/nonexistent.ics"},
+                "voice": {"enabled": true, "hotkey": "ctrl+shift+space", "transcriber": "whisper_cpp", "model": "base.en"},
+                "review_time": "18:00",
+                "summarizer": {"model": "gpt-oss:20b", "model_provider": "local", "anonymization_strictness": "aggressive", "use_generic_categories": true},
+                "transport": {"type": "ssh", "host": "vm.example.com", "port": 22, "user": "trail", "auth": {"auth": "public_key", "path": "/tmp/trail-test-key"}, "remote_path": "/tmp/trail-remote"},
+                "raw_retention_days": 7,
+                "pending_installs": []
+            }"#,
+        )
+        .expect("write minimal config");
+        let cfg = crate::config::load_config(&cfg_path).expect("load minimal config");
+        // The actual regression assertion. Pre-fix, this would
+        // panic with "a webview with label 'main' already exists"
+        // inside `WebviewWindowBuilder::build` and abort the
+        // process. Post-fix, it returns the pre-existing handle
+        // intact.
+        let result = build_initial_window(&app.handle(), &ConfigState::Ready(Box::new(cfg)));
+        let reused = result.expect(
+            "build_initial_window must return Ok(existing handle) when a webview with the \
+             requested label already exists — this is the regression PR #301 fixed",
+        );
+        assert_eq!(
+            reused.label(),
+            preexisting.label(),
+            "reused handle must match the pre-registered label"
+        );
+        // Defensive: the second branch (fresh build) would create
+        // a *different* WebviewWindow handle. We can't directly
+        // assert handle-inequality (WebviewWindow doesn't expose
+        // a public ID getter in 2.11.5), but we CAN assert that
+        // `app.get_webview_window("main")` still returns exactly
+        // the same handle that was reused — i.e. the registry
+        // didn't accidentally add a second one.
+        let registered = app
+            .get_webview_window("main")
+            .expect("main webview must remain registered after build_initial_window");
+        assert_eq!(
+            reused, registered,
+            "build_initial_window must return the same handle that was pre-registered, \
+             not build a duplicate and return the new one"
+        );
+    }
+
+    /// PR #301 — same regression as above, but for the
+    /// `AwaitingOnboarding` / wizard label. Tauri does not
+    /// pre-register the `onboarding` label (only `main` is in
+    /// `tauri.conf.json`), so this test would have passed even
+    /// pre-fix — but it's worth pinning so a future config
+    /// change adding an `onboarding` stub to `tauri.conf.json`
+    /// (which would re-trigger the same panic) is caught by the
+    /// same harness.
+    #[test]
+    fn build_initial_window_reuses_existing_onboarding_webview() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app for PR #301 onboarding regression test");
+        let _preexisting = tauri::WebviewWindowBuilder::new(
+            &app,
+            "onboarding",
+            tauri::WebviewUrl::App("index.html?wizard=1".into()),
+        )
+        .build()
+        .expect("pre-register onboarding webview window");
+        // No config on disk in this test — the production path is
+        // `ConfigState::AwaitingOnboarding`.
+        let result = build_initial_window(&app.handle(), &ConfigState::AwaitingOnboarding);
+        assert!(
+            result.is_ok(),
+            "build_initial_window must return Ok when the wizard label is taken; \
+             got {result:?}"
+        );
+    }
 }
