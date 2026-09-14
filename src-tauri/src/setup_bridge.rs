@@ -120,13 +120,54 @@ pub fn window_descriptor_for(state: &crate::ConfigState) -> InitialWindowDescrip
 /// Errors propagate via `?` (e.g. WebviewWindow construction
 /// failures, missing icon, etc.) — the setup closure's `Box<dyn
 /// std::error::Error>` return type handles them.
+///
+/// **Idempotent at startup**: if a webview with the requested label
+/// already exists (Tauri's runtime pre-registers any `tauri.conf.json`
+/// `windows` entry before the setup closure runs, so on the
+/// `ConfigState::Ready` boot path the `"main"` webview is present by
+/// the time we get here), re-use it and `.show()` it instead of
+/// `.build()`ing a duplicate. `.build()` would panic with `a webview
+/// with label 'main' already exists`, which crosses the
+/// `extern "C"` setup-hook boundary and aborts the process via
+/// `panic_cannot_unwind` — the macOS crash reported on 2026-09-14.
+/// This matches the defensive `if let Some(win) = ...` pattern the
+/// tray-icon click handlers in `window_bridge.rs` already use.
 pub fn build_initial_window<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &crate::ConfigState,
 ) -> tauri::Result<tauri::WebviewWindow<R>> {
     let descriptor = window_descriptor_for(state);
+    if let Some(existing) = app.get_webview_window(descriptor.label) {
+        // Real boot path on macOS — `tauri.conf.json` registers a
+        // `"main"` stub that Tauri auto-creates before the setup
+        // closure runs. Bring it forward to the requested visibility
+        // and reuse the same handle. Don't re-navigate: the
+        // `tauri.conf.json` entry's `frontendDist` already points at
+        // the same `index.html` we'd `.build()` against, and re-loading
+        // would cause a visible flash on cold boot.
+        tracing::info!(
+            "reusing pre-existing initial window label={} (visibility requested={})",
+            descriptor.label,
+            descriptor.visible
+        );
+        if descriptor.visible {
+            if let Err(e) = existing.show() {
+                tracing::warn!(
+                    "failed to show reused initial window label={}: {e}; continuing",
+                    descriptor.label
+                );
+            }
+            if let Err(e) = existing.unminimize() {
+                tracing::warn!(
+                    "failed to unminimize reused initial window label={}: {e}; continuing",
+                    descriptor.label
+                );
+            }
+        }
+        return Ok(existing);
+    }
     tracing::info!(
-        "opening initial window label={} url={} (config_present={})",
+        "building initial window label={} url={} (config_present={})",
         descriptor.label,
         descriptor.url,
         matches!(state, crate::ConfigState::Ready(_))
