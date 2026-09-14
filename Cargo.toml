@@ -31,7 +31,7 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 ssh2 = "0.9.6"
 async-trait = "0.1.92"
-base64 = "0.22"
+base64 = "0.23.1"
 # §X-7 — `ed25519-dalek` is pulled in transitively by `ssh-key` for key
 # generation, but we need it as a direct dep with the `pkcs8` feature
 # enabled to re-serialize the stored keypair from OpenSSH PEM (the
