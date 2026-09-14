@@ -37,8 +37,8 @@
     "@tauri-apps/plugin-os": "^2.3.2"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
+    "allowBuilds": {
+      "esbuild": true
+    }
   }
 }
