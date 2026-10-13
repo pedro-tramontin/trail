@@ -149,7 +149,7 @@ rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"
 # resolves to one version. `target_os = "macos"` gate is downstream —
 # these crates don't compile on Linux (block2 + objc2 both transitively
 # link CoreFoundation) so they only land on macOS at the call site.
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 block2 = "0.6.2"
 # macOS EventKit binding for the calendar collector's macOS binary
