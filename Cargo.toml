@@ -129,7 +129,7 @@ tokio-util = "0.7.20"
 # Phase 5 §5.5 — parking_lot::Mutex wraps the lazy whisper context
 # (faster than std::sync::Mutex under low contention), and uuid
 # provides v4 entry_ids for voice store entries.
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 uuid = { version = "1.28.0", features = ["v4"] }
 # Phase 5 §5.7+ — rusqlite for the browser-history collector (plan
 # `.hermes/plans/2026-08-11_browser-history-collector.md`). The
