@@ -90,7 +90,7 @@ jobs:
   # ----- Linux build (.deb + AppImage) -----
   build-linux:
     name: Build (Linux)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
