@@ -29,7 +29,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
-ssh2 = "0.9.6"
+ssh2 = "0.9.7"
 async-trait = "0.1.92"
 base64 = "0.23.1"
 # §X-7 — `ed25519-dalek` is pulled in transitively by `ssh-key` for key
